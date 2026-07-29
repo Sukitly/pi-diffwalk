@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { computeReviewCoverage } from "../src/review-coverage.ts";
-import { computeReviewDelta } from "../src/review-delta.ts";
+import { computeReviewDelta, ReviewDeltaError } from "../src/review-delta.ts";
 import {
 	appendReviewRound,
 	createReviewRound,
@@ -215,7 +215,11 @@ test("rejects malformed round snapshot references and hunk coverage", () => {
 				{ ...delta, currentSnapshotId: otherSnapshotId },
 				coverage,
 			),
-		/Review delta references snapshot/,
+		(error: unknown) => {
+			assert.ok(error instanceof ReviewDeltaError);
+			assert.match(error.message, /Review delta references snapshot/);
+			return true;
+		},
 	);
 	assert.throws(
 		() =>
@@ -238,7 +242,11 @@ test("rejects malformed round snapshot references and hunk coverage", () => {
 				},
 				coverage,
 			),
-		/Review delta contains unknown hunk/,
+		(error: unknown) => {
+			assert.ok(error instanceof ReviewDeltaError);
+			assert.match(error.message, /Review delta contains unknown hunk/);
+			return true;
+		},
 	);
 	assert.throws(
 		() =>
@@ -248,12 +256,20 @@ test("rejects malformed round snapshot references and hunk coverage", () => {
 				{ ...delta, hunks: [...delta.hunks, ...delta.hunks] },
 				coverage,
 			),
-		/Review delta contains duplicate hunk/,
+		(error: unknown) => {
+			assert.ok(error instanceof ReviewDeltaError);
+			assert.match(error.message, /Review delta contains duplicate hunk/);
+			return true;
+		},
 	);
 	assert.throws(
 		() =>
 			createReviewRound(series, snapshot, { ...delta, hunks: [] }, coverage),
-		/Review delta does not cover hunk/,
+		(error: unknown) => {
+			assert.ok(error instanceof ReviewDeltaError);
+			assert.match(error.message, /does not cover snapshot hunk/);
+			return true;
+		},
 	);
 
 	const validRecord = coverage.records[0];

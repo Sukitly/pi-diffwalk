@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { listReviewableHunks } from "./review-delta.ts";
+import {
+	assertReviewDeltaMatchesSnapshot,
+	listSnapshotHunks,
+} from "./review-delta.ts";
 import type {
 	HunkId,
 	HunkReviewRecord,
@@ -129,11 +132,7 @@ function validateRoundData(
 	expectedBaselineRoundId: ReviewRoundId | undefined,
 	priorRoundIds: ReadonlySet<ReviewRoundId>,
 ): void {
-	if (delta.currentSnapshotId !== snapshot.id) {
-		throw new ReviewSeriesError(
-			`Review delta references snapshot ${delta.currentSnapshotId}, not ${snapshot.id}.`,
-		);
-	}
+	assertReviewDeltaMatchesSnapshot(snapshot, delta);
 	if (coverage.snapshotId !== snapshot.id) {
 		throw new ReviewSeriesError(
 			`Review coverage references snapshot ${coverage.snapshotId}, not ${snapshot.id}.`,
@@ -146,9 +145,11 @@ function validateRoundData(
 		);
 	}
 
-	const hunks = listReviewableHunks(snapshot);
+	const hunks = listSnapshotHunks(snapshot);
 	const hunksById = new Map(hunks.map((hunk) => [hunk.id, hunk]));
-	const requirements = validateRequirements(delta, hunksById);
+	const requirements = new Map(
+		delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
+	);
 	const records = validateCoverageRecords(coverage.records, hunksById);
 	for (const hunk of hunks) {
 		const requirement = requirements.get(hunk.id);
@@ -160,34 +161,6 @@ function validateRoundData(
 		}
 		validateRecordProvenance(identity.id, priorRoundIds, requirement, record);
 	}
-}
-
-function validateRequirements(
-	delta: ReviewDelta,
-	hunksById: ReadonlyMap<HunkId, { readonly id: HunkId }>,
-): Map<HunkId, HunkReviewRequirement> {
-	const requirements = new Map<HunkId, HunkReviewRequirement>();
-	for (const requirement of delta.hunks) {
-		if (!hunksById.has(requirement.hunkId)) {
-			throw new ReviewSeriesError(
-				`Review delta contains unknown hunk ${requirement.hunkId}.`,
-			);
-		}
-		if (requirements.has(requirement.hunkId)) {
-			throw new ReviewSeriesError(
-				`Review delta contains duplicate hunk ${requirement.hunkId}.`,
-			);
-		}
-		requirements.set(requirement.hunkId, requirement);
-	}
-	for (const hunkId of hunksById.keys()) {
-		if (!requirements.has(hunkId)) {
-			throw new ReviewSeriesError(
-				`Review delta does not cover hunk ${hunkId}.`,
-			);
-		}
-	}
-	return requirements;
 }
 
 function validateCoverageRecords(

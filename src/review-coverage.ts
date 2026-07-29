@@ -1,4 +1,8 @@
-import { listReviewableHunks } from "./review-delta.ts";
+import {
+	assertReviewDeltaMatchesSnapshot,
+	isNeedsReviewReasonSkippable,
+	listSnapshotHunks,
+} from "./review-delta.ts";
 import type {
 	HunkId,
 	HunkReviewRecord,
@@ -32,15 +36,12 @@ export function computeReviewCoverage(
 	delta: ReviewDelta,
 	input: ReviewCoverageInput,
 ): ReviewCoverage {
-	if (delta.currentSnapshotId !== snapshot.id) {
-		throw new ReviewCoverageError(
-			`Review delta references snapshot ${delta.currentSnapshotId}, not ${snapshot.id}.`,
-		);
-	}
-
-	const hunks = listReviewableHunks(snapshot);
+	assertReviewDeltaMatchesSnapshot(snapshot, delta);
+	const hunks = listSnapshotHunks(snapshot);
 	const hunksById = new Map(hunks.map((hunk) => [hunk.id, hunk]));
-	const requirements = validateRequirements(delta, hunksById);
+	const requirements = new Map(
+		delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
+	);
 	const commentedHunkIds = validateCommentedHunks(
 		input.commentedHunkIds,
 		hunksById,
@@ -96,34 +97,6 @@ export function computeReviewCoverage(
 	return { snapshotId: snapshot.id, records };
 }
 
-function validateRequirements(
-	delta: ReviewDelta,
-	hunksById: ReadonlyMap<HunkId, { readonly id: HunkId }>,
-): Map<HunkId, HunkReviewRequirement> {
-	const requirements = new Map<HunkId, HunkReviewRequirement>();
-	for (const requirement of delta.hunks) {
-		if (!hunksById.has(requirement.hunkId)) {
-			throw new ReviewCoverageError(
-				`Review delta contains unknown hunk ${requirement.hunkId}.`,
-			);
-		}
-		if (requirements.has(requirement.hunkId)) {
-			throw new ReviewCoverageError(
-				`Review delta contains duplicate hunk ${requirement.hunkId}.`,
-			);
-		}
-		requirements.set(requirement.hunkId, requirement);
-	}
-	for (const hunkId of hunksById.keys()) {
-		if (!requirements.has(hunkId)) {
-			throw new ReviewCoverageError(
-				`Review delta does not cover hunk ${hunkId}.`,
-			);
-		}
-	}
-	return requirements;
-}
-
 function validateCommentedHunks(
 	commentedHunks: readonly HunkId[],
 	hunksById: ReadonlyMap<HunkId, { readonly id: HunkId }>,
@@ -155,6 +128,11 @@ function validateSkippedHunks(
 		if (requirement.type === "carried-forward") {
 			throw new ReviewCoverageError(
 				`Carried-forward hunk ${skipped.hunkId} cannot be skipped.`,
+			);
+		}
+		if (!isNeedsReviewReasonSkippable(requirement.reason)) {
+			throw new ReviewCoverageError(
+				`Hunk ${skipped.hunkId} has an unresolved comment and cannot be skipped.`,
 			);
 		}
 		if (skipped.reason.trim().length === 0) {

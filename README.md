@@ -50,7 +50,7 @@ The review flow will be:
 2. Each file and hunk receives a stable identifier.
 3. The current agent reads the task, the affected code, and the diff.
 4. The agent constructs a review route using the stable hunk identifiers.
-5. DiffWalk validates that every hunk is covered once or explicitly skipped with a reason.
+5. DiffWalk validates that every hunk requiring review is covered once or explicitly skipped with a reason.
 6. The TUI walks the reviewer through the route one review unit at a time.
 7. The reviewer adds comments to specific lines as needed.
 8. A final page shows every comment before submission.
@@ -76,6 +76,8 @@ This is a default reasoning pattern, not a fixed file order. The agent may choos
 ## Review Units
 
 A review unit is one conceptual stop in the walkthrough. It may contain one hunk or several tightly related hunks.
+
+In an incremental review, the planned route will contain only hunks marked `needs-review`. Unchanged hunks already reviewed without comment will be carried forward outside the planned route. They will remain visible in the review inventory and coverage summary, and the human will be able to inspect them explicitly without requiring the agent to route or skip them again.
 
 Each unit should include:
 
@@ -148,7 +150,9 @@ DiffWalk will enforce the following rules:
 
 - Git output is the source of truth for all displayed changes.
 - The snapshot is immutable for the duration of a review.
-- Every reviewable hunk must appear exactly once in the route.
+- Every hunk marked `needs-review` must appear exactly once in the route or be explicitly skipped.
+- A hunk marked `unresolved-comment` cannot be skipped.
+- Carried-forward hunks remain visible outside the planned route.
 - A skipped hunk must include a visible reason.
 - Unknown or duplicate hunk identifiers cause route validation to fail.
 - A changed worktree is detected before comment submission.
@@ -177,13 +181,19 @@ The expected source layout is:
 src/
   index.ts              Command and tool registration
   git-diff.ts           Snapshot collection and diff parsing
-  route-validation.ts   Hunk coverage and route validation
+  review-delta.ts       Incremental hunk classification and delta validation
+  route-validation.ts   Route coverage, ordering, and skip validation
+  review-coverage.ts    Submitted hunk outcome calculation
+  review-series.ts      Completed review round lifecycle
   review-ui.ts           Interactive TUI
   prompts.ts             Agent instructions for route construction
   types.ts               Shared data structures and schemas
 test/
   git-diff.test.ts
+  review-delta.test.ts
   route-validation.test.ts
+  review-coverage.test.ts
+  review-series.test.ts
 ```
 
 The final package will be a pi extension. Installation instructions will be added after the first working release.

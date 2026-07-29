@@ -84,13 +84,19 @@ Use this source layout unless an approved plan establishes a better one:
 src/
   index.ts
   git-diff.ts
+  review-delta.ts
   route-validation.ts
+  review-coverage.ts
+  review-series.ts
   review-ui.ts
   prompts.ts
   types.ts
 test/
   git-diff.test.ts
+  review-delta.test.ts
   route-validation.test.ts
+  review-coverage.test.ts
+  review-series.test.ts
 ```
 
 Responsibilities:
@@ -99,7 +105,10 @@ Responsibilities:
 |---|---|
 | `src/index.ts` | Register `/review`, register the guided review tool, and coordinate the workflow |
 | `src/git-diff.ts` | Capture repository state, parse unified diffs, include untracked files, and assign stable identifiers |
+| `src/review-delta.ts` | Classify snapshot hunks against the previous completed round and validate delta coverage |
 | `src/route-validation.ts` | Validate route references, coverage, ordering, and explicit skips |
+| `src/review-coverage.ts` | Materialize submitted review outcomes for every snapshot hunk |
+| `src/review-series.ts` | Create and append immutable completed review rounds |
 | `src/review-ui.ts` | Render the walkthrough, navigate diff lines, edit comments, and submit results |
 | `src/prompts.ts` | Tell the agent how to inspect the change and construct a semantic route |
 | `src/types.ts` | Define TypeScript types and TypeBox schemas shared across modules |
@@ -112,7 +121,7 @@ These rules define the product. Do not weaken them without explicit user approva
 
 1. Git output is the source of truth for displayed changes.
 2. The model may reference hunks by stable identifier, but it must not provide the patch text rendered to the user.
-3. Every reviewable hunk must appear exactly once in the review route or be explicitly skipped with a visible reason.
+3. Every hunk marked `needs-review` must appear exactly once in the review route or be explicitly skipped with a visible reason. Hunks marked `unresolved-comment` cannot be skipped. Carried-forward hunks remain visible in inventory and coverage but are excluded from the model-planned route.
 4. The extension must reject unknown, duplicate, or missing hunk references.
 5. A review uses a frozen snapshot. The implementation agent must not mutate the worktree during the walkthrough.
 6. The extension must detect worktree drift before submitting comments.
@@ -224,7 +233,7 @@ The snapshot collector must be deterministic. The same repository state and base
 
 ## Agent Protocol Rules
 
-The model plans the route only after the extension has created the snapshot inventory.
+The model plans the route only after the extension has created the snapshot inventory and calculated the review delta. The model-planned route covers `needs-review` hunks only. Carried-forward hunks remain available for explicit human inspection outside the planned route and must not be routed or skipped by the model.
 
 The route schema must reference stable identifiers and contain only explanatory metadata, such as:
 
@@ -242,9 +251,11 @@ A valid route must satisfy:
 
 - no unknown identifiers
 - no duplicate identifiers
-- no uncovered reviewable hunks
+- no uncovered `needs-review` hunks
+- no carried-forward hunk references
+- no skipped `unresolved-comment` hunk
 - no skipped hunk without a reason
-- at least one review unit when reviewable hunks exist
+- at least one review unit when `needs-review` hunks exist
 
 Return validation errors to the agent so it can repair the tool call. Do not silently repair a route in a way that could hide missing coverage.
 
