@@ -46,7 +46,9 @@ export type FileChangeStatus =
 	| "renamed"
 	| "copied"
 	| "mode-changed"
-	| "type-changed";
+	| "type-changed"
+	| "unmerged"
+	| "unknown";
 
 export interface FileChange {
 	readonly id: FileChangeId;
@@ -166,6 +168,7 @@ export interface NeedsReviewHunk {
 	readonly type: "needs-review";
 	readonly hunkId: HunkId;
 	readonly reason: NeedsReviewReason;
+	readonly previousFingerprint?: HunkFingerprint;
 }
 
 export interface CarriedForwardHunk {
@@ -192,11 +195,14 @@ export type HunkReviewDisposition =
 export type HunkReviewRecord =
 	| (HunkReviewRecordBase & {
 			readonly disposition: "reviewed-without-comment";
+			readonly reviewedInRoundId: ReviewRoundId;
 	  })
 	| (HunkReviewRecordBase & {
 			readonly disposition: "commented";
+			readonly commentedInRoundId: ReviewRoundId;
 	  })
 	| (HunkReviewRecordBase & {
 			readonly disposition: "skipped";
+			readonly skippedInRoundId: ReviewRoundId;
 			readonly skipReason: string;
 	  });
