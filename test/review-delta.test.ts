@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeReviewDelta, ReviewDeltaError } from "../src/review-delta.ts";
-import type { DiffHunk, HunkReviewRecord } from "../src/types.ts";
+import {
+	assertReviewDeltaMatchesSnapshot,
+	computeReviewDelta,
+	isNeedsReviewReasonSkippable,
+	ReviewDeltaError,
+} from "../src/review-delta.ts";
+import type { DiffHunk, HunkReviewRecord, ReviewDelta } from "../src/types.ts";
 import {
 	fingerprint,
 	hunkId,
@@ -63,6 +68,69 @@ test("marks every first-round hunk as new", () => {
 		{ type: "needs-review", hunkId: hunkId("h2"), reason: "new" },
 	]);
 	assert.deepEqual(delta.removedHunkFingerprints, []);
+});
+
+test("asserts that a review delta covers its snapshot exactly once", () => {
+	const snapshot = makeSnapshot("snapshot-1", [
+		{ id: "h1", fingerprint: "f1" },
+		{ id: "h2", fingerprint: "f2", path: "src/two.ts" },
+	]);
+	const valid = computeReviewDelta(snapshot);
+	const snapshotBefore = structuredClone(snapshot);
+	const validBefore = structuredClone(valid);
+	const firstRequirement = valid.hunks[0];
+	assert.ok(firstRequirement);
+	assert.doesNotThrow(() => assertReviewDeltaMatchesSnapshot(snapshot, valid));
+	assert.deepEqual(snapshot, snapshotBefore);
+	assert.deepEqual(valid, validBefore);
+
+	const invalidDeltas: readonly {
+		readonly delta: ReviewDelta;
+		readonly message: RegExp;
+	}[] = [
+		{
+			delta: {
+				...valid,
+				currentSnapshotId: makeSnapshot("other-snapshot", []).id,
+			},
+			message: /references snapshot/,
+		},
+		{
+			delta: {
+				...valid,
+				hunks: [
+					{ type: "needs-review", hunkId: hunkId("unknown"), reason: "new" },
+				],
+			},
+			message: /contains unknown hunk/,
+		},
+		{
+			delta: { ...valid, hunks: [firstRequirement, firstRequirement] },
+			message: /contains duplicate hunk/,
+		},
+		{
+			delta: { ...valid, hunks: [firstRequirement] },
+			message: /does not cover snapshot hunk h2/,
+		},
+	];
+	for (const invalid of invalidDeltas) {
+		assert.throws(
+			() => assertReviewDeltaMatchesSnapshot(snapshot, invalid.delta),
+			(error: unknown) => {
+				assert.ok(error instanceof ReviewDeltaError);
+				assert.match(error.message, invalid.message);
+				return true;
+			},
+		);
+	}
+});
+
+test("defines skip eligibility for every needs-review reason", () => {
+	assert.equal(isNeedsReviewReasonSkippable("unresolved-comment"), false);
+	assert.equal(isNeedsReviewReasonSkippable("new"), true);
+	assert.equal(isNeedsReviewReasonSkippable("changed"), true);
+	assert.equal(isNeedsReviewReasonSkippable("previously-skipped"), true);
+	assert.equal(isNeedsReviewReasonSkippable("ambiguous-match"), true);
 });
 
 test("carries an unchanged reviewed hunk with its original review provenance", () => {

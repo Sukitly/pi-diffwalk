@@ -4,6 +4,7 @@ import {
 	computeReviewCoverage,
 	ReviewCoverageError,
 } from "../src/review-coverage.ts";
+import { ReviewDeltaError } from "../src/review-delta.ts";
 import type { ReviewDelta } from "../src/types.ts";
 import {
 	fingerprint,
@@ -263,6 +264,37 @@ test("rejects mismatched snapshots, unknown skips, and carried-forward skips", (
 	);
 });
 
+test("rejects skipping a hunk with an unresolved comment", () => {
+	const snapshot = makeSnapshot("snapshot-1", [
+		{ id: "h1", fingerprint: "f1" },
+	]);
+	const delta: ReviewDelta = {
+		currentSnapshotId: snapshot.id,
+		hunks: [
+			{
+				type: "needs-review",
+				hunkId: hunkId("h1"),
+				reason: "unresolved-comment",
+				previousFingerprint: fingerprint("previous-f1"),
+			},
+		],
+		removedHunkFingerprints: [],
+	};
+
+	assert.throws(
+		() =>
+			computeReviewCoverage(roundId("round-2"), snapshot, delta, {
+				commentedHunkIds: [],
+				skippedHunks: [{ hunkId: hunkId("h1"), reason: "Agent skip" }],
+			}),
+		(error: unknown) => {
+			assert.ok(error instanceof ReviewCoverageError);
+			assert.match(error.message, /unresolved comment and cannot be skipped/);
+			return true;
+		},
+	);
+});
+
 test("is deterministic and does not mutate its inputs", () => {
 	const snapshot = makeSnapshot("snapshot-1", [
 		{ id: "h1", fingerprint: "f1" },
@@ -297,7 +329,7 @@ test("is deterministic and does not mutate its inputs", () => {
 	assert.deepEqual(input, inputBefore);
 });
 
-test("rejects a delta with missing or duplicate hunk coverage", () => {
+test("propagates ReviewDeltaError for malformed delta coverage", () => {
 	const snapshot = makeSnapshot("snapshot-1", [
 		{ id: "h1", fingerprint: "f1" },
 	]);
@@ -323,8 +355,8 @@ test("rejects a delta with missing or duplicate hunk coverage", () => {
 				skippedHunks: [],
 			}),
 		(error: unknown) => {
-			assert.ok(error instanceof ReviewCoverageError);
-			assert.match(error.message, /does not cover hunk/);
+			assert.ok(error instanceof ReviewDeltaError);
+			assert.match(error.message, /does not cover snapshot hunk/);
 			return true;
 		},
 	);
@@ -334,6 +366,10 @@ test("rejects a delta with missing or duplicate hunk coverage", () => {
 				commentedHunkIds: [],
 				skippedHunks: [],
 			}),
-		/contains duplicate hunk/,
+		(error: unknown) => {
+			assert.ok(error instanceof ReviewDeltaError);
+			assert.match(error.message, /contains duplicate hunk/);
+			return true;
+		},
 	);
 });

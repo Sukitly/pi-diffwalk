@@ -78,10 +78,60 @@ export function computeReviewDelta(
 	};
 }
 
-export function listReviewableHunks(
+export function listSnapshotHunks(
 	snapshot: ReviewSnapshot,
 ): readonly DiffHunk[] {
 	return collectHunkEntries(snapshot).map(({ hunk }) => hunk);
+}
+
+export function assertReviewDeltaMatchesSnapshot(
+	snapshot: ReviewSnapshot,
+	delta: ReviewDelta,
+): void {
+	if (delta.currentSnapshotId !== snapshot.id) {
+		throw new ReviewDeltaError(
+			`Review delta references snapshot ${delta.currentSnapshotId}, not ${snapshot.id}.`,
+		);
+	}
+
+	const snapshotHunkIds = new Set(
+		listSnapshotHunks(snapshot).map((hunk) => hunk.id),
+	);
+	const requirementHunkIds = new Set<HunkId>();
+	for (const requirement of delta.hunks) {
+		if (!snapshotHunkIds.has(requirement.hunkId)) {
+			throw new ReviewDeltaError(
+				`Review delta contains unknown hunk ${requirement.hunkId}.`,
+			);
+		}
+		if (requirementHunkIds.has(requirement.hunkId)) {
+			throw new ReviewDeltaError(
+				`Review delta contains duplicate hunk ${requirement.hunkId}.`,
+			);
+		}
+		requirementHunkIds.add(requirement.hunkId);
+	}
+	for (const hunkId of snapshotHunkIds) {
+		if (!requirementHunkIds.has(hunkId)) {
+			throw new ReviewDeltaError(
+				`Review delta does not cover snapshot hunk ${hunkId}.`,
+			);
+		}
+	}
+}
+
+export function isNeedsReviewReasonSkippable(
+	reason: NeedsReviewHunk["reason"],
+): boolean {
+	switch (reason) {
+		case "unresolved-comment":
+			return false;
+		case "new":
+		case "changed":
+		case "previously-skipped":
+		case "ambiguous-match":
+			return true;
+	}
 }
 
 function collectHunkEntries(snapshot: ReviewSnapshot): readonly HunkEntry[] {

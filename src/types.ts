@@ -1,3 +1,5 @@
+import { Type } from "typebox";
+
 declare const brand: unique symbol;
 
 type Brand<Value, Name extends string> = Value & {
@@ -11,6 +13,7 @@ export type FileChangeId = Brand<string, "FileChangeId">;
 export type HunkId = Brand<string, "HunkId">;
 export type HunkFingerprint = Brand<string, "HunkFingerprint">;
 export type NoticeId = Brand<string, "NoticeId">;
+export type ReviewUnitId = Brand<string, "ReviewUnitId">;
 export type GitObjectId = Brand<string, "GitObjectId">;
 export type StateFingerprint = Brand<string, "StateFingerprint">;
 
@@ -180,6 +183,85 @@ export interface CarriedForwardHunk {
 export interface ReviewCoverage {
 	readonly snapshotId: SnapshotId;
 	readonly records: readonly HunkReviewRecord[];
+}
+
+const ReviewUnitCandidateSchema = Type.Object(
+	{
+		title: Type.String({ description: "Short title for this review unit" }),
+		whyHere: Type.String({
+			description: "Why this unit belongs at this point in the review order",
+		}),
+		context: Type.String({
+			description:
+				"Call path, contract, or invariant needed to review this unit",
+		}),
+		changeSummary: Type.String({
+			description: "Direct description of the change represented by this unit",
+		}),
+		reviewFocus: Type.Array(Type.String(), {
+			description: "Concrete questions for the human reviewer",
+			minItems: 1,
+		}),
+		hunkIds: Type.Array(Type.String(), {
+			description: "Ordered stable needs-review hunk identifiers in this unit",
+			minItems: 1,
+		}),
+	},
+	{ additionalProperties: false },
+);
+
+const ReviewRouteSkipCandidateSchema = Type.Object(
+	{
+		hunkId: Type.String({
+			description: "Stable identifier of the skipped hunk",
+		}),
+		reason: Type.String({
+			description:
+				"Visible reason why the hunk is excluded from the walkthrough",
+		}),
+	},
+	{ additionalProperties: false },
+);
+
+export const ReviewRouteCandidateSchema = Type.Object(
+	{
+		snapshotId: Type.String({
+			description: "Identifier of the frozen snapshot being routed",
+		}),
+		units: Type.Array(ReviewUnitCandidateSchema, {
+			description: "Semantic review units in walkthrough order",
+		}),
+		skippedHunks: Type.Array(ReviewRouteSkipCandidateSchema, {
+			description:
+				"Eligible needs-review hunks explicitly skipped with visible reasons; unresolved-comment hunks cannot be skipped",
+		}),
+	},
+	{ additionalProperties: false },
+);
+
+export type ReviewRouteCandidate = Type.Static<
+	typeof ReviewRouteCandidateSchema
+>;
+
+export interface ReviewRoute {
+	readonly snapshotId: SnapshotId;
+	readonly units: readonly ReviewUnit[];
+	readonly skippedHunks: readonly ReviewRouteSkip[];
+}
+
+export interface ReviewUnit {
+	readonly id: ReviewUnitId;
+	readonly title: string;
+	readonly whyHere: string;
+	readonly context: string;
+	readonly changeSummary: string;
+	readonly reviewFocus: readonly string[];
+	readonly hunkIds: readonly HunkId[];
+}
+
+export interface ReviewRouteSkip {
+	readonly hunkId: HunkId;
+	readonly reason: string;
 }
 
 interface HunkReviewRecordBase {
