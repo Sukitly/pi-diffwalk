@@ -264,6 +264,38 @@ export interface ReviewRouteSkip {
   readonly reason: string;
 }
 
+export interface ReviewComment {
+  readonly snapshotId: SnapshotId;
+  readonly reviewUnitId: ReviewUnitId;
+  readonly hunkId: HunkId;
+  readonly diffLineIndex: number;
+  readonly filePath: string;
+  readonly oldLine?: number;
+  readonly newLine?: number;
+  readonly selectedDiffText: string;
+  readonly nearbyDiffContext: readonly DiffLine[];
+  readonly body: string;
+}
+
+export type ReviewSubmissionMode = "discuss-first" | "apply-change-requests";
+
+export interface SubmittedGuidedReviewResult {
+  readonly status: "submitted";
+  readonly snapshotId: SnapshotId;
+  readonly submissionMode: ReviewSubmissionMode;
+  readonly comments: readonly ReviewComment[];
+}
+
+export interface CancelledGuidedReviewResult {
+  readonly status: "cancelled";
+  readonly snapshotId: SnapshotId;
+  readonly comments: readonly ReviewComment[];
+}
+
+export type GuidedReviewResult =
+  | SubmittedGuidedReviewResult
+  | CancelledGuidedReviewResult;
+
 interface HunkReviewRecordBase {
   readonly hunkId: HunkId;
   readonly fingerprint: HunkFingerprint;
