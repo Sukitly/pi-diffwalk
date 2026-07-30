@@ -27,9 +27,9 @@ It is not intended to:
 - let the agent omit inconvenient hunks without an explicit reason
 - modify code while the guided review is in progress
 
-## Planned Workflow
+## Workflow
 
-The planned command is:
+Run:
 
 ```text
 /review [base]
@@ -44,7 +44,7 @@ Examples:
 
 With no base argument, DiffWalk will review the current worktree against `HEAD`, including tracked and untracked changes. With a base argument, it will review the current working state against that Git revision.
 
-The review flow will be:
+The review flow is:
 
 1. DiffWalk captures a frozen snapshot of the current Git changes.
 2. Each file and hunk receives a stable identifier.
@@ -90,7 +90,7 @@ Each unit should include:
 
 The agent provides the route and explanation. DiffWalk provides the diff content. The model must never generate or rewrite the displayed patch.
 
-## Planned TUI
+## TUI
 
 A review screen will contain the explanation and the selected diff unit:
 
@@ -120,7 +120,7 @@ Review focus
 > 50   if (claims.issuer !== config.issuer) return unauthorized()
 ```
 
-Planned controls:
+Controls:
 
 | Key | Action |
 |---|---|
@@ -166,7 +166,7 @@ DiffWalk will enforce the following rules:
 
 These rules do not make the agent's explanation correct. They prevent the explanation from silently changing or hiding the code under review.
 
-## Planned Architecture
+## Architecture
 
 ```text
 /review command
@@ -180,7 +180,7 @@ These rules do not make the agent's explanation correct. They prevent the explan
     -> agent response or implementation
 ```
 
-The expected source layout is:
+The source layout is:
 
 ```text
 src/
@@ -195,6 +195,7 @@ src/
   prompts.ts             Agent instructions for route construction
   types.ts               Shared data structures and schemas
 test/
+  index.test.ts
   git-diff.test.ts
   review-delta.test.ts
   route-validation.test.ts
@@ -203,7 +204,16 @@ test/
   review-comments.test.ts
 ```
 
-The final package will be a pi extension. Installation instructions will be added after the first working release.
+## Development Usage
+
+Install the locked dependencies without lifecycle scripts, then load the extension directly:
+
+```bash
+npm ci --ignore-scripts
+pi -e ./src/index.ts
+```
+
+Run `/review` from a Git worktree in interactive TUI mode. The current implementation keeps one pending review snapshot in memory. Starting another `/review` replaces the pending snapshot. Completed review rounds are not yet persisted across sessions.
 
 ## Design Principles
 
@@ -233,7 +243,7 @@ The reviewer controls when feedback reaches the agent and what the agent is allo
 
 ## Roadmap
 
-The first usable version will focus on:
+The current version includes:
 
 - worktree and explicit-base snapshots
 - tracked and untracked file support
@@ -244,10 +254,11 @@ The first usable version will focus on:
 - inline comment editing
 - comment summary and batch submission
 - worktree drift detection
-- parser and route validation tests
+- parser, route, workflow, comment, and TUI tests
 
 Possible later work includes:
 
+- persisted incremental review rounds across sessions
 - pausing a walkthrough to ask the agent a live question
 - resuming an interrupted review
 - GitHub pull request sources
