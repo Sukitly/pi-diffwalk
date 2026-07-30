@@ -43,6 +43,13 @@ export class GitSnapshotError extends Error {
   }
 }
 
+export class ReviewSnapshotDriftError extends GitSnapshotError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewSnapshotDriftError";
+  }
+}
+
 interface RawFileChange {
   readonly statusCode: string;
   readonly oldMode?: string;
@@ -145,7 +152,7 @@ export async function assertReviewSnapshotUnchanged(
     snapshot.repositoryRoot,
   );
   if (!sameRepositoryState(snapshot.repositoryState, currentState)) {
-    throw new GitSnapshotError(
+    throw new ReviewSnapshotDriftError(
       `The repository changed after review snapshot ${snapshot.id} was captured. Comments were not submitted.`,
     );
   }

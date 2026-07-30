@@ -36,6 +36,7 @@ export interface ReviewCommentTarget extends ReviewCommentAnchor {
 
 export type ReviewSnapshotVerifier = (
   snapshot: ReviewSnapshot,
+  signal: AbortSignal,
 ) => Promise<void>;
 
 export type ReviewCommentInputErrorCode = "blank-comment-body";
@@ -138,8 +139,11 @@ export class ReviewSession {
   async submit(
     submissionMode: ReviewSubmissionMode,
     verifySnapshot: ReviewSnapshotVerifier,
+    signal: AbortSignal = new AbortController().signal,
   ): Promise<SubmittedGuidedReviewResult> {
-    await verifySnapshot(structuredClone(this.snapshot));
+    signal.throwIfAborted();
+    await verifySnapshot(structuredClone(this.snapshot), signal);
+    signal.throwIfAborted();
     return {
       status: "submitted",
       snapshotId: this.snapshot.id,

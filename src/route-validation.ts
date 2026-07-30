@@ -187,7 +187,7 @@ export function validateReviewRoute(
     snapshotId: snapshot.id,
     units,
     skippedHunks,
-  };
+  } as unknown as ReviewRoute;
 }
 
 function validateCandidateHunkReference(

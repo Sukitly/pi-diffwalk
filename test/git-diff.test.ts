@@ -21,6 +21,7 @@ import {
   type GitCommandResult,
   type GitRunner,
   GitSnapshotError,
+  ReviewSnapshotDriftError,
 } from "../src/git-diff.ts";
 import type {
   DiffHunk,
@@ -497,9 +498,32 @@ test("blocks comment submission when the repository drifts after capture", async
   await assert.rejects(
     assertReviewSnapshotUnchanged(gitRunner, snapshot),
     (error: unknown) => {
+      assert.ok(error instanceof ReviewSnapshotDriftError);
       assert.ok(error instanceof GitSnapshotError);
       assert.match(error.message, /repository changed after review snapshot/);
       assert.match(error.message, /Comments were not submitted/);
+      return true;
+    },
+  );
+});
+
+test("keeps Git verification failures distinct from repository drift", async (t) => {
+  const repository = await createRepository(t);
+  const snapshot = await captureReviewSnapshot(gitRunner, repository, "main");
+  const failingRunner: GitRunner = {
+    run: async () => ({
+      stdout: "",
+      stderr: "repository unavailable",
+      code: 128,
+    }),
+  };
+
+  await assert.rejects(
+    assertReviewSnapshotUnchanged(failingRunner, snapshot),
+    (error: unknown) => {
+      assert.ok(error instanceof GitSnapshotError);
+      assert.equal(error instanceof ReviewSnapshotDriftError, false);
+      assert.match(error.message, /repository unavailable/);
       return true;
     },
   );

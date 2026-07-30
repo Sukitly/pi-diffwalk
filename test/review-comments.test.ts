@@ -474,15 +474,35 @@ test("submits the complete comment batch only after snapshot verification", asyn
     body: "Confirm compatibility.",
   });
   let verifiedSnapshotId: string | undefined;
+  let verifierSignal: AbortSignal | undefined;
+  const controller = new AbortController();
 
-  const result = await session.submit("discuss-first", async (snapshot) => {
-    verifiedSnapshotId = snapshot.id;
-  });
+  const result = await session.submit(
+    "discuss-first",
+    async (snapshot, signal) => {
+      verifiedSnapshotId = snapshot.id;
+      verifierSignal = signal;
+    },
+    controller.signal,
+  );
 
   assert.equal(verifiedSnapshotId, fixture.snapshot.id);
+  assert.equal(verifierSignal, controller.signal);
   assert.equal(result.status, "submitted");
   assert.equal(result.submissionMode, "discuss-first");
   assert.equal(result.comments.length, 1);
+});
+
+test("does not submit when verification is aborted", async () => {
+  const fixture = makeCommentFixture();
+  const session = new ReviewSession(fixture.snapshot, fixture.route);
+  const controller = new AbortController();
+  controller.abort(new Error("verification cancelled"));
+
+  await assert.rejects(
+    session.submit("discuss-first", async () => {}, controller.signal),
+    /verification cancelled/,
+  );
 });
 
 test("does not create a submission result when snapshot verification fails", async () => {

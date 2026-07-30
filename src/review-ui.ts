@@ -13,6 +13,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { ReviewSnapshotDriftError } from "./git-diff.ts";
 import {
   type ReviewCommentAnchor,
   ReviewCommentInputError,
@@ -24,6 +25,7 @@ import {
   assertReviewDeltaMatchesSnapshot,
   listSnapshotHunks,
 } from "./review-delta.ts";
+import { validateReviewRoute } from "./route-validation.ts";
 import type {
   DiffHunk,
   DiffLine,
@@ -34,15 +36,17 @@ import type {
   ReviewComment,
   ReviewDelta,
   ReviewRoute,
+  ReviewRouteCandidate,
   ReviewSnapshot,
   ReviewSubmissionMode,
   ReviewUnit,
+  SubmittedGuidedReviewResult,
 } from "./types.ts";
 
 export interface GuidedReviewUiInput {
   readonly snapshot: ReviewSnapshot;
   readonly delta: ReviewDelta;
-  readonly route: ReviewRoute;
+  readonly route: ReviewRouteCandidate;
   readonly verifySnapshot: ReviewSnapshotVerifier;
 }
 
@@ -52,6 +56,13 @@ export class GuidedReviewUiUnavailableError extends Error {
       `Guided review requires interactive TUI mode; current mode is ${mode}.`,
     );
     this.name = "GuidedReviewUiUnavailableError";
+  }
+}
+
+export class GuidedReviewUiInvariantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GuidedReviewUiInvariantError";
   }
 }
 
@@ -67,7 +78,23 @@ type ReviewScreen =
   | "summary"
   | "cancel-confirmation";
 
-type DriftStatus = "not-checked" | "checking" | "blocked";
+type SubmissionStatus =
+  | "not-checked"
+  | "checking"
+  | "repository-drifted"
+  | "verification-failed";
+
+type FeedbackKind = "info" | "warning";
+
+interface TransientFeedback {
+  readonly kind: FeedbackKind;
+  readonly message: string;
+}
+
+interface SubmissionFailure {
+  readonly kind: "repository-drifted" | "verification-failed";
+  readonly error: unknown;
+}
 
 interface HunkView {
   readonly hunk: DiffHunk;
@@ -88,7 +115,7 @@ type InventoryEntry =
       readonly hunkView: HunkView;
     }
   | {
-      readonly kind: "unsupported" | "notice";
+      readonly kind: "metadata-only" | "binary" | "unsupported" | "notice";
       readonly title: string;
       readonly detail: string;
     };
@@ -107,7 +134,11 @@ interface GuidedReviewComponentOptions {
   readonly delta: ReviewDelta;
   readonly route: ReviewRoute;
   readonly session: ReviewSession;
-  readonly onSubmit: (mode: ReviewSubmissionMode) => void;
+  readonly onSubmit: (
+    mode: ReviewSubmissionMode,
+    signal: AbortSignal,
+  ) => Promise<SubmittedGuidedReviewResult>;
+  readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
   readonly onCancel: () => void;
 }
 
@@ -119,31 +150,34 @@ export async function openGuidedReview(
     throw new GuidedReviewUiUnavailableError(ctx.mode);
   }
 
-  assertReviewDeltaMatchesSnapshot(input.snapshot, input.delta);
-  const session = new ReviewSession(input.snapshot, input.route);
+  const route = validateReviewRoute(input.snapshot, input.delta, input.route);
+  const session = new ReviewSession(input.snapshot, route);
 
-  return ctx.ui.custom<GuidedReviewResult>((tui, theme, keybindings, done) => {
-    let component: GuidedReviewComponent;
-    component = new GuidedReviewComponent({
-      tui,
-      theme,
-      keybindings,
-      snapshot: input.snapshot,
-      delta: input.delta,
-      route: input.route,
-      session,
-      onSubmit: (mode) => {
-        component.setSubmissionChecking();
-        void session.submit(mode, input.verifySnapshot).then(
-          (result) => done(result),
-          (error: unknown) =>
-            component.setSubmissionBlocked(errorMessage(error)),
-        );
+  return ctx.ui.custom<GuidedReviewResult>(
+    (tui, theme, keybindings, done) =>
+      new GuidedReviewComponent({
+        tui,
+        theme,
+        keybindings,
+        snapshot: input.snapshot,
+        delta: input.delta,
+        route,
+        session,
+        onSubmit: (mode, signal) =>
+          session.submit(mode, input.verifySnapshot, signal),
+        onComplete: done,
+        onCancel: () => done(session.cancel()),
+      }),
+    {
+      overlay: true,
+      overlayOptions: {
+        width: "100%",
+        maxHeight: "100%",
+        anchor: "top-left",
+        margin: 0,
       },
-      onCancel: () => done(session.cancel()),
-    });
-    return component;
-  });
+    },
+  );
 }
 
 export class GuidedReviewComponent implements Component, Focusable {
@@ -156,7 +190,11 @@ export class GuidedReviewComponent implements Component, Focusable {
   private readonly inventory: readonly InventoryEntry[];
   private readonly skippedCount: number;
   private readonly unsupportedCount: number;
-  private readonly onSubmit: (mode: ReviewSubmissionMode) => void;
+  private readonly onSubmit: (
+    mode: ReviewSubmissionMode,
+    signal: AbortSignal,
+  ) => Promise<SubmittedGuidedReviewResult>;
+  private readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
   private readonly onCancel: () => void;
   private readonly editor: Editor;
   private screen: ReviewScreen = "walkthrough";
@@ -171,14 +209,16 @@ export class GuidedReviewComponent implements Component, Focusable {
   private inventoryDiffOffset = 0;
   private summaryOffset = 0;
   private submissionMode: ReviewSubmissionMode = "discuss-first";
-  private driftStatus: DriftStatus = "not-checked";
-  private statusMessage?: string;
+  private submissionStatus: SubmissionStatus = "not-checked";
+  private submissionFailure?: SubmissionFailure;
+  private transientFeedback?: TransientFeedback;
+  private commentInputError?: string;
+  private submissionAttempt = 0;
+  private submissionAbortController?: AbortController;
   private cachedWidth?: number;
   private cachedRows?: number;
   private cachedLines?: readonly string[];
   private _focused = false;
-  private lastDiffViewportHeight = 1;
-  private lastSummaryViewportHeight = 1;
 
   constructor(options: GuidedReviewComponentOptions) {
     this.tui = options.tui;
@@ -187,6 +227,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.route = options.route;
     this.session = options.session;
     this.onSubmit = options.onSubmit;
+    this.onComplete = options.onComplete;
     this.onCancel = options.onCancel;
     const viewModel = buildReviewViewModel(
       options.snapshot,
@@ -212,8 +253,10 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   set focused(value: boolean) {
+    if (this._focused === value) return;
     this._focused = value;
     this.syncEditorFocus();
+    this.refresh();
   }
 
   render(width: number): string[] {
@@ -227,10 +270,13 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...this.cachedLines];
     }
 
-    const lines = this.renderScreen(renderWidth, terminalRows).map((line) =>
-      fitLine(oneTerminalLine(line), renderWidth),
+    const screenLines = fillScreenHeight(
+      this.renderScreen(renderWidth, terminalRows),
+      terminalRows,
     );
-    const bounded = lines.slice(0, terminalRows);
+    const bounded = screenLines.map((line) =>
+      fillLine(oneTerminalLine(line), renderWidth),
+    );
     this.cachedWidth = renderWidth;
     this.cachedRows = terminalRows;
     this.cachedLines = bounded;
@@ -238,7 +284,14 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    if (this.driftStatus === "checking") return;
+    if (this.submissionStatus === "checking") {
+      if (matchesKey(data, Key.escape)) {
+        this.abortSubmissionCheck();
+        this.returnScreen = "summary";
+        this.openScreen("cancel-confirmation");
+      }
+      return;
+    }
 
     switch (this.screen) {
       case "walkthrough":
@@ -270,18 +323,10 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.editor.invalidate();
   }
 
-  setSubmissionChecking(): void {
-    this.driftStatus = "checking";
-    this.statusMessage = "Checking the frozen snapshot before submission...";
-    this.refresh();
-  }
-
-  setSubmissionBlocked(message: string): void {
-    this.driftStatus = "blocked";
-    this.statusMessage = `Submission blocked: ${message}`;
-    this.screen = "summary";
-    this.syncEditorFocus();
-    this.refresh();
+  dispose(): void {
+    this.submissionAttempt += 1;
+    this.submissionAbortController?.abort();
+    this.submissionAbortController = undefined;
   }
 
   private renderScreen(width: number, rows: number): readonly string[] {
@@ -344,24 +389,19 @@ export class GuidedReviewComponent implements Component, Focusable {
       );
     }
 
-    const status =
-      this.statusMessage === undefined
-        ? []
-        : [
-            fitLine(
-              this.theme.fg("warning", safeText(this.statusMessage)),
-              width,
-            ),
-          ];
+    const feedback = renderTransientFeedback(
+      this.transientFeedback,
+      this.theme,
+      width,
+    );
     const diffLabel = this.theme.fg(
       "accent",
       this.theme.bold("Git snapshot diff"),
     );
     const diffHeight = Math.max(
       0,
-      bodyHeight - preview.length - status.length - 1,
+      bodyHeight - preview.length - feedback.length - 1,
     );
-    this.lastDiffViewportHeight = Math.max(1, diffHeight);
     const renderedDiff = renderUnitDiff(
       unitView,
       this.currentTarget(),
@@ -384,7 +424,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     return [
       ...header,
       ...preview,
-      ...status,
+      ...feedback,
       diffLabel,
       ...diffRows,
       ...footer,
@@ -410,10 +450,10 @@ export class GuidedReviewComponent implements Component, Focusable {
       );
       body.push(renderSelectedDiffText(target.line, this.theme, width));
     }
-    if (this.statusMessage !== undefined) {
+    if (this.commentInputError !== undefined) {
       body.push(
         ...wrapStyled(
-          this.theme.fg("warning", safeText(this.statusMessage)),
+          this.theme.fg("warning", safeText(this.commentInputError)),
           width,
         ),
       );
@@ -459,10 +499,17 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      this.statusMessage ??
-        "j/k or ↑/↓ select • Enter inspect frozen hunk • i/Esc return",
+      "j/k or ↑/↓ select • Enter inspect frozen hunk • i/Esc return",
     );
-    const viewportHeight = Math.max(0, rows - header.length - footer.length);
+    const feedback = renderTransientFeedback(
+      this.transientFeedback,
+      this.theme,
+      width,
+    );
+    const viewportHeight = Math.max(
+      0,
+      rows - header.length - feedback.length - footer.length,
+    );
     const content = renderInventoryRows(
       this.inventory,
       this.inventoryIndex,
@@ -477,6 +524,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     );
     return [
       ...header,
+      ...feedback,
       ...content
         .slice(this.inventoryOffset, this.inventoryOffset + viewportHeight)
         .map(({ text }) => text),
@@ -515,18 +563,28 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      this.driftStatus === "checking"
-        ? "Checking repository state..."
+      this.submissionStatus === "checking"
+        ? "Checking repository state... • Esc cancel verification"
         : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return",
     );
-    const viewportHeight = Math.max(0, rows - header.length - footer.length);
-    this.lastSummaryViewportHeight = Math.max(1, viewportHeight);
+    const availableHeight = Math.max(0, rows - header.length - footer.length);
+    const submissionNotice = renderSubmissionNotice(
+      this.submissionStatus,
+      this.submissionFailure,
+      this.theme,
+      width,
+    ).slice(0, availableHeight);
+    const viewportHeight = Math.max(
+      0,
+      availableHeight - submissionNotice.length,
+    );
     const content = renderSummaryLines(
       this.session.getComments(),
       this.route,
       this.inventory,
       this.submissionMode,
-      this.statusMessage,
+      this.transientFeedback,
+      this.unvisitedUnits(),
       this.theme,
       width,
     );
@@ -537,6 +595,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     );
     return [
       ...header,
+      ...submissionNotice,
       ...content.slice(this.summaryOffset, this.summaryOffset + viewportHeight),
       ...footer,
     ];
@@ -573,7 +632,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const progress = `visited ${this.visitedUnits.size}/${unitCount}`;
     const comments = `comments ${this.session.getComments().length}`;
     const inventory = `skipped ${this.skippedCount} • unsupported ${this.unsupportedCount}`;
-    const drift = `drift ${driftLabel(this.driftStatus)}`;
+    const verification = `snapshot ${submissionLabel(this.submissionStatus)}`;
     const title = this.screenTitle();
     return [
       fitLine(
@@ -584,7 +643,7 @@ export class GuidedReviewComponent implements Component, Focusable {
         width,
       ),
       fitLine(
-        `${this.theme.fg("text", safeText(title))} ${this.theme.fg("dim", `• ${inventory} • ${drift}`)}`,
+        `${this.theme.fg("text", safeText(title))} ${this.theme.fg("dim", `• ${inventory} • ${verification}`)}`,
         width,
       ),
     ];
@@ -622,11 +681,11 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.pageUp)) {
-      this.moveTarget(-Math.max(1, this.lastDiffViewportHeight - 1));
+      this.pageWalkthrough(-1);
       return;
     }
     if (matchesKey(data, Key.pageDown)) {
-      this.moveTarget(Math.max(1, this.lastDiffViewportHeight - 1));
+      this.pageWalkthrough(1);
       return;
     }
     if (matchesKey(data, "p") || matchesKey(data, Key.left)) {
@@ -646,17 +705,17 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "e")) {
-      this.statusMessage = undefined;
+      this.transientFeedback = undefined;
       this.openScreen("explanation");
       return;
     }
     if (matchesKey(data, "i")) {
-      this.statusMessage = undefined;
+      this.transientFeedback = undefined;
       this.openScreen("inventory");
       return;
     }
     if (matchesKey(data, "s")) {
-      this.statusMessage = undefined;
+      this.transientFeedback = undefined;
       this.openScreen("summary");
       return;
     }
@@ -666,10 +725,11 @@ export class GuidedReviewComponent implements Component, Focusable {
   private handleCommentEditorInput(data: string): void {
     if (matchesKey(data, Key.escape)) {
       this.editor.setText("");
-      this.statusMessage = undefined;
+      this.commentInputError = undefined;
       this.openScreen("walkthrough");
       return;
     }
+    this.commentInputError = undefined;
     this.editor.handleInput(data);
     this.refresh();
   }
@@ -685,8 +745,10 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
     if (this.isUp(data)) this.scrollExplanation(-1);
     else if (this.isDown(data)) this.scrollExplanation(1);
-    else if (matchesKey(data, Key.pageUp)) this.scrollExplanation(-10);
-    else if (matchesKey(data, Key.pageDown)) this.scrollExplanation(10);
+    else if (matchesKey(data, Key.pageUp))
+      this.scrollExplanation(-this.secondaryViewportHeight());
+    else if (matchesKey(data, Key.pageDown))
+      this.scrollExplanation(this.secondaryViewportHeight());
   }
 
   private handleInventoryInput(data: string): void {
@@ -695,6 +757,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       matchesKey(data, "i") ||
       matchesKey(data, Key.left)
     ) {
+      this.transientFeedback = undefined;
       this.openScreen("walkthrough");
       return;
     }
@@ -712,8 +775,10 @@ export class GuidedReviewComponent implements Component, Focusable {
         this.inventoryDiffOffset = 0;
         this.openScreen("inventory-diff");
       } else {
-        this.statusMessage = "The selected inventory entry has no text diff.";
-        this.refresh();
+        this.setTransientFeedback(
+          "warning",
+          "The selected inventory entry has no text diff.",
+        );
       }
     }
   }
@@ -725,13 +790,15 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
     if (this.isUp(data)) this.scrollInventoryDiff(-1);
     else if (this.isDown(data)) this.scrollInventoryDiff(1);
-    else if (matchesKey(data, Key.pageUp)) this.scrollInventoryDiff(-10);
-    else if (matchesKey(data, Key.pageDown)) this.scrollInventoryDiff(10);
+    else if (matchesKey(data, Key.pageUp))
+      this.scrollInventoryDiff(-this.secondaryViewportHeight());
+    else if (matchesKey(data, Key.pageDown))
+      this.scrollInventoryDiff(this.secondaryViewportHeight());
   }
 
   private handleSummaryInput(data: string): void {
     if (matchesKey(data, Key.escape)) {
-      this.statusMessage = undefined;
+      this.transientFeedback = undefined;
       this.openScreen("walkthrough");
       return;
     }
@@ -744,17 +811,17 @@ export class GuidedReviewComponent implements Component, Focusable {
         this.submissionMode === "discuss-first"
           ? "apply-change-requests"
           : "discuss-first";
-      this.statusMessage = undefined;
+      this.transientFeedback = undefined;
       this.refresh();
       return;
     }
     if (this.isUp(data)) this.scrollSummary(-1);
     else if (this.isDown(data)) this.scrollSummary(1);
     else if (matchesKey(data, Key.pageUp))
-      this.scrollSummary(-this.lastSummaryViewportHeight);
+      this.scrollSummary(-this.summaryViewportHeight());
     else if (matchesKey(data, Key.pageDown))
-      this.scrollSummary(this.lastSummaryViewportHeight);
-    else if (matchesKey(data, Key.enter)) this.onSubmit(this.submissionMode);
+      this.scrollSummary(this.summaryViewportHeight());
+    else if (matchesKey(data, Key.enter)) this.startSubmission();
   }
 
   private handleCancelConfirmationInput(data: string): void {
@@ -788,7 +855,55 @@ export class GuidedReviewComponent implements Component, Focusable {
       unit.targets.length - 1,
     );
     this.selectedTargetByUnit[this.unitIndex] = next;
-    this.statusMessage = undefined;
+    this.transientFeedback = undefined;
+    this.refresh();
+  }
+
+  private pageWalkthrough(direction: -1 | 1): void {
+    const unit = this.currentUnit();
+    if (unit === undefined || unit.targets.length === 0) return;
+    const width = Math.max(1, this.tui.terminal.columns);
+    const viewportHeight = Math.max(
+      1,
+      this.walkthroughDiffViewportHeight(width, this.tui.terminal.rows),
+    );
+    const rows = renderUnitDiff(
+      unit,
+      this.currentTarget(),
+      this.session,
+      this.theme,
+      width,
+    );
+    const currentOffset = ensureTargetVisible(
+      rows,
+      this.currentTarget(),
+      this.diffOffset,
+      viewportHeight,
+    );
+    const nextOffset = clampOffset(
+      currentOffset + direction * viewportHeight,
+      rows.length,
+      viewportHeight,
+    );
+    if (nextOffset === currentOffset) {
+      this.transientFeedback = undefined;
+      this.refresh();
+      return;
+    }
+    const visibleRows = rows.slice(nextOffset, nextOffset + viewportHeight);
+    const selectedKey =
+      direction === 1
+        ? visibleRows.find((row) => row.targetKey !== undefined)?.targetKey
+        : lastTargetKey(visibleRows);
+    if (selectedKey !== undefined) {
+      const targetIndex = unit.targets.findIndex(
+        (target) => targetKey(target) === selectedKey,
+      );
+      if (targetIndex >= 0)
+        this.selectedTargetByUnit[this.unitIndex] = targetIndex;
+    }
+    this.diffOffset = nextOffset;
+    this.transientFeedback = undefined;
     this.refresh();
   }
 
@@ -798,37 +913,41 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.visitedUnits.add(this.unitIndex);
     this.diffOffset = 0;
     this.explanationOffset = 0;
-    this.statusMessage = undefined;
+    this.transientFeedback = undefined;
     this.refresh();
   }
 
   private openCommentEditor(): void {
     const target = this.currentTarget();
     if (target === undefined) {
-      this.statusMessage = "The current unit has no commentable source line.";
-      this.refresh();
+      this.setTransientFeedback(
+        "warning",
+        "The current unit has no commentable source line.",
+      );
       return;
     }
     const existing = this.session.getComment(target);
     this.editor.setText(existing?.body ?? "");
-    this.statusMessage = undefined;
+    this.transientFeedback = undefined;
+    this.commentInputError = undefined;
     this.openScreen("comment-editor");
   }
 
   private saveEditedComment(body: string): void {
     const target = this.currentTarget();
     if (target === undefined) {
-      this.statusMessage = "The selected diff anchor is no longer available.";
+      this.commentInputError =
+        "The selected diff anchor is no longer available.";
       this.refresh();
       return;
     }
     try {
       this.session.upsertComment({ ...anchorFromTarget(target), body });
-      this.statusMessage = undefined;
+      this.commentInputError = undefined;
       this.openScreen("walkthrough");
     } catch (error: unknown) {
       if (error instanceof ReviewCommentInputError) {
-        this.statusMessage = error.message;
+        this.commentInputError = error.message;
         this.syncEditorFocus();
         this.refresh();
         return;
@@ -841,10 +960,12 @@ export class GuidedReviewComponent implements Component, Focusable {
     const target = this.currentTarget();
     if (target === undefined) return;
     const { deleted } = this.session.deleteComment(target);
-    this.statusMessage = deleted
-      ? "Deleted the comment on the selected line."
-      : "The selected line has no comment.";
-    this.refresh();
+    this.setTransientFeedback(
+      deleted ? "info" : "warning",
+      deleted
+        ? "Deleted the comment on the selected line."
+        : "The selected line has no comment.",
+    );
   }
 
   private scrollExplanation(delta: number): void {
@@ -859,7 +980,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       0,
       this.inventory.length - 1,
     );
-    this.statusMessage = undefined;
+    this.transientFeedback = undefined;
     this.refresh();
   }
 
@@ -873,8 +994,119 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
+  private startSubmission(): void {
+    if (this.submissionStatus === "checking") return;
+    const unvisited = this.unvisitedUnits();
+    if (unvisited.length > 0) {
+      this.summaryOffset = 0;
+      this.refresh();
+      return;
+    }
+
+    this.submissionAttempt += 1;
+    const attempt = this.submissionAttempt;
+    const controller = new AbortController();
+    this.submissionAbortController = controller;
+    this.submissionStatus = "checking";
+    this.submissionFailure = undefined;
+    this.transientFeedback = undefined;
+    this.refresh();
+
+    let submission: Promise<SubmittedGuidedReviewResult>;
+    try {
+      submission = this.onSubmit(this.submissionMode, controller.signal);
+    } catch (error: unknown) {
+      this.failSubmission(attempt, error);
+      return;
+    }
+    void submission.then(
+      (result) => {
+        if (attempt !== this.submissionAttempt) return;
+        this.submissionAbortController = undefined;
+        this.onComplete(result);
+      },
+      (error: unknown) => this.failSubmission(attempt, error),
+    );
+  }
+
+  private failSubmission(attempt: number, error: unknown): void {
+    if (attempt !== this.submissionAttempt) return;
+    this.submissionAbortController = undefined;
+    const kind =
+      error instanceof ReviewSnapshotDriftError
+        ? "repository-drifted"
+        : "verification-failed";
+    this.submissionStatus = kind;
+    this.submissionFailure = { kind, error };
+    this.summaryOffset = 0;
+    this.screen = "summary";
+    this.syncEditorFocus();
+    this.refresh();
+  }
+
+  private abortSubmissionCheck(): void {
+    if (this.submissionStatus !== "checking") return;
+    this.submissionAttempt += 1;
+    this.submissionAbortController?.abort();
+    this.submissionAbortController = undefined;
+    this.submissionStatus = "not-checked";
+    this.submissionFailure = undefined;
+    this.transientFeedback = {
+      kind: "info",
+      message: "Snapshot verification was cancelled.",
+    };
+  }
+
+  private setTransientFeedback(kind: FeedbackKind, message: string): void {
+    this.transientFeedback = { kind, message };
+    this.refresh();
+  }
+
+  private unvisitedUnits(): readonly ReviewUnit[] {
+    return this.units
+      .filter((_unit, index) => !this.visitedUnits.has(index))
+      .map(({ unit }) => unit);
+  }
+
+  private secondaryViewportHeight(): number {
+    return Math.max(1, this.tui.terminal.rows - 3);
+  }
+
+  private summaryViewportHeight(): number {
+    const width = Math.max(1, this.tui.terminal.columns);
+    const availableHeight = Math.max(0, this.tui.terminal.rows - 3);
+    const noticeHeight = renderSubmissionNotice(
+      this.submissionStatus,
+      this.submissionFailure,
+      this.theme,
+      width,
+    ).slice(0, availableHeight).length;
+    return Math.max(1, availableHeight - noticeHeight);
+  }
+
+  private walkthroughDiffViewportHeight(width: number, rows: number): number {
+    const bodyHeight = Math.max(0, rows - 3);
+    const unit = this.currentUnit();
+    if (unit === undefined) return Math.max(0, bodyHeight - 1);
+    const explanation = renderExplanationLines(unit.unit, this.theme, width);
+    const previewHeight =
+      bodyHeight >= 8
+        ? Math.min(
+            explanation.length,
+            Math.max(2, Math.floor(bodyHeight * 0.35)),
+          )
+        : 0;
+    const feedbackHeight = renderTransientFeedback(
+      this.transientFeedback,
+      this.theme,
+      width,
+    ).length;
+    return Math.max(0, bodyHeight - previewHeight - feedbackHeight - 1);
+  }
+
   private openCancelConfirmation(): void {
     this.returnScreen = this.screen;
+    this.transientFeedback = undefined;
     this.openScreen("cancel-confirmation");
   }
 
@@ -985,11 +1217,16 @@ function buildReviewViewModel(
   let unsupportedCount = 0;
   for (const change of snapshot.changes) {
     if (change.content.kind === "text") continue;
-    unsupportedCount += 1;
+    if (
+      change.content.kind === "binary" ||
+      change.content.kind === "unsupported"
+    ) {
+      unsupportedCount += 1;
+    }
     inventory.push({
-      kind: "unsupported",
-      title: `unsupported: ${displayChangePath(change)}`,
-      detail: change.content.unsupportedReason,
+      kind: change.content.kind,
+      title: `${change.content.kind}: ${change.status}: ${displayChangePath(change)}`,
+      detail: nonTextChangeDetail(change),
     });
   }
   for (const notice of snapshot.notices) {
@@ -1157,7 +1394,12 @@ function renderInventoryRows(
   for (const [index, entry] of inventory.entries()) {
     const selected = index === selectedIndex;
     const prefix = selected ? "> " : "  ";
-    const color = entry.kind === "unsupported" ? "warning" : "text";
+    const color =
+      entry.kind === "binary" ||
+      entry.kind === "unsupported" ||
+      entry.kind === "notice"
+        ? "warning"
+        : "text";
     const titleRows = wrapWithPrefix(
       prefix,
       theme.fg(color, safeText(entry.title)),
@@ -1180,21 +1422,70 @@ function renderInventoryRows(
   return rows;
 }
 
+function renderTransientFeedback(
+  feedback: TransientFeedback | undefined,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  if (feedback === undefined) return [];
+  return wrapStyled(
+    theme.fg(
+      feedback.kind === "warning" ? "warning" : "muted",
+      safeText(feedback.message),
+    ),
+    width,
+  );
+}
+
+function renderSubmissionNotice(
+  status: SubmissionStatus,
+  failure: SubmissionFailure | undefined,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  if (status === "checking") {
+    return wrapStyled(
+      theme.fg("muted", "Checking the frozen snapshot before submission..."),
+      width,
+    );
+  }
+  if (failure === undefined) return [];
+  const title =
+    failure.kind === "repository-drifted"
+      ? "Repository drift blocks submission"
+      : "Snapshot verification failed";
+  return [
+    ...wrapStyled(theme.fg("error", theme.bold(title)), width),
+    ...wrapStyled(
+      theme.fg("warning", safeText(errorMessage(failure.error))),
+      width,
+    ),
+  ];
+}
+
 function renderSummaryLines(
   comments: readonly ReviewComment[],
   route: ReviewRoute,
   inventory: readonly InventoryEntry[],
   submissionMode: ReviewSubmissionMode,
-  statusMessage: string | undefined,
+  feedback: TransientFeedback | undefined,
+  unvisitedUnits: readonly ReviewUnit[],
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
   const lines: string[] = [
     theme.fg("accent", theme.bold("Comment batch and submission mode")),
   ];
-  if (statusMessage !== undefined) {
+  lines.push(...renderTransientFeedback(feedback, theme, width));
+  if (unvisitedUnits.length > 0) {
     lines.push(
-      ...wrapStyled(theme.fg("warning", safeText(statusMessage)), width),
+      ...wrapStyled(
+        theme.fg(
+          "warning",
+          `Submission requires visiting every planned unit. Remaining: ${safeText(unvisitedUnits.map((unit) => unit.title).join(", "))}.`,
+        ),
+        width,
+      ),
     );
   }
   lines.push(
@@ -1261,17 +1552,12 @@ function renderSummaryLines(
     }
   }
 
-  const unsupported = inventory.filter(
-    (entry) => entry.kind === "unsupported" || entry.kind === "notice",
-  );
-  lines.push(
-    "",
-    theme.fg("muted", theme.bold("Unsupported changes and notices")),
-  );
-  if (unsupported.length === 0) {
+  const nonTextChanges = inventory.filter((entry) => entry.kind !== "hunk");
+  lines.push("", theme.fg("muted", theme.bold("Non-text changes and notices")));
+  if (nonTextChanges.length === 0) {
     lines.push(theme.fg("dim", "None."));
   } else {
-    for (const entry of unsupported) {
+    for (const entry of nonTextChanges) {
       lines.push(
         ...wrapStyled(
           theme.fg(
@@ -1319,10 +1605,19 @@ function inventoryStatus(
   unit: ReviewUnit | undefined,
   skipReason: string | undefined,
 ): string {
-  if (requirement.type === "carried-forward") return "carried-forward";
+  if (requirement.type === "carried-forward") {
+    if (unit !== undefined || skipReason !== undefined) {
+      throw new GuidedReviewUiInvariantError(
+        `Carried-forward hunk ${requirement.hunkId} appears in the planned route.`,
+      );
+    }
+    return "carried-forward";
+  }
   if (skipReason !== undefined) return "skipped";
   if (unit !== undefined) return "planned";
-  return "needs-review";
+  throw new GuidedReviewUiInvariantError(
+    `Needs-review hunk ${requirement.hunkId} is neither planned nor explicitly skipped.`,
+  );
 }
 
 function inventoryDetail(
@@ -1340,6 +1635,14 @@ function inventoryDetail(
   return `Requirement: ${requirement.reason}.`;
 }
 
+function lastTargetKey(rows: readonly RenderedRow[]): string | undefined {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const key = rows[index]?.targetKey;
+    if (key !== undefined) return key;
+  }
+  return undefined;
+}
+
 function ensureTargetVisible(
   rows: readonly RenderedRow[],
   target: ReviewCommentTarget | undefined,
@@ -1347,14 +1650,24 @@ function ensureTargetVisible(
   viewportHeight: number,
 ): number {
   if (viewportHeight <= 0 || target === undefined) return 0;
-  const selectedRow = rows.findIndex(
-    (row) => row.targetKey === targetKey(target),
-  );
-  if (selectedRow < 0) return clampOffset(offset, rows.length, viewportHeight);
+  const selectedKey = targetKey(target);
+  const first = rows.findIndex((row) => row.targetKey === selectedKey);
+  let last = -1;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rows[index]?.targetKey === selectedKey) {
+      last = index;
+      break;
+    }
+  }
+  if (first < 0) return clampOffset(offset, rows.length, viewportHeight);
+
   let next = clampOffset(offset, rows.length, viewportHeight);
-  if (selectedRow < next) next = selectedRow;
-  else if (selectedRow >= next + viewportHeight) {
-    next = selectedRow - viewportHeight + 1;
+  const selectedHeight = last - first + 1;
+  if (selectedHeight <= viewportHeight) {
+    if (first < next) next = first;
+    else if (last >= next + viewportHeight) next = last - viewportHeight + 1;
+  } else if (last < next || first >= next + viewportHeight) {
+    next = first;
   }
   return clampOffset(next, rows.length, viewportHeight);
 }
@@ -1410,6 +1723,24 @@ function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width), "");
 }
 
+function fillLine(line: string, width: number): string {
+  const fitted = fitLine(line, width);
+  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
+}
+
+function fillScreenHeight(
+  lines: readonly string[],
+  rows: number,
+): readonly string[] {
+  if (lines.length >= rows) return lines.slice(0, rows);
+  const footer = lines.at(-1) ?? "";
+  return [
+    ...lines.slice(0, -1),
+    ...Array.from({ length: rows - lines.length }, () => ""),
+    footer,
+  ];
+}
+
 function oneTerminalLine(value: string): string {
   return value.replaceAll("\r", "\\r").replaceAll("\n", "\\n");
 }
@@ -1438,7 +1769,7 @@ function safeText(value: string): string {
 }
 
 function displayPath(path: string): string {
-  return JSON.stringify(path);
+  return safeText(JSON.stringify(path));
 }
 
 function displayChangePath(change: FileChange): string {
@@ -1451,6 +1782,20 @@ function displayChangePath(change: FileChange): string {
   }
   const path = change.newPath ?? change.oldPath;
   return path === undefined ? "<unknown path>" : displayPath(path);
+}
+
+function nonTextChangeDetail(change: FileChange): string {
+  if (change.content.kind === "text") {
+    throw new GuidedReviewUiInvariantError(
+      `Text change ${change.id} was rendered as a non-text inventory entry.`,
+    );
+  }
+  const details = [`Status: ${change.status}.`, `Source: ${change.source}.`];
+  if (change.oldMode !== undefined || change.newMode !== undefined) {
+    details.push(`Mode: ${change.oldMode ?? "-"} -> ${change.newMode ?? "-"}.`);
+  }
+  details.push(change.content.unsupportedReason);
+  return details.join(" ");
 }
 
 function renderLineAnchor(line: DiffLine): string {
@@ -1504,14 +1849,16 @@ function hunkLineKey(hunkId: HunkId, diffLineIndex: number): string {
   return JSON.stringify([hunkId, diffLineIndex]);
 }
 
-function driftLabel(status: DriftStatus): string {
+function submissionLabel(status: SubmissionStatus): string {
   switch (status) {
     case "not-checked":
       return "check-on-submit";
     case "checking":
       return "checking";
-    case "blocked":
-      return "blocked";
+    case "repository-drifted":
+      return "repository-drifted";
+    case "verification-failed":
+      return "verification-failed";
   }
 }
 
