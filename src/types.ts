@@ -270,6 +270,8 @@ export interface ReviewComment {
   readonly hunkId: HunkId;
   readonly diffLineIndex: number;
   readonly filePath: string;
+  readonly oldPath?: string;
+  readonly newPath?: string;
   readonly oldLine?: number;
   readonly newLine?: number;
   readonly selectedDiffText: string;
@@ -289,7 +291,6 @@ export interface SubmittedGuidedReviewResult {
 export interface CancelledGuidedReviewResult {
   readonly status: "cancelled";
   readonly snapshotId: SnapshotId;
-  readonly comments: readonly ReviewComment[];
 }
 
 export type GuidedReviewResult =

@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
+  assertReviewSnapshotUnchanged,
+  captureRepositoryState,
   captureReviewSnapshot,
   type GitCommandResult,
   type GitRunner,
@@ -469,6 +471,37 @@ test("produces deterministic identifiers and detects later repository state", as
   assert.notEqual(
     third.repositoryState.unstagedFingerprint,
     first.repositoryState.unstagedFingerprint,
+  );
+});
+
+test("recaptures the repository state stored in a review snapshot", async (t) => {
+  const repository = await createRepository(t);
+  await writeRepositoryFile(repository, "app.txt", "one\nchanged\nthree\n");
+  const snapshot = await captureReviewSnapshot(gitRunner, repository, "main");
+
+  assert.deepEqual(
+    await captureRepositoryState(gitRunner, repository),
+    snapshot.repositoryState,
+  );
+  await assert.doesNotReject(
+    assertReviewSnapshotUnchanged(gitRunner, snapshot),
+  );
+});
+
+test("blocks comment submission when the repository drifts after capture", async (t) => {
+  const repository = await createRepository(t);
+  await writeRepositoryFile(repository, "app.txt", "one\nreviewed\nthree\n");
+  const snapshot = await captureReviewSnapshot(gitRunner, repository, "main");
+  await writeRepositoryFile(repository, "app.txt", "one\ndrifted\nthree\n");
+
+  await assert.rejects(
+    assertReviewSnapshotUnchanged(gitRunner, snapshot),
+    (error: unknown) => {
+      assert.ok(error instanceof GitSnapshotError);
+      assert.match(error.message, /repository changed after review snapshot/);
+      assert.match(error.message, /Comments were not submitted/);
+      return true;
+    },
   );
 });
 

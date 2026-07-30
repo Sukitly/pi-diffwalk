@@ -88,6 +88,7 @@ src/
   route-validation.ts
   review-coverage.ts
   review-series.ts
+  review-comments.ts
   review-ui.ts
   prompts.ts
   types.ts
@@ -97,6 +98,7 @@ test/
   route-validation.test.ts
   review-coverage.test.ts
   review-series.test.ts
+  review-comments.test.ts
 ```
 
 Responsibilities:
@@ -109,7 +111,8 @@ Responsibilities:
 | `src/route-validation.ts` | Validate route references, coverage, ordering, and explicit skips |
 | `src/review-coverage.ts` | Materialize submitted review outcomes for every snapshot hunk |
 | `src/review-series.ts` | Create and append immutable completed review rounds |
-| `src/review-ui.ts` | Render the walkthrough, navigate diff lines, edit comments, and submit results |
+| `src/review-comments.ts` | Own comment anchors, drafts, ordering, cancellation, and drift-gated submission results |
+| `src/review-ui.ts` | Render the walkthrough, navigate diff lines, and connect the comment session to the TUI |
 | `src/prompts.ts` | Tell the agent how to inspect the change and construct a semantic route |
 | `src/types.ts` | Define TypeScript types and TypeBox schemas shared across modules |
 
@@ -301,7 +304,9 @@ A submitted comment must include:
 snapshot ID
 review unit ID
 hunk ID
-file path
+selected file path
+old file path, when available
+new file path, when available
 old line number, when available
 new line number, when available
 selected diff text

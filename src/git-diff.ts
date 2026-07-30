@@ -51,12 +51,15 @@ interface RawFileChange {
   readonly newPath?: string;
 }
 
-interface StateArtifacts {
+interface RepositoryStateArtifacts {
   readonly state: RepositoryState;
+  readonly untrackedFiles: readonly UntrackedFile[];
+}
+
+interface StateArtifacts extends RepositoryStateArtifacts {
   readonly stagedChanges: readonly RawFileChange[];
   readonly unstagedChanges: readonly RawFileChange[];
   readonly headWorktreeChanges: readonly RawFileChange[];
-  readonly untrackedFiles: readonly UntrackedFile[];
 }
 
 interface UntrackedFile {
@@ -124,6 +127,29 @@ const PATCH_OPTIONS = [
 ] as const;
 
 const RAW_OPTIONS = [...DIFF_OPTIONS, "--raw", "-z", "--full-index"] as const;
+
+export async function captureRepositoryState(
+  git: GitRunner,
+  cwd: string,
+): Promise<RepositoryState> {
+  const repositoryRoot = await resolveRepositoryRoot(git, cwd);
+  return (await captureRepositoryStateArtifacts(git, repositoryRoot)).state;
+}
+
+export async function assertReviewSnapshotUnchanged(
+  git: GitRunner,
+  snapshot: ReviewSnapshot,
+): Promise<void> {
+  const currentState = await captureRepositoryState(
+    git,
+    snapshot.repositoryRoot,
+  );
+  if (!sameRepositoryState(snapshot.repositoryState, currentState)) {
+    throw new GitSnapshotError(
+      `The repository changed after review snapshot ${snapshot.id} was captured. Comments were not submitted.`,
+    );
+  }
+}
 
 export async function captureReviewSnapshot(
   git: GitRunner,
@@ -274,10 +300,10 @@ function parseObjectId(output: string, label: string): GitObjectId {
   return value as GitObjectId;
 }
 
-async function captureStateArtifacts(
+async function captureRepositoryStateArtifacts(
   git: GitRunner,
   repositoryRoot: string,
-): Promise<StateArtifacts> {
+): Promise<RepositoryStateArtifacts> {
   const headOid = await resolveCommit(
     git,
     repositoryRoot,
@@ -294,21 +320,6 @@ async function captureStateArtifacts(
     repositoryRoot,
     diffArgs(PATCH_OPTIONS, []),
   );
-  const stagedRaw = await runGit(
-    git,
-    repositoryRoot,
-    diffArgs(RAW_OPTIONS, ["--cached", headOid]),
-  );
-  const unstagedRaw = await runGit(
-    git,
-    repositoryRoot,
-    diffArgs(RAW_OPTIONS, []),
-  );
-  const headWorktreeRaw = await runGit(
-    git,
-    repositoryRoot,
-    diffArgs(RAW_OPTIONS, [headOid]),
-  );
   const untrackedFiles = await captureUntrackedFiles(git, repositoryRoot);
 
   return {
@@ -324,10 +335,39 @@ async function captureStateArtifacts(
         untrackedFiles,
       ),
     },
+    untrackedFiles,
+  };
+}
+
+async function captureStateArtifacts(
+  git: GitRunner,
+  repositoryRoot: string,
+): Promise<StateArtifacts> {
+  const repositoryState = await captureRepositoryStateArtifacts(
+    git,
+    repositoryRoot,
+  );
+  const stagedRaw = await runGit(
+    git,
+    repositoryRoot,
+    diffArgs(RAW_OPTIONS, ["--cached", repositoryState.state.headOid]),
+  );
+  const unstagedRaw = await runGit(
+    git,
+    repositoryRoot,
+    diffArgs(RAW_OPTIONS, []),
+  );
+  const headWorktreeRaw = await runGit(
+    git,
+    repositoryRoot,
+    diffArgs(RAW_OPTIONS, [repositoryState.state.headOid]),
+  );
+
+  return {
+    ...repositoryState,
     stagedChanges: parseRawDiff(stagedRaw),
     unstagedChanges: parseRawDiff(unstagedRaw),
     headWorktreeChanges: parseRawDiff(headWorktreeRaw),
-    untrackedFiles,
   };
 }
 

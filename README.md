@@ -131,7 +131,7 @@ Planned controls:
 | `s` | Open the comment summary and submission page |
 | `Esc` | Pause or cancel the review |
 
-A comment will retain its file path, old and new line numbers, hunk identifier, review unit, and nearby diff text.
+A comment will retain its selected file path, old and new paths for renames, old and new line numbers, hunk identifier, review unit, and nearby diff text.
 
 ## Comment Submission
 
@@ -185,6 +185,7 @@ src/
   route-validation.ts   Route coverage, ordering, and skip validation
   review-coverage.ts    Submitted hunk outcome calculation
   review-series.ts      Completed review round lifecycle
+  review-comments.ts    Comment anchors, drafts, and submission results
   review-ui.ts           Interactive TUI
   prompts.ts             Agent instructions for route construction
   types.ts               Shared data structures and schemas
@@ -194,6 +195,7 @@ test/
   route-validation.test.ts
   review-coverage.test.ts
   review-series.test.ts
+  review-comments.test.ts
 ```
 
 The final package will be a pi extension. Installation instructions will be added after the first working release.
