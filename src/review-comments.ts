@@ -104,6 +104,11 @@ export class ReviewSession {
       .map(({ comment }) => copyComment(comment));
   }
 
+  getComment(anchor: ReviewCommentAnchor): ReviewComment | undefined {
+    const stored = this.commentsByAnchor.get(commentAnchorKey(anchor));
+    return stored === undefined ? undefined : copyComment(stored.comment);
+  }
+
   upsertComment(input: ReviewCommentInput): ReviewComment {
     if (input.body.trim().length === 0) {
       throw new ReviewCommentInputError(

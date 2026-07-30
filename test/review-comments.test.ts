@@ -380,6 +380,19 @@ test("orders comments by semantic route order across units and hunks", () => {
   );
 });
 
+test("finds a comment by its frozen diff anchor", () => {
+  const fixture = makeCommentFixture();
+  const session = new ReviewSession(fixture.snapshot, fixture.route);
+  const commentAnchor = anchor(fixture.unitId, hunkId("h-comment"), 3);
+  session.upsertComment({ ...commentAnchor, body: "Anchored question." });
+
+  assert.equal(session.getComment(commentAnchor)?.body, "Anchored question.");
+  assert.equal(
+    session.getComment(anchor(fixture.unitId, hunkId("h-comment"), 4)),
+    undefined,
+  );
+});
+
 test("editing a comment replaces its body without duplicating its anchor", () => {
   const fixture = makeCommentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
