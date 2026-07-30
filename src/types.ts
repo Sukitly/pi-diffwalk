@@ -244,6 +244,7 @@ export type ReviewRouteCandidate = Type.Static<
 >;
 
 export interface ReviewRoute {
+  readonly [brand]: "ValidatedReviewRoute";
   readonly snapshotId: SnapshotId;
   readonly units: readonly ReviewUnit[];
   readonly skippedHunks: readonly ReviewRouteSkip[];

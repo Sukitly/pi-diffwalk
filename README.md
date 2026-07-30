@@ -124,12 +124,17 @@ Planned controls:
 
 | Key | Action |
 |---|---|
-| `j`, `k`, `Up`, `Down` | Move through diff lines |
+| `j`, `k`, `Up`, `Down` | Move through diff lines or scroll the current page |
+| `PageUp`, `PageDown` | Move by a viewport |
 | `n`, `p`, `Left`, `Right` | Move between review units |
 | `c` | Add or edit a comment on the selected line |
 | `d` | Delete the comment on the selected line |
+| `e` | Open the complete agent explanation |
+| `i` | Open the frozen snapshot inventory |
 | `s` | Open the comment summary and submission page |
-| `Esc` | Pause or cancel the review |
+| `Esc` | Return from a secondary page or open explicit cancellation confirmation |
+
+The inventory distinguishes planned, skipped, carried-forward, metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Text hunks outside the planned route remain available for explicit read-only inspection.
 
 A comment will retain its selected file path, old and new paths for renames, old and new line numbers, hunk identifier, review unit, and nearby diff text.
 
@@ -140,7 +145,7 @@ The final page will support two submission modes:
 - **Discuss first:** The agent investigates and responds to every comment without editing code.
 - **Apply change requests:** The agent applies direct change requests and explains questions or disagreements.
 
-The comments are returned only after the reviewer submits the batch. This keeps the review uninterrupted and prevents the agent from changing later hunks while the human is still reading the snapshot.
+The comments are returned only after the reviewer visits every planned review unit and submits the batch. This keeps the review uninterrupted and prevents the agent from changing later hunks while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
 
 ## Grounding and Coverage
 
