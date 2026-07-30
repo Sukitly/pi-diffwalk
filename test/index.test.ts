@@ -6,6 +6,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
 import {
   createPiGitRunner,
   type DiffWalkDependencies,
@@ -33,9 +34,10 @@ interface Harness {
   ) => Promise<void>;
   readonly tool: GuidedToolDefinition;
   readonly sentMessages: readonly string[];
+  readonly openedSnapshots: readonly string[];
 }
 
-function createHarness(): Harness {
+function createHarness(options: { readonly drift?: boolean } = {}): Harness {
   const snapshot = makeSnapshot("snapshot-index", [
     { id: "h1", fingerprint: "fp1" },
   ]);
@@ -44,6 +46,7 @@ function createHarness(): Harness {
     | undefined;
   let tool: GuidedToolDefinition | undefined;
   const sentMessages: string[] = [];
+  const openedSnapshots: string[] = [];
   const pi = {
     registerCommand(
       name: string,
@@ -71,8 +74,13 @@ function createHarness(): Harness {
         comparison: { ...snapshot.comparison, targetRef },
       };
     },
-    async assertReviewSnapshotUnchanged() {},
+    async assertReviewSnapshotUnchanged() {
+      if (options.drift) {
+        throw new ReviewSnapshotDriftError("Repository changed.");
+      }
+    },
     async openGuidedReview(_ctx, input) {
+      openedSnapshots.push(input.snapshot.id);
       return { status: "cancelled", snapshotId: input.snapshot.id };
     },
   };
@@ -80,7 +88,7 @@ function createHarness(): Harness {
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
-  return { command, tool, sentMessages };
+  return { command, tool, sentMessages, openedSnapshots };
 }
 
 function commandContext(
@@ -146,46 +154,42 @@ test("adapts pi.exec to argument-array Git execution", async () => {
 
 test("requires /review and binds the tool route to the pending snapshot", async () => {
   const harness = createHarness();
-  const before = await harness.tool.execute(
-    "call-1",
-    validRoute(),
-    undefined,
-    undefined,
-    toolContext(),
+  await assert.rejects(
+    harness.tool.execute(
+      "call-1",
+      validRoute(),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /No DiffWalk snapshot is pending.*run \/review first/,
   );
-  assert.deepEqual(before.details, {
-    status: "error",
-    code: "no-pending-review",
-  });
 
   await harness.command(" origin/main ", commandContext());
   assert.equal(harness.sentMessages.length, 1);
   assert.match(harness.sentMessages[0] ?? "", /Prepare a semantic route/);
   assert.match(harness.sentMessages[0] ?? "", /"targetRef": "origin\/main"/);
 
-  const mismatch = await harness.tool.execute(
-    "call-2",
-    validRoute("other-snapshot"),
-    undefined,
-    undefined,
-    toolContext(),
+  await assert.rejects(
+    harness.tool.execute(
+      "call-2",
+      validRoute("other-snapshot"),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /does not match pending snapshot snapshot-index/,
   );
-  assert.deepEqual(mismatch.details, {
-    status: "error",
-    code: "snapshot-mismatch",
-    expectedSnapshotId: "snapshot-index",
-  });
 
-  const invalid = await harness.tool.execute(
-    "call-3",
-    { ...validRoute(), units: [] },
-    undefined,
-    undefined,
-    toolContext(),
-  );
-  assert.equal(
-    (invalid.details as { readonly code?: string }).code,
-    "invalid-route",
+  await assert.rejects(
+    harness.tool.execute(
+      "call-3",
+      { ...validRoute(), units: [] },
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /Invalid review route:[\s\S]*does not cover required hunk h1[\s\S]*must contain at least one non-empty review unit/,
   );
 
   const completed = await harness.tool.execute(
@@ -200,17 +204,48 @@ test("requires /review and binds the tool route to the pending snapshot", async 
     snapshotId: "snapshot-index",
   });
 
-  const consumed = await harness.tool.execute(
-    "call-5",
-    validRoute(),
-    undefined,
-    undefined,
-    toolContext(),
+  await assert.rejects(
+    harness.tool.execute(
+      "call-5",
+      validRoute(),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /No DiffWalk snapshot is pending/,
   );
-  assert.deepEqual(consumed.details, {
-    status: "error",
-    code: "no-pending-review",
-  });
+});
+
+test("rejects repository drift before opening the walkthrough", async () => {
+  const harness = createHarness({ drift: true });
+  await harness.command("", commandContext());
+
+  await assert.rejects(
+    harness.tool.execute(
+      "call-drift",
+      validRoute(),
+      new AbortController().signal,
+      undefined,
+      toolContext(),
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewSnapshotDriftError);
+      assert.match(error.message, /Run \/review again before opening DiffWalk/);
+      return true;
+    },
+  );
+  assert.deepEqual(harness.openedSnapshots, []);
+
+  await assert.rejects(
+    harness.tool.execute(
+      "call-stale",
+      validRoute(),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /No DiffWalk snapshot is pending/,
+  );
 });
 
 test("fails /review clearly outside interactive TUI mode", async () => {

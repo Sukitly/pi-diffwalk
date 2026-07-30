@@ -3,6 +3,7 @@ import {
   assertReviewSnapshotUnchanged,
   captureReviewSnapshot,
   type GitRunner,
+  ReviewSnapshotDriftError,
 } from "./git-diff.ts";
 import {
   buildReviewKickoffPrompt,
@@ -10,10 +11,7 @@ import {
 } from "./prompts.ts";
 import { computeReviewDelta } from "./review-delta.ts";
 import { openGuidedReview } from "./review-ui.ts";
-import {
-  ReviewRouteValidationError,
-  validateReviewRoute,
-} from "./route-validation.ts";
+import { validateReviewRoute } from "./route-validation.ts";
 import {
   type GuidedReviewResult,
   type ReviewDelta,
@@ -27,20 +25,6 @@ interface PendingReview {
   readonly snapshot: ReviewSnapshot;
   readonly delta: ReviewDelta;
   inProgress: boolean;
-}
-
-export interface GuidedReviewToolErrorDetails {
-  readonly status: "error";
-  readonly code:
-    | "no-pending-review"
-    | "snapshot-mismatch"
-    | "review-in-progress"
-    | "invalid-route";
-  readonly expectedSnapshotId?: string;
-  readonly issues?: readonly {
-    readonly code: string;
-    readonly message: string;
-  }[];
 }
 
 export function parseReviewTarget(args: string): string {
@@ -106,10 +90,7 @@ export function registerDiffWalk(
     },
   });
 
-  pi.registerTool<
-    typeof ReviewRouteCandidateSchema,
-    GuidedReviewResult | GuidedReviewToolErrorDetails
-  >({
+  pi.registerTool<typeof ReviewRouteCandidateSchema, GuidedReviewResult>({
     name: GUIDED_REVIEW_TOOL_NAME,
     label: "Guided Review",
     description:
@@ -118,35 +99,39 @@ export function registerDiffWalk(
       "Open the validated human-guided review route for the pending DiffWalk snapshot",
     parameters: ReviewRouteCandidateSchema,
     executionMode: "sequential",
-    async execute(_toolCallId, route, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, route, signal, _onUpdate, ctx) {
       const pending = pendingReview;
       if (pending === undefined) {
-        return toolError(
-          "no-pending-review",
+        throw new Error(
           "No DiffWalk snapshot is pending. Ask the user to run /review first.",
         );
       }
       if (route.snapshotId !== pending.snapshot.id) {
-        return toolError(
-          "snapshot-mismatch",
+        throw new Error(
           `Route snapshot ${route.snapshotId} does not match pending snapshot ${pending.snapshot.id}. Use the frozen snapshot ID from the /review prompt.`,
-          { expectedSnapshotId: pending.snapshot.id },
         );
       }
       if (pending.inProgress) {
-        return toolError(
-          "review-in-progress",
+        throw new Error(
           `Guided review for snapshot ${pending.snapshot.id} is already open.`,
         );
       }
 
+      validateReviewRoute(pending.snapshot, pending.delta, route);
+      const verificationSignal = signal ?? new AbortController().signal;
       try {
-        validateReviewRoute(pending.snapshot, pending.delta, route);
+        await verifySnapshot(
+          pi,
+          dependencies.assertReviewSnapshotUnchanged,
+          pending.snapshot,
+          verificationSignal,
+        );
       } catch (error: unknown) {
-        if (error instanceof ReviewRouteValidationError) {
-          return toolError("invalid-route", error.message, {
-            issues: error.issues,
-          });
+        if (error instanceof ReviewSnapshotDriftError) {
+          pendingReview = undefined;
+          throw new ReviewSnapshotDriftError(
+            `Repository drift invalidated snapshot ${pending.snapshot.id}. Run /review again before opening DiffWalk.`,
+          );
         }
         throw error;
       }
@@ -186,20 +171,6 @@ async function verifySnapshot(
   signal.throwIfAborted();
   await assertUnchanged(createPiGitRunner(pi, signal), snapshot);
   signal.throwIfAborted();
-}
-
-function toolError(
-  code: GuidedReviewToolErrorDetails["code"],
-  message: string,
-  extra: Omit<GuidedReviewToolErrorDetails, "status" | "code"> = {},
-): {
-  content: [{ type: "text"; text: string }];
-  details: GuidedReviewToolErrorDetails;
-} {
-  return {
-    content: [{ type: "text", text: message }],
-    details: { status: "error", code, ...extra },
-  };
 }
 
 export function formatGuidedReviewResult(result: GuidedReviewResult): string {
