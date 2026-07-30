@@ -135,48 +135,13 @@ These rules define the product. Do not weaken them without explicit user approva
 11. Unsupported changes must be reported. They must never disappear silently.
 12. Non-interactive modes must fail clearly instead of pretending that an interactive review occurred.
 
-## Upstream API References
-
-The local pi source is available at:
-
-```text
-/Users/sukit/Codes/open-source/pi-origin
-```
-
-Before using or changing a pi Extension or TUI API, read the current upstream source and documentation. Do not guess API shapes.
-
-Primary references:
-
-```text
-packages/coding-agent/docs/extensions.md
-packages/coding-agent/docs/tui.md
-packages/coding-agent/examples/extensions/questionnaire.ts
-packages/coding-agent/examples/extensions/summarize.ts
-packages/coding-agent/src/core/extensions/types.ts
-packages/tui/src/tui.ts
-```
-
-Read `/Users/sukit/Codes/open-source/pi-origin/AGENTS.md` before copying patterns or running commands in that repository.
-
-Use only public exports from:
-
-```text
-@earendil-works/pi-coding-agent
-@earendil-works/pi-tui
-@earendil-works/pi-ai
-typebox
-```
-
-Do not import private source paths from `pi-origin` into this project.
-
 ## Workflow for Changes
 
 Before editing:
 
 1. Read this file, the README, and every source file relevant to the task.
-2. Inspect current upstream pi types when the task touches Extension or TUI APIs.
-3. Present a plan that names the files to change and explains why.
-4. Wait for explicit user approval.
+2. Present a plan that names the files to change and explains why.
+3. Wait for explicit user approval.
 
 During implementation:
 
