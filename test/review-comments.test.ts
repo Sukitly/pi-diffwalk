@@ -521,7 +521,7 @@ test("does not create a submission result when snapshot verification fails", asy
   );
 });
 
-test("cancels without returning unsubmitted comments", () => {
+test("pauses without returning unsubmitted comments", () => {
   const fixture = makeCommentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
   session.upsertComment({
@@ -529,8 +529,8 @@ test("cancels without returning unsubmitted comments", () => {
     body: "Unsubmitted draft.",
   });
 
-  assert.deepEqual(session.cancel(), {
-    status: "cancelled",
+  assert.deepEqual(session.pause(), {
+    status: "paused",
     snapshotId: fixture.snapshot.id,
   });
 });

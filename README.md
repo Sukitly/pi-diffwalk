@@ -32,14 +32,14 @@ It is not intended to:
 Run:
 
 ```text
-/review [base]
+/diffwalk [base]
 ```
 
 Examples:
 
 ```text
-/review
-/review origin/main
+/diffwalk
+/diffwalk origin/main
 ```
 
 With no base argument, DiffWalk will review the current worktree against `HEAD`, including tracked and untracked changes. With a base argument, it will review the current working state against that Git revision.
@@ -92,33 +92,27 @@ The agent provides the route and explanation. DiffWalk provides the diff content
 
 ## TUI
 
-A review screen will contain the explanation and the selected diff unit:
+The walkthrough keeps the default screen focused on the review task and frozen diff. Press `e` when the full call path and agent explanation are needed.
 
 ```text
-[3 / 12] Authentication request validation
-src/auth/handler.ts  @@ -42,8 +48,19 @@
+DiffWalk  3/12  Authentication request validation
 
-Why here
-This is the external entry point for the authentication flow. The token
-parser depends on the invariant established here.
+Review this change
+The handler now validates issuer and audience.
 
-Context
-handler -> validateRequest -> parseToken -> createSession
-
-What changed
-The handler now validates issuer and audience instead of checking only that
-an authorization header exists.
-
-Review focus
+Focus
 - Is the trusted issuer read from configuration?
 - Do existing tokens remain compatible?
-- Does the failure response expose internal information?
 
+Git snapshot diff
   48   const token = request.headers.authorization
 - 49   if (!token) return unauthorized()
-+ 49   const claims = await validateToken(token)
-> 50   if (claims.issuer !== config.issuer) return unauthorized()
+> 49   const claims = await validateToken(token)
+
+j/k select line · c comment · n complete section · e details · s summary
 ```
+
+The normal flow is to select changed lines with `j` or `k`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `s` to inspect review progress and comments at any time.
 
 Controls:
 
@@ -145,7 +139,7 @@ The final page will support two submission modes:
 - **Discuss first:** The agent investigates and responds to every comment without editing code.
 - **Apply change requests:** The agent applies direct change requests and explains questions or disagreements.
 
-The comments are returned only after the reviewer visits every planned review unit and submits the batch. This keeps the review uninterrupted and prevents the agent from changing later hunks while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
+The comments are returned only after the reviewer explicitly completes every planned review unit and submits the batch. An incomplete summary sends Enter back to the first pending unit. This keeps the review uninterrupted and prevents the agent from changing later hunks while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
 
 ## Grounding and Coverage
 
@@ -169,7 +163,7 @@ These rules do not make the agent's explanation correct. They prevent the explan
 ## Architecture
 
 ```text
-/review command
+/diffwalk command
     -> Git snapshot collector
     -> diff parser and stable hunk IDs
     -> agent review-route prompt
@@ -187,6 +181,7 @@ src/
   index.ts              Command and tool registration
   git-diff.ts           Snapshot collection and diff parsing
   review-delta.ts       Incremental hunk classification and delta validation
+  in-progress-review.ts Resumable review lifecycle and submission eligibility
   route-validation.ts   Route coverage, ordering, and skip validation
   review-coverage.ts    Submitted hunk outcome calculation
   review-series.ts      Completed review round lifecycle
@@ -198,6 +193,7 @@ test/
   index.test.ts
   git-diff.test.ts
   review-delta.test.ts
+  in-progress-review.test.ts
   route-validation.test.ts
   review-coverage.test.ts
   review-series.test.ts
@@ -213,7 +209,13 @@ npm ci --ignore-scripts
 pi -e ./src/index.ts
 ```
 
-Run `/review` from a Git worktree in interactive TUI mode. The current implementation keeps one pending review snapshot in memory. Starting another `/review` replaces the pending snapshot. Completed review rounds are not yet persisted across sessions.
+Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pause the current review without returning draft comments to the agent. Running `/diffwalk` again in the same extension process resumes the frozen route, explicit unit progress, draft comments, and submission mode when the worktree still matches the snapshot. Discard is a separate explicit action. Review state and completed rounds are not yet persisted across extension reloads or processes.
+
+## Review Lifecycle Domain
+
+The domain layer represents an in-progress review independently from a TUI, tool call, or agent conversation. An in-progress review owns its frozen snapshot, validated route, explicit per-unit progress, draft comments, submission mode, and optimistic version. Repository drift is derived by comparing the current repository state with the frozen snapshot rather than stored as a lifecycle state.
+
+The lifecycle currently supports route preparation, readiness, submission into an immutable review round, and explicit discard. Submission is rejected until every planned unit is explicitly reviewed and the repository still matches the snapshot. The extension workflow does not yet persist or resume this domain object; that integration is the next implementation stage.
 
 ## Design Principles
 

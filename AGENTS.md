@@ -85,6 +85,7 @@ src/
   index.ts
   git-diff.ts
   review-delta.ts
+  in-progress-review.ts
   route-validation.ts
   review-coverage.ts
   review-series.ts
@@ -95,6 +96,7 @@ src/
 test/
   git-diff.test.ts
   review-delta.test.ts
+  in-progress-review.test.ts
   route-validation.test.ts
   review-coverage.test.ts
   review-series.test.ts
@@ -105,9 +107,10 @@ Responsibilities:
 
 | File | Responsibility |
 |---|---|
-| `src/index.ts` | Register `/review`, register the guided review tool, and coordinate the workflow |
+| `src/index.ts` | Register `/diffwalk`, register the guided review tool, and coordinate the workflow |
 | `src/git-diff.ts` | Capture repository state, parse unified diffs, include untracked files, and assign stable identifiers |
 | `src/review-delta.ts` | Classify snapshot hunks against the previous completed round and validate delta coverage |
+| `src/in-progress-review.ts` | Own resumable review identity, lifecycle, explicit unit progress, drafts, submission eligibility, and optimistic versioning |
 | `src/route-validation.ts` | Validate route references, coverage, ordering, and explicit skips |
 | `src/review-coverage.ts` | Materialize submitted review outcomes for every snapshot hunk |
 | `src/review-series.ts` | Create and append immutable completed review rounds |

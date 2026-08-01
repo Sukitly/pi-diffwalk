@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { listSnapshotHunks } from "./review-delta.ts";
 import type {
-  CancelledGuidedReviewResult,
   DiffLine,
   FileChange,
   HunkId,
+  PausedGuidedReviewResult,
   ReviewComment,
   ReviewRoute,
   ReviewSnapshot,
@@ -152,8 +152,8 @@ export class ReviewSession {
     };
   }
 
-  cancel(): CancelledGuidedReviewResult {
-    return { status: "cancelled", snapshotId: this.snapshot.id };
+  pause(): PausedGuidedReviewResult {
+    return { status: "paused", snapshotId: this.snapshot.id };
   }
 }
 

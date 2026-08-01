@@ -8,6 +8,7 @@ type Brand<Value, Name extends string> = Value & {
 
 export type ReviewSeriesId = Brand<string, "ReviewSeriesId">;
 export type ReviewRoundId = Brand<string, "ReviewRoundId">;
+export type InProgressReviewId = Brand<string, "InProgressReviewId">;
 export type SnapshotId = Brand<string, "SnapshotId">;
 export type FileChangeId = Brand<string, "FileChangeId">;
 export type HunkId = Brand<string, "HunkId">;
@@ -151,6 +152,32 @@ export interface ReviewRound {
   readonly coverage: ReviewCoverage;
 }
 
+export type InProgressReviewLifecycle =
+  | "preparing-route"
+  | "ready"
+  | "submitted"
+  | "discarded";
+
+export interface InProgressReview {
+  readonly id: InProgressReviewId;
+  readonly seriesId: ReviewSeriesId;
+  readonly snapshot: ReviewSnapshot;
+  readonly delta: ReviewDelta;
+  readonly route?: ReviewRoute;
+  readonly unitProgress: readonly ReviewUnitProgress[];
+  readonly comments: readonly ReviewComment[];
+  readonly submissionMode: ReviewSubmissionMode;
+  readonly lifecycle: InProgressReviewLifecycle;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ReviewUnitProgress {
+  readonly reviewUnitId: ReviewUnitId;
+  readonly disposition: "pending" | "reviewed";
+}
+
 export interface ReviewDelta {
   readonly currentSnapshotId: SnapshotId;
   readonly baselineRoundId?: ReviewRoundId;
@@ -289,14 +316,20 @@ export interface SubmittedGuidedReviewResult {
   readonly comments: readonly ReviewComment[];
 }
 
-export interface CancelledGuidedReviewResult {
-  readonly status: "cancelled";
+export interface PausedGuidedReviewResult {
+  readonly status: "paused";
+  readonly snapshotId: SnapshotId;
+}
+
+export interface DiscardedGuidedReviewResult {
+  readonly status: "discarded";
   readonly snapshotId: SnapshotId;
 }
 
 export type GuidedReviewResult =
   | SubmittedGuidedReviewResult
-  | CancelledGuidedReviewResult;
+  | PausedGuidedReviewResult
+  | DiscardedGuidedReviewResult;
 
 interface HunkReviewRecordBase {
   readonly hunkId: HunkId;

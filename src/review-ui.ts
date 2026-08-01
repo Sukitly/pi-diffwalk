@@ -15,6 +15,13 @@ import {
 } from "@earendil-works/pi-tui";
 import { ReviewSnapshotDriftError } from "./git-diff.ts";
 import {
+  deleteInProgressReviewComment,
+  discardInProgressReview,
+  markReviewUnitReviewed,
+  setInProgressReviewSubmissionMode,
+  upsertInProgressReviewComment,
+} from "./in-progress-review.ts";
+import {
   type ReviewCommentAnchor,
   ReviewCommentInputError,
   type ReviewCommentTarget,
@@ -33,6 +40,7 @@ import type {
   GuidedReviewResult,
   HunkId,
   HunkReviewRequirement,
+  InProgressReview,
   ReviewComment,
   ReviewDelta,
   ReviewRoute,
@@ -48,6 +56,8 @@ export interface GuidedReviewUiInput {
   readonly delta: ReviewDelta;
   readonly route: ReviewRouteCandidate;
   readonly verifySnapshot: ReviewSnapshotVerifier;
+  readonly review?: InProgressReview;
+  readonly onReviewChange?: (review: InProgressReview) => void;
 }
 
 export class GuidedReviewUiUnavailableError extends Error {
@@ -134,12 +144,15 @@ interface GuidedReviewComponentOptions {
   readonly delta: ReviewDelta;
   readonly route: ReviewRoute;
   readonly session: ReviewSession;
+  readonly review?: InProgressReview;
+  readonly onReviewChange?: (review: InProgressReview) => void;
   readonly onSubmit: (
     mode: ReviewSubmissionMode,
     signal: AbortSignal,
   ) => Promise<SubmittedGuidedReviewResult>;
   readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
-  readonly onCancel: () => void;
+  readonly onPause: () => void;
+  readonly onDiscard: () => void;
 }
 
 export async function openGuidedReview(
@@ -152,6 +165,14 @@ export async function openGuidedReview(
 
   const route = validateReviewRoute(input.snapshot, input.delta, input.route);
   const session = new ReviewSession(input.snapshot, route);
+  for (const comment of input.review?.comments ?? []) {
+    session.upsertComment({
+      reviewUnitId: comment.reviewUnitId,
+      hunkId: comment.hunkId,
+      diffLineIndex: comment.diffLineIndex,
+      body: comment.body,
+    });
+  }
 
   return ctx.ui.custom<GuidedReviewResult>(
     (tui, theme, keybindings, done) =>
@@ -163,10 +184,15 @@ export async function openGuidedReview(
         delta: input.delta,
         route,
         session,
+        review: input.review,
+        onReviewChange: input.onReviewChange,
         onSubmit: (mode, signal) =>
           session.submit(mode, input.verifySnapshot, signal),
         onComplete: done,
-        onCancel: () => done(session.cancel()),
+        onPause: () =>
+          done({ status: "paused", snapshotId: input.snapshot.id }),
+        onDiscard: () =>
+          done({ status: "discarded", snapshotId: input.snapshot.id }),
       }),
     {
       overlay: true,
@@ -186,6 +212,8 @@ export class GuidedReviewComponent implements Component, Focusable {
   private readonly keybindings: ReviewUiKeybindings;
   private readonly route: ReviewRoute;
   private readonly session: ReviewSession;
+  private review?: InProgressReview;
+  private readonly onReviewChange?: (review: InProgressReview) => void;
   private readonly units: readonly UnitView[];
   private readonly inventory: readonly InventoryEntry[];
   private readonly skippedCount: number;
@@ -195,13 +223,14 @@ export class GuidedReviewComponent implements Component, Focusable {
     signal: AbortSignal,
   ) => Promise<SubmittedGuidedReviewResult>;
   private readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
-  private readonly onCancel: () => void;
+  private readonly onPause: () => void;
+  private readonly onDiscard: () => void;
   private readonly editor: Editor;
   private screen: ReviewScreen = "walkthrough";
   private returnScreen: ReviewScreen = "walkthrough";
   private unitIndex = 0;
   private readonly selectedTargetByUnit: number[];
-  private readonly visitedUnits = new Set<number>();
+  private readonly reviewedUnits = new Set<number>();
   private diffOffset = 0;
   private explanationOffset = 0;
   private inventoryIndex = 0;
@@ -226,9 +255,13 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.keybindings = options.keybindings;
     this.route = options.route;
     this.session = options.session;
+    this.review = options.review;
+    this.onReviewChange = options.onReviewChange;
+    this.submissionMode = options.review?.submissionMode ?? "discuss-first";
     this.onSubmit = options.onSubmit;
     this.onComplete = options.onComplete;
-    this.onCancel = options.onCancel;
+    this.onPause = options.onPause;
+    this.onDiscard = options.onDiscard;
     const viewModel = buildReviewViewModel(
       options.snapshot,
       options.delta,
@@ -239,8 +272,22 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.inventory = viewModel.inventory;
     this.skippedCount = options.route.skippedHunks.length;
     this.unsupportedCount = viewModel.unsupportedCount;
-    this.selectedTargetByUnit = this.units.map(() => 0);
-    if (this.units.length > 0) this.visitedUnits.add(0);
+    this.selectedTargetByUnit = this.units.map((unit) => {
+      const changedLine = unit.targets.findIndex(
+        (target) =>
+          target.line.kind === "added" || target.line.kind === "removed",
+      );
+      return changedLine < 0 ? 0 : changedLine;
+    });
+    for (const [index, unit] of this.units.entries()) {
+      if (
+        this.review?.unitProgress.find(
+          (progress) => progress.reviewUnitId === unit.unit.id,
+        )?.disposition === "reviewed"
+      ) {
+        this.reviewedUnits.add(index);
+      }
+    }
 
     this.editor = new Editor(this.tui, createEditorTheme(this.theme), {
       paddingX: 0,
@@ -352,7 +399,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "j/k line • n/p unit • c comment • d delete • e explain • i inventory • s submit • Esc cancel",
+      "j/k select line • c comment • n complete section • e details • s summary • Esc pause",
     );
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
@@ -369,22 +416,19 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...header, ...empty, ...footer];
     }
 
-    const explanation = renderExplanationLines(
-      unitView.unit,
-      this.theme,
-      width,
-    );
-    const previewBudget =
+    const summary = renderWalkthroughSummary(unitView.unit, this.theme, width);
+    const summaryBudget =
       bodyHeight >= 8
         ? Math.min(
-            explanation.length,
-            Math.max(2, Math.floor(bodyHeight * 0.35)),
+            summary.length,
+            8,
+            Math.max(3, Math.floor(bodyHeight * 0.25)),
           )
         : 0;
-    const preview = explanation.slice(0, previewBudget);
-    if (preview.length > 0 && preview.length < explanation.length) {
+    const preview = summary.slice(0, summaryBudget);
+    if (preview.length > 0 && preview.length < summary.length) {
       preview[preview.length - 1] = fitLine(
-        this.theme.fg("dim", "… press e for the complete agent explanation"),
+        this.theme.fg("dim", "… press e for complete context and questions"),
         width,
       );
     }
@@ -479,7 +523,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const content =
       unit === undefined
         ? [this.theme.fg("muted", "No agent explanation is available.")]
-        : renderExplanationLines(unit, this.theme, width, true);
+        : renderExplanationLines(unit, this.theme, width);
     this.explanationOffset = clampOffset(
       this.explanationOffset,
       content.length,
@@ -565,7 +609,9 @@ export class GuidedReviewComponent implements Component, Focusable {
       width,
       this.submissionStatus === "checking"
         ? "Checking repository state... • Esc cancel verification"
-        : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return",
+        : this.pendingUnits().length > 0
+          ? "Enter continue next pending section • Esc return"
+          : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return",
     );
     const availableHeight = Math.max(0, rows - header.length - footer.length);
     const submissionNotice = renderSubmissionNotice(
@@ -584,7 +630,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.inventory,
       this.submissionMode,
       this.transientFeedback,
-      this.unvisitedUnits(),
+      this.pendingUnits(),
       this.theme,
       width,
     );
@@ -608,15 +654,15 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "Enter/y cancel review • Esc/n keep reviewing",
+      "Enter pause and resume later • d discard review • Esc continue",
     );
     const comments = this.session.getComments().length;
     const content = [
-      this.theme.fg("warning", this.theme.bold("Cancel guided review?")),
+      this.theme.fg("warning", this.theme.bold("Leave DiffWalk?")),
       ...wrapStyled(
         this.theme.fg(
           "text",
-          `The ${comments} draft comment${comments === 1 ? "" : "s"} will remain local to this review session and will not be returned to the agent.`,
+          `Pause to keep ${comments} draft comment${comments === 1 ? "" : "s"} and review progress for the next /diffwalk command. Discard permanently removes drafts.`,
         ),
         width,
       ),
@@ -629,7 +675,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const unitCount = this.units.length;
     const position =
       unitCount === 0 ? "unit 0/0" : `unit ${this.unitIndex + 1}/${unitCount}`;
-    const progress = `visited ${this.visitedUnits.size}/${unitCount}`;
+    const progress = `reviewed ${this.reviewedUnits.size}/${unitCount}`;
     const comments = `comments ${this.session.getComments().length}`;
     const inventory = `skipped ${this.skippedCount} • unsupported ${this.unsupportedCount}`;
     const verification = `snapshot ${submissionLabel(this.submissionStatus)}`;
@@ -667,7 +713,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       case "summary":
         return "Submission summary";
       case "cancel-confirmation":
-        return "Cancel guided review";
+        return "Pause or discard review";
     }
   }
 
@@ -693,7 +739,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "n") || matchesKey(data, Key.right)) {
-      this.moveUnit(1);
+      this.completeCurrentUnitAndContinue();
       return;
     }
     if (matchesKey(data, "c")) {
@@ -811,6 +857,14 @@ export class GuidedReviewComponent implements Component, Focusable {
         this.submissionMode === "discuss-first"
           ? "apply-change-requests"
           : "discuss-first";
+      if (this.review !== undefined) {
+        this.updateReview(
+          setInProgressReviewSubmissionMode(this.review, this.submissionMode, {
+            expectedVersion: this.review.version,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      }
       this.transientFeedback = undefined;
       this.refresh();
       return;
@@ -825,11 +879,23 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private handleCancelConfirmationInput(data: string): void {
-    if (matchesKey(data, Key.enter) || matchesKey(data, "y")) {
-      this.onCancel();
+    if (matchesKey(data, Key.enter)) {
+      this.onPause();
       return;
     }
-    if (matchesKey(data, Key.escape) || matchesKey(data, "n")) {
+    if (matchesKey(data, "d")) {
+      if (this.review !== undefined) {
+        this.updateReview(
+          discardInProgressReview(this.review, {
+            expectedVersion: this.review.version,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      }
+      this.onDiscard();
+      return;
+    }
+    if (matchesKey(data, Key.escape)) {
       this.openScreen(this.returnScreen);
     }
   }
@@ -910,11 +976,34 @@ export class GuidedReviewComponent implements Component, Focusable {
   private moveUnit(delta: number): void {
     if (this.units.length === 0) return;
     this.unitIndex = clamp(this.unitIndex + delta, 0, this.units.length - 1);
-    this.visitedUnits.add(this.unitIndex);
     this.diffOffset = 0;
     this.explanationOffset = 0;
     this.transientFeedback = undefined;
     this.refresh();
+  }
+
+  private completeCurrentUnitAndContinue(): void {
+    const unit = this.currentUnit();
+    if (unit === undefined) {
+      this.openScreen("summary");
+      return;
+    }
+    if (!this.reviewedUnits.has(this.unitIndex)) {
+      this.reviewedUnits.add(this.unitIndex);
+      if (this.review !== undefined) {
+        this.updateReview(
+          markReviewUnitReviewed(this.review, unit.unit.id, {
+            expectedVersion: this.review.version,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      }
+    }
+    if (this.unitIndex === this.units.length - 1) {
+      this.openScreen("summary");
+      return;
+    }
+    this.moveUnit(1);
   }
 
   private openCommentEditor(): void {
@@ -942,7 +1031,16 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     try {
-      this.session.upsertComment({ ...anchorFromTarget(target), body });
+      const input = { ...anchorFromTarget(target), body };
+      this.session.upsertComment(input);
+      if (this.review !== undefined) {
+        this.updateReview(
+          upsertInProgressReviewComment(this.review, input, {
+            expectedVersion: this.review.version,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      }
       this.commentInputError = undefined;
       this.openScreen("walkthrough");
     } catch (error: unknown) {
@@ -960,6 +1058,14 @@ export class GuidedReviewComponent implements Component, Focusable {
     const target = this.currentTarget();
     if (target === undefined) return;
     const { deleted } = this.session.deleteComment(target);
+    if (deleted && this.review !== undefined) {
+      this.updateReview(
+        deleteInProgressReviewComment(this.review, target, {
+          expectedVersion: this.review.version,
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    }
     this.setTransientFeedback(
       deleted ? "info" : "warning",
       deleted
@@ -996,10 +1102,18 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private startSubmission(): void {
     if (this.submissionStatus === "checking") return;
-    const unvisited = this.unvisitedUnits();
-    if (unvisited.length > 0) {
-      this.summaryOffset = 0;
-      this.refresh();
+    const firstPendingIndex = this.units.findIndex(
+      (_unit, index) => !this.reviewedUnits.has(index),
+    );
+    if (firstPendingIndex >= 0) {
+      this.unitIndex = firstPendingIndex;
+      this.diffOffset = 0;
+      this.explanationOffset = 0;
+      this.transientFeedback = {
+        kind: "info",
+        message: "Continue reviewing this section before submission.",
+      };
+      this.openScreen("walkthrough");
       return;
     }
 
@@ -1062,9 +1176,9 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
-  private unvisitedUnits(): readonly ReviewUnit[] {
+  private pendingUnits(): readonly ReviewUnit[] {
     return this.units
-      .filter((_unit, index) => !this.visitedUnits.has(index))
+      .filter((_unit, index) => !this.reviewedUnits.has(index))
       .map(({ unit }) => unit);
   }
 
@@ -1088,12 +1202,13 @@ export class GuidedReviewComponent implements Component, Focusable {
     const bodyHeight = Math.max(0, rows - 3);
     const unit = this.currentUnit();
     if (unit === undefined) return Math.max(0, bodyHeight - 1);
-    const explanation = renderExplanationLines(unit.unit, this.theme, width);
+    const summary = renderWalkthroughSummary(unit.unit, this.theme, width);
     const previewHeight =
       bodyHeight >= 8
         ? Math.min(
-            explanation.length,
-            Math.max(2, Math.floor(bodyHeight * 0.35)),
+            summary.length,
+            8,
+            Math.max(3, Math.floor(bodyHeight * 0.25)),
           )
         : 0;
     const feedbackHeight = renderTransientFeedback(
@@ -1130,6 +1245,11 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private syncEditorFocus(): void {
     this.editor.focused = this._focused && this.screen === "comment-editor";
+  }
+
+  private updateReview(review: InProgressReview): void {
+    this.review = review;
+    this.onReviewChange?.(review);
   }
 
   private clearRenderCache(): void {
@@ -1240,23 +1360,46 @@ function buildReviewViewModel(
   return { units, inventory, unsupportedCount };
 }
 
+function renderWalkthroughSummary(
+  unit: ReviewUnit,
+  theme: ReviewUiTheme,
+  width: number,
+): string[] {
+  const lines = [theme.fg("accent", theme.bold("Review this change"))];
+  lines.push(
+    ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
+  );
+  lines.push(theme.fg("muted", theme.bold("Focus")));
+  for (const focus of unit.reviewFocus.slice(0, 2)) {
+    lines.push(
+      ...wrapStyled(
+        `${theme.fg("accent", "• ")}${theme.fg("text", safeText(focus))}`,
+        width,
+      ),
+    );
+  }
+  if (unit.reviewFocus.length > 2) {
+    lines.push(
+      theme.fg(
+        "dim",
+        `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`,
+      ),
+    );
+  } else {
+    lines.push(
+      theme.fg("dim", "Press e for context and the full explanation."),
+    );
+  }
+  return lines;
+}
+
 function renderExplanationLines(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
   width: number,
-  complete = false,
 ): string[] {
   const lines: string[] = [];
-  lines.push(
-    theme.fg(
-      "accent",
-      theme.bold(
-        complete
-          ? "Agent explanation"
-          : "Agent explanation (press e to expand)",
-      ),
-    ),
-  );
+  lines.push(theme.fg("accent", theme.bold("Agent explanation")));
   addLabeledText(lines, "Why here", unit.whyHere, theme, width);
   addLabeledText(lines, "Context", unit.context, theme, width);
   addLabeledText(lines, "What changed", unit.changeSummary, theme, width);
@@ -1469,25 +1612,33 @@ function renderSummaryLines(
   inventory: readonly InventoryEntry[],
   submissionMode: ReviewSubmissionMode,
   feedback: TransientFeedback | undefined,
-  unvisitedUnits: readonly ReviewUnit[],
+  pendingUnits: readonly ReviewUnit[],
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
-  const lines: string[] = [
-    theme.fg("accent", theme.bold("Comment batch and submission mode")),
-  ];
+  const lines: string[] = [];
   lines.push(...renderTransientFeedback(feedback, theme, width));
-  if (unvisitedUnits.length > 0) {
+  if (pendingUnits.length > 0) {
+    lines.unshift(theme.fg("warning", theme.bold("Review incomplete")));
     lines.push(
       ...wrapStyled(
         theme.fg(
           "warning",
-          `Submission requires visiting every planned unit. Remaining: ${safeText(unvisitedUnits.map((unit) => unit.title).join(", "))}.`,
+          `${pendingUnits.length} section${pendingUnits.length === 1 ? "" : "s"} remain: ${safeText(pendingUnits.map((unit) => unit.title).join(", "))}.`,
         ),
         width,
       ),
+      "",
+      theme.fg(
+        "text",
+        "Press Enter to continue with the next pending section.",
+      ),
     );
+    return lines;
   }
+  lines.unshift(
+    theme.fg("accent", theme.bold("Comment batch and submission mode")),
+  );
   lines.push(
     modeLine(
       submissionMode === "discuss-first",

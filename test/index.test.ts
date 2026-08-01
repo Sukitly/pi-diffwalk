@@ -13,6 +13,7 @@ import {
   formatGuidedReviewResult,
   parseReviewTarget,
   registerDiffWalk,
+  resolveSourceBranch,
 } from "../src/index.ts";
 import type {
   GuidedReviewResult,
@@ -54,7 +55,7 @@ function createHarness(options: { readonly drift?: boolean } = {}): Harness {
         handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
       },
     ) {
-      assert.equal(name, "review");
+      assert.equal(name, "diffwalk");
       command = options.handler;
     },
     registerTool(definition: GuidedToolDefinition) {
@@ -81,7 +82,10 @@ function createHarness(options: { readonly drift?: boolean } = {}): Harness {
     },
     async openGuidedReview(_ctx, input) {
       openedSnapshots.push(input.snapshot.id);
-      return { status: "cancelled", snapshotId: input.snapshot.id };
+      return { status: "paused", snapshotId: input.snapshot.id };
+    },
+    async resolveSourceBranch() {
+      return "feature";
     },
   };
 
@@ -124,6 +128,36 @@ test("parses the default and explicit review targets", () => {
   assert.equal(parseReviewTarget(" origin/main "), "origin/main");
 });
 
+test("resolves branch and detached source identities", async () => {
+  const snapshot = makeSnapshot("snapshot-branch", []);
+  const branch = await resolveSourceBranch(
+    {
+      async exec() {
+        return {
+          stdout: "feature/review\n",
+          stderr: "",
+          code: 0,
+          killed: false,
+        };
+      },
+    },
+    "/repo",
+    snapshot,
+  );
+  const detached = await resolveSourceBranch(
+    {
+      async exec() {
+        return { stdout: "", stderr: "", code: 1, killed: false };
+      },
+    },
+    "/repo",
+    snapshot,
+  );
+
+  assert.equal(branch, "feature/review");
+  assert.equal(detached, `detached:${snapshot.comparison.sourceHeadOid}`);
+});
+
 test("adapts pi.exec to argument-array Git execution", async () => {
   const calls: unknown[] = [];
   const signal = new AbortController().signal;
@@ -152,7 +186,7 @@ test("adapts pi.exec to argument-array Git execution", async () => {
   ]);
 });
 
-test("requires /review and binds the tool route to the pending snapshot", async () => {
+test("requires /diffwalk and binds the tool route to the pending snapshot", async () => {
   const harness = createHarness();
   await assert.rejects(
     harness.tool.execute(
@@ -162,7 +196,7 @@ test("requires /review and binds the tool route to the pending snapshot", async 
       undefined,
       toolContext(),
     ),
-    /No DiffWalk snapshot is pending.*run \/review first/,
+    /No DiffWalk snapshot is pending.*run \/diffwalk first/,
   );
 
   await harness.command(" origin/main ", commandContext());
@@ -200,9 +234,16 @@ test("requires /review and binds the tool route to the pending snapshot", async 
     toolContext(),
   );
   assert.deepEqual(completed.details, {
-    status: "cancelled",
+    status: "paused",
     snapshotId: "snapshot-index",
   });
+
+  await harness.command("", commandContext());
+  assert.deepEqual(harness.openedSnapshots, [
+    "snapshot-index",
+    "snapshot-index",
+  ]);
+  assert.equal(harness.sentMessages.length, 1);
 
   await assert.rejects(
     harness.tool.execute(
@@ -212,7 +253,7 @@ test("requires /review and binds the tool route to the pending snapshot", async 
       undefined,
       toolContext(),
     ),
-    /No DiffWalk snapshot is pending/,
+    /already has a validated route.*resume it/,
   );
 });
 
@@ -230,7 +271,10 @@ test("rejects repository drift before opening the walkthrough", async () => {
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewSnapshotDriftError);
-      assert.match(error.message, /Run \/review again before opening DiffWalk/);
+      assert.match(
+        error.message,
+        /Run \/diffwalk again before opening DiffWalk/,
+      );
       return true;
     },
   );
@@ -248,7 +292,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
   );
 });
 
-test("fails /review clearly outside interactive TUI mode", async () => {
+test("fails /diffwalk clearly outside interactive TUI mode", async () => {
   const harness = createHarness();
   await assert.rejects(
     harness.command("", commandContext("print")),
@@ -257,13 +301,13 @@ test("fails /review clearly outside interactive TUI mode", async () => {
   assert.deepEqual(harness.sentMessages, []);
 });
 
-test("formats structured cancellation and submission instructions", () => {
-  const cancelled: GuidedReviewResult = {
-    status: "cancelled",
+test("formats structured pause and submission instructions", () => {
+  const paused: GuidedReviewResult = {
+    status: "paused",
     snapshotId: "snapshot-1" as SnapshotId,
   };
-  assert.deepEqual(JSON.parse(formatGuidedReviewResult(cancelled)), {
-    status: "cancelled",
+  assert.deepEqual(JSON.parse(formatGuidedReviewResult(paused)), {
+    status: "paused",
     snapshotId: "snapshot-1",
   });
 

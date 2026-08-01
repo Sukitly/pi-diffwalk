@@ -389,7 +389,10 @@ function createHarness(
       return session.submit(mode, verifier, signal);
     },
     onComplete: (result) => completedResults.push(result),
-    onCancel: () => {
+    onPause: () => {
+      cancellations.count += 1;
+    },
+    onDiscard: () => {
       cancellations.count += 1;
     },
   });
@@ -418,15 +421,23 @@ function press(component: GuidedReviewComponent, ...keys: string[]): void {
 }
 
 function visitEveryUnit(component: GuidedReviewComponent): void {
-  press(component, "n");
+  press(component, "n", "n");
 }
 
-test("renders agent commentary separately from the frozen Git diff", () => {
-  const output = renderText(createHarness(100, 30));
+test("keeps the walkthrough summary concise and full commentary separate", () => {
+  const harness = createHarness(100, 30);
+  const walkthrough = renderText(harness);
 
-  assert.match(output, /Agent explanation/);
-  assert.match(output, /Git snapshot diff/);
-  assert.match(output, /Request entry point/);
+  assert.match(walkthrough, /Review this change/);
+  assert.match(walkthrough, /Git snapshot diff/);
+  assert.match(walkthrough, />\s+14\s+-const value = request\.value/);
+  assert.doesNotMatch(walkthrough, /Why here/);
+
+  press(harness.component, "e");
+  const explanation = renderText(harness);
+  assert.match(explanation, /Agent explanation/);
+  assert.match(explanation, /Why here/);
+  assert.doesNotMatch(explanation, /Git snapshot diff/);
 });
 
 test("renders every component row as one terminal line", () => {
@@ -449,11 +460,14 @@ test("escapes newline and bidi control characters in paths", () => {
 });
 
 test("escapes terminal control sequences in agent and Git text", () => {
-  const output = renderText(createHarness(100, 30));
+  const harness = createHarness(100, 30);
+  const walkthrough = renderText(harness);
+  assert.match(walkthrough, /context line 0\\x1b\[31m/);
 
-  assert.match(output, /\\x1b\[2J/);
-  assert.match(output, /context line 0\\x1b\[31m/);
-  assert.equal(output.includes(`${String.fromCharCode(27)}[2J`), false);
+  press(harness.component, "e");
+  const explanation = renderText(harness);
+  assert.match(explanation, /\\x1b\[2J/);
+  assert.equal(explanation.includes(`${String.fromCharCode(27)}[2J`), false);
 });
 
 test("never renders beyond terminal width or height with ANSI styling", () => {
@@ -486,7 +500,7 @@ test("never renders beyond terminal width or height with ANSI styling", () => {
 test("keeps every wrapped row of the selected diff line visible", () => {
   const harness = createHarness(54, 12);
 
-  press(harness.component, "j", "j", "j", "j", "j");
+  press(harness.component, "j");
   const output = renderText(harness);
 
   assert.match(output, />\s+\d*\s+14\s+\+const value = validate/);
@@ -496,7 +510,7 @@ test("keeps every wrapped row of the selected diff line visible", () => {
 
 test("pages through a selected line taller than the diff viewport", () => {
   const harness = createHarness(30, 8);
-  press(harness.component, "j", "j", "j", "j", "j");
+  press(harness.component, "j");
 
   const firstPage = renderText(harness);
   press(harness.component, "\u001b[6~", "\u001b[6~");
@@ -518,7 +532,7 @@ test("moves between semantic units and preserves each unit cursor", () => {
   press(harness.component, "p");
   assert.match(renderText(harness), /unit 1\/2/);
   press(harness.component, "c");
-  assert.match(renderText(harness), /context line 2/);
+  assert.match(renderText(harness), /context line 6/);
 });
 
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
@@ -543,7 +557,7 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
 
   const comment = harness.session.getComments()[0];
   assert.equal(comment?.body, "请检查\n失败路径");
-  assert.equal(comment?.diffLineIndex, 0);
+  assert.equal(comment?.diffLineIndex, 4);
   assert.match(renderText(harness), /comments 1/);
 });
 
@@ -649,14 +663,17 @@ test("opens carried-forward frozen hunks for explicit inspection", () => {
   assert.match(renderText(harness), /Review inventory/);
 });
 
-test("blocks submission until every planned unit has been visited", async () => {
+test("continues the first pending section before submission", async () => {
   const harness = createHarness(100, 40);
-  press(harness.component, "s", "\r");
+  press(harness.component, "s");
+  assert.match(renderText(harness), /Review incomplete/);
 
+  press(harness.component, "\r");
   assert.deepEqual(harness.submittedModes, []);
-  assert.match(renderText(harness), /Remaining: Public contract/);
+  assert.match(renderText(harness), /Continue reviewing this section/);
+  assert.match(renderText(harness), /unit 1\/2/);
 
-  press(harness.component, "\u001b", "n", "s", "\r");
+  press(harness.component, "n", "n", "\r");
   assert.deepEqual(harness.submittedModes, ["discuss-first"]);
   await waitForImmediate();
   assert.equal(harness.completedResults.length, 1);
@@ -664,7 +681,7 @@ test("blocks submission until every planned unit has been visited", async () => 
 
 test("shows the complete batch and selected submission mode", async () => {
   const harness = createHarness(100, 40);
-  press(harness.component, "c", "C", "h", "e", "c", "k", "\r", "n", "s");
+  press(harness.component, "c", "C", "h", "e", "c", "k", "\r", "n", "n");
 
   let output = renderText(harness);
   assert.match(output, /Comment batch and submission mode/);
@@ -705,12 +722,12 @@ test("aborts pending verification and ignores its late result", async () => {
       });
     },
   });
-  press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "n", "s", "\r");
+  press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "n", "n", "\r");
   assert.match(renderText(harness), /Checking the frozen snapshot/);
 
   press(harness.component, "\u001b");
   assert.equal(verifierSignal?.aborted, true);
-  assert.match(renderText(harness), /Cancel guided review/);
+  assert.match(renderText(harness), /Leave DiffWalk/);
   press(harness.component, "\u001b");
   assert.match(renderText(harness), /verification was cancelled/);
 
@@ -720,12 +737,12 @@ test("aborts pending verification and ignores its late result", async () => {
   assert.equal(harness.session.getComments()[0]?.body, "Draft");
 });
 
-test("requires explicit confirmation before cancelling without exposing drafts", () => {
+test("pauses explicitly without discarding drafts", () => {
   const harness = createHarness(80, 24);
   press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "\u001b");
 
-  assert.match(renderText(harness), /Cancel guided review/);
-  assert.match(renderText(harness), /will not be\s+returned to the agent/);
+  assert.match(renderText(harness), /Leave DiffWalk/);
+  assert.match(renderText(harness), /Pause to keep 1 draft comment/);
   press(harness.component, "\u001b");
   assert.equal(harness.cancellations.count, 0);
   assert.match(renderText(harness), /Git snapshot diff/);
@@ -849,7 +866,7 @@ test("opens a full-screen overlay and verifies before submission", async () => {
         tui.addChild(component);
         tui.setFocus(component);
         component.handleInput?.("n");
-        component.handleInput?.("s");
+        component.handleInput?.("n");
         component.handleInput?.("\r");
       }, reject);
     });
@@ -916,7 +933,7 @@ async function openWithVerificationFailure(error: Error): Promise<{
           "t",
           "\r",
           "n",
-          "s",
+          "n",
           "\r",
         ]) {
           component.handleInput?.(key);
@@ -963,7 +980,7 @@ test("keeps repository drift in the UI with drafts preserved", async () => {
     failure.outputAfterModeChange,
     /Repository drift blocks submission/,
   );
-  assert.equal(failure.result.status, "cancelled");
+  assert.equal(failure.result.status, "paused");
 });
 
 test("keeps generic verification failures distinct from drift", async () => {
@@ -975,7 +992,7 @@ test("keeps generic verification failures distinct from drift", async () => {
   assert.match(failure.output, /git executable unavailable/);
   assert.doesNotMatch(failure.output, /Repository drift blocks submission/);
   assert.match(failure.outputAfterModeChange, /Snapshot verification failed/);
-  assert.equal(failure.result.status, "cancelled");
+  assert.equal(failure.result.status, "paused");
 });
 
 test("fails clearly before opening custom UI outside TUI mode", async () => {
