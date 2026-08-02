@@ -475,6 +475,19 @@ test("produces deterministic identifiers and detects later repository state", as
   );
 });
 
+test("captures the source branch and detached HEAD in the comparison", async (t) => {
+  const repository = await createRepository(t);
+  await writeRepositoryFile(repository, "app.txt", "one\nchanged\nthree\n");
+
+  const onBranch = await captureReviewSnapshot(gitRunner, repository, "main");
+  assert.equal(onBranch.comparison.sourceBranch, "feature");
+
+  await git(repository, "switch", "--detach", "HEAD");
+  const detached = await captureReviewSnapshot(gitRunner, repository, "main");
+  assert.equal("sourceBranch" in detached.comparison, false);
+  assert.equal(detached.id, onBranch.id);
+});
+
 test("recaptures the repository state stored in a review snapshot", async (t) => {
   const repository = await createRepository(t);
   await writeRepositoryFile(repository, "app.txt", "one\nchanged\nthree\n");

@@ -17,16 +17,16 @@ import { ReviewSnapshotDriftError } from "./git-diff.ts";
 import {
   deleteInProgressReviewComment,
   discardInProgressReview,
+  InProgressReviewError,
   markReviewUnitReviewed,
   setInProgressReviewSubmissionMode,
   upsertInProgressReviewComment,
 } from "./in-progress-review.ts";
 import {
+  listCommentTargets,
   type ReviewCommentAnchor,
   ReviewCommentInputError,
   type ReviewCommentTarget,
-  ReviewSession,
-  type ReviewSnapshotVerifier,
 } from "./review-comments.ts";
 import {
   assertReviewDeltaMatchesSnapshot,
@@ -52,12 +52,12 @@ import type {
 } from "./types.ts";
 
 export interface GuidedReviewUiInput {
-  readonly snapshot: ReviewSnapshot;
-  readonly delta: ReviewDelta;
-  readonly route: ReviewRouteCandidate;
-  readonly verifySnapshot: ReviewSnapshotVerifier;
-  readonly review?: InProgressReview;
-  readonly onReviewChange?: (review: InProgressReview) => void;
+  readonly review: InProgressReview;
+  readonly onReviewChange: (review: InProgressReview) => void;
+  readonly onSubmit: (
+    review: InProgressReview,
+    signal: AbortSignal,
+  ) => Promise<SubmittedGuidedReviewResult>;
 }
 
 export class GuidedReviewUiUnavailableError extends Error {
@@ -140,14 +140,11 @@ interface GuidedReviewComponentOptions {
   readonly tui: TUI;
   readonly theme: ReviewUiTheme;
   readonly keybindings: ReviewUiKeybindings;
-  readonly snapshot: ReviewSnapshot;
-  readonly delta: ReviewDelta;
+  readonly review: InProgressReview;
   readonly route: ReviewRoute;
-  readonly session: ReviewSession;
-  readonly review?: InProgressReview;
-  readonly onReviewChange?: (review: InProgressReview) => void;
+  readonly onReviewChange: (review: InProgressReview) => void;
   readonly onSubmit: (
-    mode: ReviewSubmissionMode,
+    review: InProgressReview,
     signal: AbortSignal,
   ) => Promise<SubmittedGuidedReviewResult>;
   readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
@@ -163,15 +160,27 @@ export async function openGuidedReview(
     throw new GuidedReviewUiUnavailableError(ctx.mode);
   }
 
-  const route = validateReviewRoute(input.snapshot, input.delta, input.route);
-  const session = new ReviewSession(input.snapshot, route);
-  for (const comment of input.review?.comments ?? []) {
-    session.upsertComment({
-      reviewUnitId: comment.reviewUnitId,
-      hunkId: comment.hunkId,
-      diffLineIndex: comment.diffLineIndex,
-      body: comment.body,
-    });
+  const review = input.review;
+  const attachedRoute = review.route;
+  if (review.lifecycle !== "ready" || attachedRoute === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Review ${review.id} is not ready for a walkthrough; lifecycle is ${review.lifecycle}.`,
+    );
+  }
+  const route = validateReviewRoute(
+    review.snapshot,
+    review.delta,
+    routeAsCandidate(attachedRoute),
+  );
+  const progressUnitIds = new Set(
+    review.unitProgress.map((progress) => progress.reviewUnitId),
+  );
+  for (const unit of route.units) {
+    if (!progressUnitIds.has(unit.id)) {
+      throw new GuidedReviewUiInvariantError(
+        `Review ${review.id} has no unit progress for route unit ${unit.id}.`,
+      );
+    }
   }
 
   return ctx.ui.custom<GuidedReviewResult>(
@@ -180,19 +189,15 @@ export async function openGuidedReview(
         tui,
         theme,
         keybindings,
-        snapshot: input.snapshot,
-        delta: input.delta,
+        review,
         route,
-        session,
-        review: input.review,
         onReviewChange: input.onReviewChange,
-        onSubmit: (mode, signal) =>
-          session.submit(mode, input.verifySnapshot, signal),
+        onSubmit: input.onSubmit,
         onComplete: done,
         onPause: () =>
-          done({ status: "paused", snapshotId: input.snapshot.id }),
+          done({ status: "paused", snapshotId: review.snapshot.id }),
         onDiscard: () =>
-          done({ status: "discarded", snapshotId: input.snapshot.id }),
+          done({ status: "discarded", snapshotId: review.snapshot.id }),
       }),
     {
       overlay: true,
@@ -206,20 +211,34 @@ export async function openGuidedReview(
   );
 }
 
+export function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
+  return {
+    snapshotId: route.snapshotId,
+    units: route.units.map((unit) => ({
+      title: unit.title,
+      whyHere: unit.whyHere,
+      context: unit.context,
+      changeSummary: unit.changeSummary,
+      reviewFocus: [...unit.reviewFocus],
+      hunkIds: [...unit.hunkIds],
+    })),
+    skippedHunks: route.skippedHunks.map((skip) => ({ ...skip })),
+  };
+}
+
 export class GuidedReviewComponent implements Component, Focusable {
   private readonly tui: TUI;
   private readonly theme: ReviewUiTheme;
   private readonly keybindings: ReviewUiKeybindings;
   private readonly route: ReviewRoute;
-  private readonly session: ReviewSession;
-  private review?: InProgressReview;
-  private readonly onReviewChange?: (review: InProgressReview) => void;
+  private review: InProgressReview;
+  private readonly onReviewChange: (review: InProgressReview) => void;
   private readonly units: readonly UnitView[];
   private readonly inventory: readonly InventoryEntry[];
   private readonly skippedCount: number;
   private readonly unsupportedCount: number;
   private readonly onSubmit: (
-    mode: ReviewSubmissionMode,
+    review: InProgressReview,
     signal: AbortSignal,
   ) => Promise<SubmittedGuidedReviewResult>;
   private readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
@@ -230,14 +249,12 @@ export class GuidedReviewComponent implements Component, Focusable {
   private returnScreen: ReviewScreen = "walkthrough";
   private unitIndex = 0;
   private readonly selectedTargetByUnit: number[];
-  private readonly reviewedUnits = new Set<number>();
   private diffOffset = 0;
   private explanationOffset = 0;
   private inventoryIndex = 0;
   private inventoryOffset = 0;
   private inventoryDiffOffset = 0;
   private summaryOffset = 0;
-  private submissionMode: ReviewSubmissionMode = "discuss-first";
   private submissionStatus: SubmissionStatus = "not-checked";
   private submissionFailure?: SubmissionFailure;
   private transientFeedback?: TransientFeedback;
@@ -254,19 +271,17 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.theme = options.theme;
     this.keybindings = options.keybindings;
     this.route = options.route;
-    this.session = options.session;
     this.review = options.review;
     this.onReviewChange = options.onReviewChange;
-    this.submissionMode = options.review?.submissionMode ?? "discuss-first";
     this.onSubmit = options.onSubmit;
     this.onComplete = options.onComplete;
     this.onPause = options.onPause;
     this.onDiscard = options.onDiscard;
     const viewModel = buildReviewViewModel(
-      options.snapshot,
-      options.delta,
+      options.review.snapshot,
+      options.review.delta,
       options.route,
-      options.session.listCommentableLines(),
+      listCommentTargets(options.review.snapshot, options.route),
     );
     this.units = viewModel.units;
     this.inventory = viewModel.inventory;
@@ -279,15 +294,6 @@ export class GuidedReviewComponent implements Component, Focusable {
       );
       return changedLine < 0 ? 0 : changedLine;
     });
-    for (const [index, unit] of this.units.entries()) {
-      if (
-        this.review?.unitProgress.find(
-          (progress) => progress.reviewUnitId === unit.unit.id,
-        )?.disposition === "reviewed"
-      ) {
-        this.reviewedUnits.add(index);
-      }
-    }
 
     this.editor = new Editor(this.tui, createEditorTheme(this.theme), {
       paddingX: 0,
@@ -449,7 +455,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const renderedDiff = renderUnitDiff(
       unitView,
       this.currentTarget(),
-      this.session,
+      this.review.comments,
       this.theme,
       width,
     );
@@ -625,10 +631,10 @@ export class GuidedReviewComponent implements Component, Focusable {
       availableHeight - submissionNotice.length,
     );
     const content = renderSummaryLines(
-      this.session.getComments(),
+      this.review.comments,
       this.route,
       this.inventory,
-      this.submissionMode,
+      this.review.submissionMode,
       this.transientFeedback,
       this.pendingUnits(),
       this.theme,
@@ -656,7 +662,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       width,
       "Enter pause and resume later • d discard review • Esc continue",
     );
-    const comments = this.session.getComments().length;
+    const comments = this.review.comments.length;
     const content = [
       this.theme.fg("warning", this.theme.bold("Leave DiffWalk?")),
       ...wrapStyled(
@@ -675,8 +681,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     const unitCount = this.units.length;
     const position =
       unitCount === 0 ? "unit 0/0" : `unit ${this.unitIndex + 1}/${unitCount}`;
-    const progress = `reviewed ${this.reviewedUnits.size}/${unitCount}`;
-    const comments = `comments ${this.session.getComments().length}`;
+    const progress = `reviewed ${this.reviewedUnitCount()}/${unitCount}`;
+    const comments = `comments ${this.review.comments.length}`;
     const inventory = `skipped ${this.skippedCount} • unsupported ${this.unsupportedCount}`;
     const verification = `snapshot ${submissionLabel(this.submissionStatus)}`;
     const title = this.screenTitle();
@@ -738,7 +744,11 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.moveUnit(-1);
       return;
     }
-    if (matchesKey(data, "n") || matchesKey(data, Key.right)) {
+    if (matchesKey(data, Key.right)) {
+      this.moveUnit(1);
+      return;
+    }
+    if (matchesKey(data, "n")) {
       this.completeCurrentUnitAndContinue();
       return;
     }
@@ -853,18 +863,15 @@ export class GuidedReviewComponent implements Component, Focusable {
       matchesKey(data, Key.right) ||
       matchesKey(data, Key.tab)
     ) {
-      this.submissionMode =
-        this.submissionMode === "discuss-first"
-          ? "apply-change-requests"
-          : "discuss-first";
-      if (this.review !== undefined) {
-        this.updateReview(
-          setInProgressReviewSubmissionMode(this.review, this.submissionMode, {
-            expectedVersion: this.review.version,
-            timestamp: new Date().toISOString(),
-          }),
-        );
-      }
+      this.updateReview(
+        setInProgressReviewSubmissionMode(
+          this.review,
+          this.review.submissionMode === "discuss-first"
+            ? "apply-change-requests"
+            : "discuss-first",
+          this.mutation(),
+        ),
+      );
       this.transientFeedback = undefined;
       this.refresh();
       return;
@@ -884,14 +891,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "d")) {
-      if (this.review !== undefined) {
-        this.updateReview(
-          discardInProgressReview(this.review, {
-            expectedVersion: this.review.version,
-            timestamp: new Date().toISOString(),
-          }),
-        );
-      }
+      this.updateReview(discardInProgressReview(this.review, this.mutation()));
       this.onDiscard();
       return;
     }
@@ -936,7 +936,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const rows = renderUnitDiff(
       unit,
       this.currentTarget(),
-      this.session,
+      this.review.comments,
       this.theme,
       width,
     );
@@ -988,17 +988,9 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.openScreen("summary");
       return;
     }
-    if (!this.reviewedUnits.has(this.unitIndex)) {
-      this.reviewedUnits.add(this.unitIndex);
-      if (this.review !== undefined) {
-        this.updateReview(
-          markReviewUnitReviewed(this.review, unit.unit.id, {
-            expectedVersion: this.review.version,
-            timestamp: new Date().toISOString(),
-          }),
-        );
-      }
-    }
+    this.updateReview(
+      markReviewUnitReviewed(this.review, unit.unit.id, this.mutation()),
+    );
     if (this.unitIndex === this.units.length - 1) {
       this.openScreen("summary");
       return;
@@ -1015,7 +1007,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       );
       return;
     }
-    const existing = this.session.getComment(target);
+    const existing = this.findComment(target);
     this.editor.setText(existing?.body ?? "");
     this.transientFeedback = undefined;
     this.commentInputError = undefined;
@@ -1031,16 +1023,13 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     try {
-      const input = { ...anchorFromTarget(target), body };
-      this.session.upsertComment(input);
-      if (this.review !== undefined) {
-        this.updateReview(
-          upsertInProgressReviewComment(this.review, input, {
-            expectedVersion: this.review.version,
-            timestamp: new Date().toISOString(),
-          }),
-        );
-      }
+      this.updateReview(
+        upsertInProgressReviewComment(
+          this.review,
+          { ...anchorFromTarget(target), body },
+          this.mutation(),
+        ),
+      );
       this.commentInputError = undefined;
       this.openScreen("walkthrough");
     } catch (error: unknown) {
@@ -1057,15 +1046,13 @@ export class GuidedReviewComponent implements Component, Focusable {
   private deleteSelectedComment(): void {
     const target = this.currentTarget();
     if (target === undefined) return;
-    const { deleted } = this.session.deleteComment(target);
-    if (deleted && this.review !== undefined) {
-      this.updateReview(
-        deleteInProgressReviewComment(this.review, target, {
-          expectedVersion: this.review.version,
-          timestamp: new Date().toISOString(),
-        }),
-      );
-    }
+    const next = deleteInProgressReviewComment(
+      this.review,
+      target,
+      this.mutation(),
+    );
+    const deleted = next !== this.review;
+    this.updateReview(next);
     this.setTransientFeedback(
       deleted ? "info" : "warning",
       deleted
@@ -1103,7 +1090,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   private startSubmission(): void {
     if (this.submissionStatus === "checking") return;
     const firstPendingIndex = this.units.findIndex(
-      (_unit, index) => !this.reviewedUnits.has(index),
+      (_unit, index) => !this.isUnitReviewed(index),
     );
     if (firstPendingIndex >= 0) {
       this.unitIndex = firstPendingIndex;
@@ -1128,7 +1115,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
     let submission: Promise<SubmittedGuidedReviewResult>;
     try {
-      submission = this.onSubmit(this.submissionMode, controller.signal);
+      submission = this.onSubmit(this.review, controller.signal);
     } catch (error: unknown) {
       this.failSubmission(attempt, error);
       return;
@@ -1147,7 +1134,9 @@ export class GuidedReviewComponent implements Component, Focusable {
     if (attempt !== this.submissionAttempt) return;
     this.submissionAbortController = undefined;
     const kind =
-      error instanceof ReviewSnapshotDriftError
+      error instanceof ReviewSnapshotDriftError ||
+      (error instanceof InProgressReviewError &&
+        error.code === "repository-drifted")
         ? "repository-drifted"
         : "verification-failed";
     this.submissionStatus = kind;
@@ -1178,7 +1167,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private pendingUnits(): readonly ReviewUnit[] {
     return this.units
-      .filter((_unit, index) => !this.reviewedUnits.has(index))
+      .filter((_unit, index) => !this.isUnitReviewed(index))
       .map(({ unit }) => unit);
   }
 
@@ -1248,8 +1237,41 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private updateReview(review: InProgressReview): void {
+    if (review === this.review) return;
     this.review = review;
-    this.onReviewChange?.(review);
+    this.onReviewChange(review);
+  }
+
+  private mutation(): { expectedVersion: number; timestamp: string } {
+    return {
+      expectedVersion: this.review.version,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private isUnitReviewed(index: number): boolean {
+    const unitView = this.units[index];
+    if (unitView === undefined) return false;
+    return this.review.unitProgress.some(
+      (progress) =>
+        progress.reviewUnitId === unitView.unit.id &&
+        progress.disposition === "reviewed",
+    );
+  }
+
+  private reviewedUnitCount(): number {
+    return this.review.unitProgress.filter(
+      (progress) => progress.disposition === "reviewed",
+    ).length;
+  }
+
+  private findComment(anchor: ReviewCommentAnchor): ReviewComment | undefined {
+    return this.review.comments.find(
+      (comment) =>
+        comment.reviewUnitId === anchor.reviewUnitId &&
+        comment.hunkId === anchor.hunkId &&
+        comment.diffLineIndex === anchor.diffLineIndex,
+    );
   }
 
   private clearRenderCache(): void {
@@ -1431,7 +1453,7 @@ function addLabeledText(
 function renderUnitDiff(
   unit: UnitView,
   selectedTarget: ReviewCommentTarget | undefined,
-  session: ReviewSession,
+  comments: readonly ReviewComment[],
   theme: ReviewUiTheme,
   width: number,
 ): readonly RenderedRow[] {
@@ -1443,7 +1465,7 @@ function renderUnitDiff(
     ]),
   );
   const commentedTargets = new Set(
-    session.getComments().map((comment) => targetKey(comment)),
+    comments.map((comment) => targetKey(comment)),
   );
   for (const [hunkIndex, hunkView] of unit.hunks.entries()) {
     if (hunkIndex > 0) rows.push({ text: "" });

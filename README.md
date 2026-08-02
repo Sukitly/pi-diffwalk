@@ -120,13 +120,16 @@ Controls:
 |---|---|
 | `j`, `k`, `Up`, `Down` | Move through diff lines or scroll the current page |
 | `PageUp`, `PageDown` | Move by a viewport |
-| `n`, `p`, `Left`, `Right` | Move between review units |
+| `n` | Mark the current review unit as explicitly reviewed and continue; the last unit opens the submission page |
+| `p`, `Left`, `Right` | Move between review units without marking anything reviewed |
 | `c` | Add or edit a comment on the selected line |
 | `d` | Delete the comment on the selected line |
 | `e` | Open the complete agent explanation |
 | `i` | Open the frozen snapshot inventory |
 | `s` | Open the comment summary and submission page |
-| `Esc` | Return from a secondary page or open explicit cancellation confirmation |
+| `Esc` | Return from a secondary page or open the pause and discard screen |
+
+The walkthrough footer shows only the most common keys. The table above is the complete set.
 
 The inventory distinguishes planned, skipped, carried-forward, metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Text hunks outside the planned route remain available for explicit read-only inspection.
 
@@ -209,13 +212,17 @@ npm ci --ignore-scripts
 pi -e ./src/index.ts
 ```
 
-Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pause the current review without returning draft comments to the agent. Running `/diffwalk` again in the same extension process resumes the frozen route, explicit unit progress, draft comments, and submission mode when the worktree still matches the snapshot. Discard is a separate explicit action. Review state and completed rounds are not yet persisted across extension reloads or processes.
+Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pause the current review without returning draft comments to the agent. Running `/diffwalk` again in the same extension process resumes the frozen route, explicit unit progress, draft comments, and submission mode when the worktree still matches the snapshot.
+
+If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review is pending fails with instructions instead of silently replacing the pending review. A pending review that has no route yet is replaced when the base changes or the worktree drifts. Discard is a separate explicit action inside the walkthrough.
+
+Completed review rounds are kept in extension memory. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed hunks as carried-forward instead of routing them again. Review state and completed rounds are not persisted across extension reloads or processes.
 
 ## Review Lifecycle Domain
 
 The domain layer represents an in-progress review independently from a TUI, tool call, or agent conversation. An in-progress review owns its frozen snapshot, validated route, explicit per-unit progress, draft comments, submission mode, and optimistic version. Repository drift is derived by comparing the current repository state with the frozen snapshot rather than stored as a lifecycle state.
 
-The lifecycle currently supports route preparation, readiness, submission into an immutable review round, and explicit discard. Submission is rejected until every planned unit is explicitly reviewed and the repository still matches the snapshot. The extension workflow does not yet persist or resume this domain object; that integration is the next implementation stage.
+The lifecycle currently supports route preparation, readiness, submission into an immutable review round, and explicit discard. Submission is rejected until every planned unit is explicitly reviewed and the repository state captured at submission time still matches the snapshot. The extension resumes this domain object within one extension process and keeps completed rounds in memory as the delta baseline for the next round. Persistence across extension reloads or processes is not implemented.
 
 ## Design Principles
 
@@ -256,13 +263,14 @@ The current version includes:
 - inline comment editing
 - comment summary and batch submission
 - worktree drift detection
+- explicit pause and in-process resume of an interrupted review
+- in-memory incremental review rounds with carried-forward classification
 - parser, route, workflow, comment, and TUI tests
 
 Possible later work includes:
 
-- persisted incremental review rounds across sessions
+- persisted review state and rounds across extension reloads and processes
 - pausing a walkthrough to ask the agent a live question
-- resuming an interrupted review
 - GitHub pull request sources
 - posting comments back to a pull request
 - an independent critic agent in addition to the guiding agent

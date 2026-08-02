@@ -218,6 +218,9 @@ function copyComparison(comparison: ReviewComparison): ReviewComparison {
     targetOid: comparison.targetOid,
     sourceHeadOid: comparison.sourceHeadOid,
     mergeBaseOid: comparison.mergeBaseOid,
+    ...(comparison.sourceBranch === undefined
+      ? {}
+      : { sourceBranch: comparison.sourceBranch }),
   };
 }
 

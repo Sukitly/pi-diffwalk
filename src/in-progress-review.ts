@@ -14,6 +14,7 @@ import {
 import type {
   InProgressReview,
   InProgressReviewId,
+  InProgressReviewLifecycle,
   RepositoryState,
   ReviewRoute,
   ReviewSeries,
@@ -24,6 +25,8 @@ import type {
 export type InProgressReviewErrorCode =
   | "version-conflict"
   | "invalid-lifecycle"
+  | "invalid-timestamp"
+  | "series-mismatch"
   | "route-snapshot-mismatch"
   | "route-already-attached"
   | "route-not-attached"
@@ -55,7 +58,7 @@ export interface ReviewMutation {
 }
 
 export interface ReviewSubmissionBlockers {
-  readonly lifecycle?: InProgressReview["lifecycle"];
+  readonly blockingLifecycle?: Exclude<InProgressReviewLifecycle, "ready">;
   readonly routeNotAttached: boolean;
   readonly pendingReviewUnitIds: readonly ReviewUnitId[];
   readonly repositoryDrifted: boolean;
@@ -190,7 +193,8 @@ export function getReviewSubmissionBlockers(
   currentRepositoryState: RepositoryState,
 ): ReviewSubmissionBlockers {
   return {
-    lifecycle: review.lifecycle === "ready" ? undefined : review.lifecycle,
+    blockingLifecycle:
+      review.lifecycle === "ready" ? undefined : review.lifecycle,
     routeNotAttached: review.route === undefined,
     pendingReviewUnitIds: review.unitProgress
       .filter((progress) => progress.disposition === "pending")
@@ -210,7 +214,7 @@ export function submitInProgressReview(
 ): SubmitInProgressReviewResult {
   assertMutation(review, mutation);
   const blockers = getReviewSubmissionBlockers(review, currentRepositoryState);
-  if (blockers.lifecycle !== undefined || blockers.routeNotAttached) {
+  if (blockers.blockingLifecycle !== undefined || blockers.routeNotAttached) {
     throw new InProgressReviewError(
       "invalid-lifecycle",
       `Review ${review.id} is not ready for submission.`,
@@ -230,7 +234,7 @@ export function submitInProgressReview(
   }
   if (series.id !== review.seriesId) {
     throw new InProgressReviewError(
-      "invalid-lifecycle",
+      "series-mismatch",
       `Review ${review.id} belongs to series ${review.seriesId}, not ${series.id}.`,
     );
   }
@@ -355,7 +359,7 @@ function sameRepositoryState(
 function assertTimestamp(timestamp: string): void {
   if (timestamp.trim().length === 0) {
     throw new InProgressReviewError(
-      "invalid-lifecycle",
+      "invalid-timestamp",
       "Review mutation timestamp is required.",
     );
   }

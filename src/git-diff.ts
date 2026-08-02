@@ -175,6 +175,7 @@ export async function captureReviewSnapshot(
     "review target",
   );
   const before = await captureStateArtifacts(git, repositoryRoot);
+  const sourceBranch = await resolveSourceBranch(git, repositoryRoot);
   const mergeBaseOid = await resolveMergeBase(
     git,
     repositoryRoot,
@@ -221,6 +222,7 @@ export async function captureReviewSnapshot(
     targetOid,
     sourceHeadOid: before.state.headOid,
     mergeBaseOid,
+    ...(sourceBranch === undefined ? {} : { sourceBranch }),
   };
   const id = hashAs<SnapshotId>("snapshot", {
     comparison: {
@@ -279,6 +281,32 @@ async function resolveCommit(
     `Unable to resolve ${label} ${JSON.stringify(revision)}.`,
   );
   return parseObjectId(output, label);
+}
+
+async function resolveSourceBranch(
+  git: GitRunner,
+  repositoryRoot: string,
+): Promise<string | undefined> {
+  const args = ["symbolic-ref", "--quiet", "--short", "HEAD"];
+  const result = await git.run(args, repositoryRoot);
+  if (result.killed || (result.code !== 0 && result.code !== 1)) {
+    const detail = result.stderr.trim();
+    throw new GitSnapshotError(
+      detail.length > 0
+        ? `Unable to identify the review source branch. ${detail}`
+        : "Unable to identify the review source branch.",
+      args,
+    );
+  }
+  if (result.code === 1) return undefined;
+  const branch = stripLineTerminator(result.stdout);
+  if (branch.length === 0) {
+    throw new GitSnapshotError(
+      "Git returned an empty source branch name.",
+      args,
+    );
+  }
+  return branch;
 }
 
 async function resolveMergeBase(

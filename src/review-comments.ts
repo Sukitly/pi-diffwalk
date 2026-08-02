@@ -4,14 +4,11 @@ import type {
   DiffLine,
   FileChange,
   HunkId,
-  PausedGuidedReviewResult,
   ReviewComment,
   ReviewRoute,
   ReviewSnapshot,
-  ReviewSubmissionMode,
   ReviewUnitId,
   SnapshotId,
-  SubmittedGuidedReviewResult,
 } from "./types.ts";
 
 export const REVIEW_COMMENT_CONTEXT_RADIUS = 3;
@@ -33,11 +30,6 @@ export interface ReviewCommentTarget extends ReviewCommentAnchor {
   readonly newPath?: string;
   readonly line: DiffLine;
 }
-
-export type ReviewSnapshotVerifier = (
-  snapshot: ReviewSnapshot,
-  signal: AbortSignal,
-) => Promise<void>;
 
 export type ReviewCommentInputErrorCode = "blank-comment-body";
 
@@ -135,26 +127,13 @@ export class ReviewSession {
   deleteComment(anchor: ReviewCommentAnchor): { readonly deleted: boolean } {
     return { deleted: this.commentsByAnchor.delete(commentAnchorKey(anchor)) };
   }
+}
 
-  async submit(
-    submissionMode: ReviewSubmissionMode,
-    verifySnapshot: ReviewSnapshotVerifier,
-    signal: AbortSignal = new AbortController().signal,
-  ): Promise<SubmittedGuidedReviewResult> {
-    signal.throwIfAborted();
-    await verifySnapshot(structuredClone(this.snapshot), signal);
-    signal.throwIfAborted();
-    return {
-      status: "submitted",
-      snapshotId: this.snapshot.id,
-      submissionMode,
-      comments: this.getComments(),
-    };
-  }
-
-  pause(): PausedGuidedReviewResult {
-    return { status: "paused", snapshotId: this.snapshot.id };
-  }
+export function listCommentTargets(
+  snapshot: ReviewSnapshot,
+  route: ReviewRoute,
+): readonly ReviewCommentTarget[] {
+  return new ReviewSession(snapshot, route).listCommentableLines();
 }
 
 function buildCommentTargets(

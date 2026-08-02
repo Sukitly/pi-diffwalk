@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   assertReviewSnapshotUnchanged,
+  captureRepositoryState,
   captureReviewSnapshot,
   type GitRunner,
   ReviewSnapshotDriftError,
@@ -25,11 +26,11 @@ import { validateReviewRoute } from "./route-validation.ts";
 import {
   type GuidedReviewResult,
   type InProgressReview,
-  type ReviewRoute,
-  type ReviewRouteCandidate,
   ReviewRouteCandidateSchema,
   type ReviewSeries,
+  type ReviewSeriesId,
   type ReviewSnapshot,
+  type SubmittedGuidedReviewResult,
 } from "./types.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
@@ -60,42 +61,18 @@ export function createPiGitRunner(
   };
 }
 
-export async function resolveSourceBranch(
-  pi: Pick<ExtensionAPI, "exec">,
-  repositoryRoot: string,
-  snapshot: ReviewSnapshot,
-): Promise<string> {
-  const result = await pi.exec(
-    "git",
-    ["symbolic-ref", "--quiet", "--short", "HEAD"],
-    { cwd: repositoryRoot },
-  );
-  if (!result.killed && result.code === 0 && result.stdout.trim().length > 0) {
-    return result.stdout.trim();
-  }
-  if (!result.killed && result.code === 1) {
-    return `detached:${snapshot.comparison.sourceHeadOid}`;
-  }
-  const detail = result.stderr.trim();
-  throw new Error(
-    detail.length > 0
-      ? `Unable to identify the review source branch. ${detail}`
-      : "Unable to identify the review source branch.",
-  );
-}
-
 export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
+  readonly captureRepositoryState: typeof captureRepositoryState;
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
   readonly openGuidedReview: typeof openGuidedReview;
-  readonly resolveSourceBranch: typeof resolveSourceBranch;
 }
 
 const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   captureReviewSnapshot,
+  captureRepositoryState,
   assertReviewSnapshotUnchanged,
   openGuidedReview,
-  resolveSourceBranch,
 };
 
 export default function diffWalk(pi: ExtensionAPI): void {
@@ -107,47 +84,80 @@ export function registerDiffWalk(
   dependencies: DiffWalkDependencies = DEFAULT_DEPENDENCIES,
 ): void {
   let pendingReview: PendingReview | undefined;
+  const completedSeriesById = new Map<ReviewSeriesId, ReviewSeries>();
+
+  async function startNewReview(cwd: string, targetRef: string): Promise<void> {
+    const snapshot = await dependencies.captureReviewSnapshot(
+      createPiGitRunner(pi),
+      cwd,
+      targetRef,
+    );
+    const sourceBranch =
+      snapshot.comparison.sourceBranch ??
+      `detached:${snapshot.comparison.sourceHeadOid}`;
+    const createdSeries = createReviewSeries({
+      repositoryRoot: snapshot.repositoryRoot,
+      sourceBranch,
+      targetRef,
+    });
+    const series = completedSeriesById.get(createdSeries.id) ?? createdSeries;
+    const delta = computeReviewDelta(snapshot, series.rounds.at(-1));
+    const review = createInProgressReview({
+      series,
+      snapshot,
+      delta,
+      timestamp: new Date().toISOString(),
+    });
+    pendingReview = { review, series, inProgress: false };
+    pi.sendUserMessage(buildReviewKickoffPrompt(snapshot, delta));
+  }
+
+  async function submitPendingReview(
+    pending: PendingReview,
+    review: InProgressReview,
+    signal: AbortSignal,
+  ): Promise<SubmittedGuidedReviewResult> {
+    signal.throwIfAborted();
+    const currentRepositoryState = await dependencies.captureRepositoryState(
+      createPiGitRunner(pi, signal),
+      review.snapshot.repositoryRoot,
+    );
+    signal.throwIfAborted();
+    const submitted = submitInProgressReview(
+      review,
+      pending.series,
+      currentRepositoryState,
+      {
+        expectedVersion: review.version,
+        timestamp: new Date().toISOString(),
+      },
+    );
+    pending.review = submitted.review;
+    pending.series = submitted.series;
+    completedSeriesById.set(submitted.series.id, submitted.series);
+    return {
+      status: "submitted",
+      snapshotId: review.snapshot.id,
+      submissionMode: review.submissionMode,
+      comments: review.comments,
+    };
+  }
 
   async function runPendingReview(
     ctx: Pick<ExtensionContext, "mode" | "ui">,
     pending: PendingReview,
   ): Promise<GuidedReviewResult> {
-    const route = pending.review.route;
-    if (route === undefined) {
-      throw new Error(`Review ${pending.review.id} has no validated route.`);
-    }
     pending.inProgress = true;
     try {
       const result = await dependencies.openGuidedReview(ctx, {
-        snapshot: pending.review.snapshot,
-        delta: pending.review.delta,
-        route: routeAsCandidate(route),
         review: pending.review,
         onReviewChange: (review) => {
           pending.review = review;
         },
-        verifySnapshot: (snapshot, signal) =>
-          verifySnapshot(
-            pi,
-            dependencies.assertReviewSnapshotUnchanged,
-            snapshot,
-            signal,
-          ),
+        onSubmit: (review, signal) =>
+          submitPendingReview(pending, review, signal),
       });
-      if (result.status === "discarded") {
-        pendingReview = undefined;
-      } else if (result.status === "submitted") {
-        const submitted = submitInProgressReview(
-          pending.review,
-          pending.series,
-          pending.review.snapshot.repositoryState,
-          {
-            expectedVersion: pending.review.version,
-            timestamp: new Date().toISOString(),
-          },
-        );
-        pending.review = submitted.review;
-        pending.series = submitted.series;
+      if (result.status === "submitted" || result.status === "discarded") {
         pendingReview = undefined;
       }
       return result;
@@ -165,17 +175,41 @@ export function registerDiffWalk(
         );
       }
 
+      const requestedTarget =
+        args.trim().length === 0 ? undefined : parseReviewTarget(args);
       const existing = pendingReview;
       if (existing?.review.lifecycle === "ready") {
         if (existing.inProgress) {
           throw new Error(`Review ${existing.review.id} is already open.`);
         }
-        await verifySnapshot(
-          pi,
-          dependencies.assertReviewSnapshotUnchanged,
-          existing.review.snapshot,
-          new AbortController().signal,
-        );
+        const pendingTarget = existing.series.targetRef;
+        if (
+          requestedTarget !== undefined &&
+          requestedTarget !== pendingTarget
+        ) {
+          throw new Error(
+            `A DiffWalk review against ${pendingTarget} is pending with ${describeDrafts(existing.review)}. ` +
+              `Run /diffwalk without arguments to resume it, or discard it from the walkthrough before reviewing against ${requestedTarget}.`,
+          );
+        }
+        try {
+          await verifySnapshot(
+            pi,
+            dependencies.assertReviewSnapshotUnchanged,
+            existing.review.snapshot,
+            new AbortController().signal,
+          );
+        } catch (error: unknown) {
+          if (!(error instanceof ReviewSnapshotDriftError)) throw error;
+          pendingReview = undefined;
+          ctx.ui.notify(
+            `The repository changed while the review of snapshot ${existing.review.snapshot.id} was paused. ` +
+              `Discarded the stale review and ${describeDrafts(existing.review)}. Starting a new review against ${requestedTarget ?? pendingTarget}.`,
+            "warning",
+          );
+          await startNewReview(ctx.cwd, requestedTarget ?? pendingTarget);
+          return;
+        }
         const result = await runPendingReview(ctx, existing);
         if (result.status === "submitted") {
           pi.sendUserMessage(formatGuidedReviewResult(result));
@@ -188,6 +222,33 @@ export function registerDiffWalk(
         return;
       }
       if (existing?.review.lifecycle === "preparing-route") {
+        const pendingTarget = existing.series.targetRef;
+        let drifted = false;
+        try {
+          await verifySnapshot(
+            pi,
+            dependencies.assertReviewSnapshotUnchanged,
+            existing.review.snapshot,
+            new AbortController().signal,
+          );
+        } catch (error: unknown) {
+          if (!(error instanceof ReviewSnapshotDriftError)) throw error;
+          drifted = true;
+        }
+        if (
+          drifted ||
+          (requestedTarget !== undefined && requestedTarget !== pendingTarget)
+        ) {
+          pendingReview = undefined;
+          ctx.ui.notify(
+            drifted
+              ? `The repository changed before a route was prepared for snapshot ${existing.review.snapshot.id}. Capturing a new snapshot.`
+              : `Replacing the pending review against ${pendingTarget} with a review against ${requestedTarget}.`,
+            "info",
+          );
+          await startNewReview(ctx.cwd, requestedTarget ?? pendingTarget);
+          return;
+        }
         pi.sendUserMessage(
           buildReviewKickoffPrompt(
             existing.review.snapshot,
@@ -197,31 +258,7 @@ export function registerDiffWalk(
         return;
       }
 
-      const targetRef = parseReviewTarget(args);
-      const snapshot = await dependencies.captureReviewSnapshot(
-        createPiGitRunner(pi),
-        ctx.cwd,
-        targetRef,
-      );
-      const delta = computeReviewDelta(snapshot);
-      const sourceBranch = await dependencies.resolveSourceBranch(
-        pi,
-        snapshot.repositoryRoot,
-        snapshot,
-      );
-      const series = createReviewSeries({
-        repositoryRoot: snapshot.repositoryRoot,
-        sourceBranch,
-        targetRef,
-      });
-      const review = createInProgressReview({
-        series,
-        snapshot,
-        delta,
-        timestamp: new Date().toISOString(),
-      });
-      pendingReview = { review, series, inProgress: false };
-      pi.sendUserMessage(buildReviewKickoffPrompt(snapshot, delta));
+      await startNewReview(ctx.cwd, requestedTarget ?? DEFAULT_REVIEW_TARGET);
     },
   });
 
@@ -304,26 +341,26 @@ async function verifySnapshot(
   signal.throwIfAborted();
 }
 
-function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
-  return {
-    snapshotId: route.snapshotId,
-    units: route.units.map((unit) => ({
-      title: unit.title,
-      whyHere: unit.whyHere,
-      context: unit.context,
-      changeSummary: unit.changeSummary,
-      reviewFocus: [...unit.reviewFocus],
-      hunkIds: [...unit.hunkIds],
-    })),
-    skippedHunks: route.skippedHunks.map((skip) => ({ ...skip })),
-  };
+function describeDrafts(review: InProgressReview): string {
+  const count = review.comments.length;
+  return `${count} draft comment${count === 1 ? "" : "s"}`;
 }
 
 export function formatGuidedReviewResult(result: GuidedReviewResult): string {
-  if (result.status !== "submitted") {
+  if (result.status === "paused") {
     return JSON.stringify({
       status: result.status,
       snapshotId: result.snapshotId,
+      instruction:
+        "The review is paused and its frozen snapshot is still pending. Do not modify repository files or Git state until the user resumes with /diffwalk and submits or discards the review.",
+    });
+  }
+  if (result.status === "discarded") {
+    return JSON.stringify({
+      status: result.status,
+      snapshotId: result.snapshotId,
+      instruction:
+        "The user discarded the review without submitting comments. Wait for the user's direction before acting on the change.",
     });
   }
   return JSON.stringify({

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  listCommentTargets,
   REVIEW_COMMENT_CONTEXT_RADIUS,
   type ReviewCommentAnchor,
   ReviewCommentInputError,
@@ -266,6 +267,10 @@ test("lists source lines but not no-newline markers as commentable targets", () 
     targets.every((target) => target.line.kind !== "no-newline-marker"),
   );
   assert.equal(targets[0]?.filePath, "src/space and 文\nfile.ts");
+  assert.deepEqual(
+    listCommentTargets(fixture.snapshot, fixture.route),
+    targets,
+  );
 });
 
 test("rejects a comment anchored to a no-newline marker", () => {
@@ -466,76 +471,7 @@ test("deleting a missing or stale comment is idempotent", () => {
   );
 });
 
-test("submits the complete comment batch only after snapshot verification", async () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-  session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 2),
-    body: "Confirm compatibility.",
-  });
-  let verifiedSnapshotId: string | undefined;
-  let verifierSignal: AbortSignal | undefined;
-  const controller = new AbortController();
-
-  const result = await session.submit(
-    "discuss-first",
-    async (snapshot, signal) => {
-      verifiedSnapshotId = snapshot.id;
-      verifierSignal = signal;
-    },
-    controller.signal,
-  );
-
-  assert.equal(verifiedSnapshotId, fixture.snapshot.id);
-  assert.equal(verifierSignal, controller.signal);
-  assert.equal(result.status, "submitted");
-  assert.equal(result.submissionMode, "discuss-first");
-  assert.equal(result.comments.length, 1);
-});
-
-test("does not submit when verification is aborted", async () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-  const controller = new AbortController();
-  controller.abort(new Error("verification cancelled"));
-
-  await assert.rejects(
-    session.submit("discuss-first", async () => {}, controller.signal),
-    /verification cancelled/,
-  );
-});
-
-test("does not create a submission result when snapshot verification fails", async () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-  session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 2),
-    body: "Blocked comment.",
-  });
-
-  await assert.rejects(
-    session.submit("apply-change-requests", async () => {
-      throw new Error("snapshot drift");
-    }),
-    /snapshot drift/,
-  );
-});
-
-test("pauses without returning unsubmitted comments", () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-  session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 2),
-    body: "Unsubmitted draft.",
-  });
-
-  assert.deepEqual(session.pause(), {
-    status: "paused",
-    snapshotId: fixture.snapshot.id,
-  });
-});
-
-test("does not mutate the snapshot or route supplied to the session", async () => {
+test("does not mutate the snapshot or route supplied to the session", () => {
   const fixture = makeCommentFixture();
   const snapshotBefore = structuredClone(fixture.snapshot);
   const routeBefore = structuredClone(fixture.route);
@@ -545,7 +481,7 @@ test("does not mutate the snapshot or route supplied to the session", async () =
     ...anchor(fixture.unitId, hunkId("h-comment"), 2),
     body: "Immutable inputs.",
   });
-  await session.submit("discuss-first", async () => {});
+  session.getComments();
 
   assert.deepEqual(fixture.snapshot, snapshotBefore);
   assert.deepEqual(fixture.route, routeBefore);

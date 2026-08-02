@@ -7,13 +7,13 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
+import { markReviewUnitReviewed } from "../src/in-progress-review.ts";
 import {
   createPiGitRunner,
   type DiffWalkDependencies,
   formatGuidedReviewResult,
   parseReviewTarget,
   registerDiffWalk,
-  resolveSourceBranch,
 } from "../src/index.ts";
 import type {
   GuidedReviewResult,
@@ -28,6 +28,12 @@ type GuidedToolDefinition = ToolDefinition<
   unknown
 >;
 
+interface HarnessBehavior {
+  drift: boolean;
+  submitOnOpen: boolean;
+  submissionDrift: boolean;
+}
+
 interface Harness {
   readonly command: (
     args: string,
@@ -36,12 +42,21 @@ interface Harness {
   readonly tool: GuidedToolDefinition;
   readonly sentMessages: readonly string[];
   readonly openedSnapshots: readonly string[];
+  readonly behavior: HarnessBehavior;
 }
 
-function createHarness(options: { readonly drift?: boolean } = {}): Harness {
+function createHarness(
+  initialBehavior: Partial<HarnessBehavior> = {},
+): Harness {
   const snapshot = makeSnapshot("snapshot-index", [
     { id: "h1", fingerprint: "fp1" },
   ]);
+  const behavior: HarnessBehavior = {
+    drift: false,
+    submitOnOpen: false,
+    submissionDrift: false,
+    ...initialBehavior,
+  };
   let command:
     | ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
     | undefined;
@@ -75,30 +90,56 @@ function createHarness(options: { readonly drift?: boolean } = {}): Harness {
         comparison: { ...snapshot.comparison, targetRef },
       };
     },
+    async captureRepositoryState() {
+      const state = snapshot.repositoryState;
+      return behavior.submissionDrift
+        ? {
+            ...state,
+            unstagedFingerprint: "drifted" as typeof state.unstagedFingerprint,
+          }
+        : state;
+    },
     async assertReviewSnapshotUnchanged() {
-      if (options.drift) {
+      if (behavior.drift) {
         throw new ReviewSnapshotDriftError("Repository changed.");
       }
     },
     async openGuidedReview(_ctx, input) {
-      openedSnapshots.push(input.snapshot.id);
-      return { status: "paused", snapshotId: input.snapshot.id };
-    },
-    async resolveSourceBranch() {
-      return "feature";
+      openedSnapshots.push(input.review.snapshot.id);
+      if (!behavior.submitOnOpen) {
+        return { status: "paused", snapshotId: input.review.snapshot.id };
+      }
+      let review = input.review;
+      for (const progress of review.unitProgress) {
+        review = markReviewUnitReviewed(review, progress.reviewUnitId, {
+          expectedVersion: review.version,
+          timestamp: new Date().toISOString(),
+        });
+      }
+      input.onReviewChange(review);
+      return input.onSubmit(review, new AbortController().signal);
     },
   };
 
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
-  return { command, tool, sentMessages, openedSnapshots };
+  return { command, tool, sentMessages, openedSnapshots, behavior };
 }
 
 function commandContext(
   mode: ExtensionCommandContext["mode"] = "tui",
+  notifications: string[] = [],
 ): ExtensionCommandContext {
-  return { mode, cwd: "/repo" } as ExtensionCommandContext;
+  return {
+    mode,
+    cwd: "/repo",
+    ui: {
+      notify: (message: string) => {
+        notifications.push(message);
+      },
+    },
+  } as unknown as ExtensionCommandContext;
 }
 
 function toolContext(): ExtensionContext {
@@ -126,36 +167,6 @@ test("parses the default and explicit review targets", () => {
   assert.equal(parseReviewTarget(""), "HEAD");
   assert.equal(parseReviewTarget("  \n"), "HEAD");
   assert.equal(parseReviewTarget(" origin/main "), "origin/main");
-});
-
-test("resolves branch and detached source identities", async () => {
-  const snapshot = makeSnapshot("snapshot-branch", []);
-  const branch = await resolveSourceBranch(
-    {
-      async exec() {
-        return {
-          stdout: "feature/review\n",
-          stderr: "",
-          code: 0,
-          killed: false,
-        };
-      },
-    },
-    "/repo",
-    snapshot,
-  );
-  const detached = await resolveSourceBranch(
-    {
-      async exec() {
-        return { stdout: "", stderr: "", code: 1, killed: false };
-      },
-    },
-    "/repo",
-    snapshot,
-  );
-
-  assert.equal(branch, "feature/review");
-  assert.equal(detached, `detached:${snapshot.comparison.sourceHeadOid}`);
 });
 
 test("adapts pi.exec to argument-array Git execution", async () => {
@@ -257,6 +268,80 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
   );
 });
 
+test("rejects a different explicit base while a routed review is pending", async () => {
+  const harness = createHarness();
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  await assert.rejects(
+    harness.command("origin/main", commandContext()),
+    /review against HEAD is pending with 0 draft comments[\s\S]*Run \/diffwalk without arguments to resume it/,
+  );
+
+  await harness.command("", commandContext());
+  assert.deepEqual(harness.openedSnapshots, [
+    "snapshot-index",
+    "snapshot-index",
+  ]);
+});
+
+test("discards a drifted paused review and starts a new one", async () => {
+  const harness = createHarness();
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  harness.behavior.drift = true;
+  const notifications: string[] = [];
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.equal(notifications.length, 1);
+  assert.match(
+    notifications[0] ?? "",
+    /repository changed while the review[\s\S]*Discarded the stale review and 0 draft comments/,
+  );
+  assert.equal(harness.sentMessages.length, 2);
+  assert.match(harness.sentMessages[1] ?? "", /Prepare a semantic route/);
+  assert.deepEqual(harness.openedSnapshots, ["snapshot-index"]);
+});
+
+test("replaces an unrouted pending review when the target changes or drifts", async () => {
+  const harness = createHarness();
+  const notifications: string[] = [];
+  await harness.command("origin/main", commandContext("tui", notifications));
+  assert.match(harness.sentMessages[0] ?? "", /"targetRef": "origin\/main"/);
+
+  await harness.command("origin/release", commandContext("tui", notifications));
+  assert.equal(notifications.length, 1);
+  assert.match(
+    notifications[0] ?? "",
+    /Replacing the pending review against origin\/main/,
+  );
+  assert.match(harness.sentMessages[1] ?? "", /"targetRef": "origin\/release"/);
+
+  await harness.command("origin/release", commandContext("tui", notifications));
+  assert.equal(notifications.length, 1);
+  assert.equal(harness.sentMessages.length, 3);
+  assert.match(harness.sentMessages[2] ?? "", /"targetRef": "origin\/release"/);
+
+  harness.behavior.drift = true;
+  await harness.command("", commandContext("tui", notifications));
+  assert.equal(notifications.length, 2);
+  assert.match(notifications[1] ?? "", /Capturing a new snapshot/);
+  assert.match(harness.sentMessages[3] ?? "", /"targetRef": "origin\/release"/);
+});
+
 test("rejects repository drift before opening the walkthrough", async () => {
   const harness = createHarness({ drift: true });
   await harness.command("", commandContext());
@@ -292,6 +377,47 @@ test("rejects repository drift before opening the walkthrough", async () => {
   );
 });
 
+test("submits through the domain pipeline against the captured repository state", async () => {
+  const harness = createHarness({ submissionDrift: true });
+  harness.behavior.submitOnOpen = true;
+  await harness.command("", commandContext());
+
+  await assert.rejects(
+    harness.tool.execute(
+      "call-1",
+      validRoute(),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /no longer matches review snapshot/,
+  );
+});
+
+test("keeps completed rounds in memory as the next delta baseline", async () => {
+  const harness = createHarness();
+  harness.behavior.submitOnOpen = true;
+  await harness.command("", commandContext());
+  assert.match(harness.sentMessages[0] ?? "", /"needsReviewHunkCount": 1/);
+
+  const submitted = await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const details = submitted.details as { readonly status: string };
+  assert.equal(details.status, "submitted");
+
+  await harness.command("", commandContext());
+  const kickoff = harness.sentMessages.at(-1) ?? "";
+  assert.equal(harness.sentMessages.length, 2);
+  assert.match(kickoff, /"needsReviewHunkCount": 0/);
+  assert.match(kickoff, /"carriedForwardHunkCount": 1/);
+  assert.match(kickoff, /"baselineRoundId": "review-round:/);
+});
+
 test("fails /diffwalk clearly outside interactive TUI mode", async () => {
   const harness = createHarness();
   await assert.rejects(
@@ -301,15 +427,29 @@ test("fails /diffwalk clearly outside interactive TUI mode", async () => {
   assert.deepEqual(harness.sentMessages, []);
 });
 
-test("formats structured pause and submission instructions", () => {
+test("formats structured pause, discard, and submission instructions", () => {
   const paused: GuidedReviewResult = {
     status: "paused",
     snapshotId: "snapshot-1" as SnapshotId,
   };
-  assert.deepEqual(JSON.parse(formatGuidedReviewResult(paused)), {
-    status: "paused",
-    snapshotId: "snapshot-1",
-  });
+  const formattedPause = JSON.parse(formatGuidedReviewResult(paused)) as {
+    readonly status: string;
+    readonly instruction: string;
+  };
+  assert.equal(formattedPause.status, "paused");
+  assert.match(
+    formattedPause.instruction,
+    /Do not modify repository files or Git state until the user resumes/,
+  );
+
+  const discarded: GuidedReviewResult = {
+    status: "discarded",
+    snapshotId: "snapshot-1" as SnapshotId,
+  };
+  const formattedDiscard = JSON.parse(formatGuidedReviewResult(discarded)) as {
+    readonly instruction: string;
+  };
+  assert.match(formattedDiscard.instruction, /discarded the review/);
 
   const submitted: GuidedReviewResult = {
     status: "submitted",

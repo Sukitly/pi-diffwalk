@@ -17,9 +17,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
 import {
-  ReviewSession,
-  type ReviewSnapshotVerifier,
-} from "../src/review-comments.ts";
+  attachReviewRoute,
+  createInProgressReview,
+  InProgressReviewError,
+} from "../src/in-progress-review.ts";
+import { createReviewSeries } from "../src/review-series.ts";
 import {
   GuidedReviewComponent,
   GuidedReviewUiUnavailableError,
@@ -35,6 +37,7 @@ import type {
   FileChangeId,
   GuidedReviewResult,
   HunkId,
+  InProgressReview,
   NoticeId,
   ReviewDelta,
   ReviewRoundId,
@@ -42,6 +45,7 @@ import type {
   ReviewRouteCandidate,
   ReviewSnapshot,
   ReviewSubmissionMode,
+  ReviewUnitId,
   SubmittedGuidedReviewResult,
 } from "../src/types.ts";
 import { hunkId, makeSnapshot } from "./domain-fixtures.ts";
@@ -53,15 +57,20 @@ interface UiFixture {
   readonly route: ReviewRoute;
 }
 
+type SubmissionVerifier = (
+  snapshot: ReviewSnapshot,
+  signal: AbortSignal,
+) => Promise<void>;
+
 interface HarnessOptions {
   readonly theme?: Pick<Theme, "fg" | "bg" | "bold">;
-  readonly verifier?: ReviewSnapshotVerifier;
+  readonly verifier?: SubmissionVerifier;
 }
 
 interface ComponentHarness {
   readonly component: GuidedReviewComponent;
-  readonly session: ReviewSession;
   readonly terminal: FakeTerminal;
+  readonly state: { review: InProgressReview };
   readonly submittedModes: ReviewSubmissionMode[];
   readonly completedResults: SubmittedGuidedReviewResult[];
   readonly cancellations: { count: number };
@@ -363,6 +372,57 @@ function replaceHunkLines(
   };
 }
 
+function makeReview(fixture: UiFixture): InProgressReview {
+  return makeReviewWithRoute(fixture, fixture.route);
+}
+
+function makeReviewWithRoute(
+  fixture: UiFixture,
+  route: ReviewRoute,
+): InProgressReview {
+  const series = createReviewSeries({
+    repositoryRoot: fixture.snapshot.repositoryRoot,
+    sourceBranch: "feature",
+    targetRef: fixture.snapshot.comparison.targetRef,
+  });
+  const created = createInProgressReview({
+    series,
+    snapshot: fixture.snapshot,
+    delta: fixture.delta,
+    timestamp: "2026-01-01T00:00:00.000Z",
+  });
+  return attachReviewRoute(created, route, {
+    expectedVersion: created.version,
+    timestamp: "2026-01-01T00:01:00.000Z",
+  });
+}
+
+function forgeRoute(
+  fixture: UiFixture,
+  candidate: ReviewRouteCandidate,
+): ReviewRoute {
+  return {
+    snapshotId: fixture.snapshot.id,
+    units: candidate.units.map((unit, index) => ({
+      id: brand<ReviewUnitId>(`review-unit:forged-${index}`),
+      title: unit.title,
+      whyHere: unit.whyHere,
+      context: unit.context,
+      changeSummary: unit.changeSummary,
+      reviewFocus: [...unit.reviewFocus],
+      hunkIds: unit.hunkIds.map((id) => hunkId(id)),
+    })),
+    skippedHunks: candidate.skippedHunks.map((skip) => ({
+      hunkId: hunkId(skip.hunkId),
+      reason: skip.reason,
+    })),
+  } as unknown as ReviewRoute;
+}
+
+function unusedSubmit(): Promise<SubmittedGuidedReviewResult> {
+  throw new Error("Submission must not run in this test.");
+}
+
 function createHarness(
   columns = 80,
   rows = 24,
@@ -371,7 +431,7 @@ function createHarness(
 ): ComponentHarness {
   const terminal = new FakeTerminal(columns, rows);
   const tui = new TUI(terminal, false);
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
+  const state = { review: makeReview(fixture) };
   const submittedModes: ReviewSubmissionMode[] = [];
   const completedResults: SubmittedGuidedReviewResult[] = [];
   const cancellations = { count: 0 };
@@ -380,13 +440,21 @@ function createHarness(
     tui,
     theme: options.theme ?? plainTheme,
     keybindings: createKeybindings(),
-    snapshot: fixture.snapshot,
-    delta: fixture.delta,
+    review: state.review,
     route: fixture.route,
-    session,
-    onSubmit: (mode, signal) => {
-      submittedModes.push(mode);
-      return session.submit(mode, verifier, signal);
+    onReviewChange: (review) => {
+      state.review = review;
+    },
+    onSubmit: async (review, signal) => {
+      submittedModes.push(review.submissionMode);
+      await verifier(review.snapshot, signal);
+      signal.throwIfAborted();
+      return {
+        status: "submitted",
+        snapshotId: review.snapshot.id,
+        submissionMode: review.submissionMode,
+        comments: review.comments,
+      };
     },
     onComplete: (result) => completedResults.push(result),
     onPause: () => {
@@ -400,8 +468,8 @@ function createHarness(
   tui.setFocus(component);
   return {
     component,
-    session,
     terminal,
+    state,
     submittedModes,
     completedResults,
     cancellations,
@@ -535,6 +603,20 @@ test("moves between semantic units and preserves each unit cursor", () => {
   assert.match(renderText(harness), /context line 6/);
 });
 
+test("moves between units with arrow keys without marking them reviewed", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "\u001b[C");
+  assert.match(renderText(harness), /unit 2\/2/);
+  assert.match(renderText(harness), /reviewed 0\/2/);
+
+  press(harness.component, "\u001b[D");
+  assert.match(renderText(harness), /unit 1\/2/);
+
+  press(harness.component, "n");
+  assert.match(renderText(harness), /reviewed 1\/2/);
+});
+
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
   const harness = createHarness(80, 24);
 
@@ -555,7 +637,7 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
     "\r",
   );
 
-  const comment = harness.session.getComments()[0];
+  const comment = harness.state.review.comments[0];
   assert.equal(comment?.body, "请检查\n失败路径");
   assert.equal(comment?.diffLineIndex, 4);
   assert.match(renderText(harness), /comments 1/);
@@ -579,7 +661,7 @@ test("prefills an existing comment and discards an edit without changing it", ()
   assert.match(renderText(harness), /Original/);
   press(harness.component, "!", "\u001b");
 
-  assert.equal(harness.session.getComments()[0]?.body, "Original");
+  assert.equal(harness.state.review.comments[0]?.body, "Original");
   assert.match(renderText(harness), /Git snapshot diff/);
 });
 
@@ -588,7 +670,7 @@ test("keeps comment input errors local to the editor", () => {
 
   press(harness.component, "c", "\r");
   assert.match(renderText(harness), /Review comment body must not be blank/);
-  assert.deepEqual(harness.session.getComments(), []);
+  assert.deepEqual(harness.state.review.comments, []);
   assert.ok(renderText(harness).includes(CURSOR_MARKER));
 
   press(harness.component, "V");
@@ -603,7 +685,7 @@ test("deletes the selected comment idempotently with transient feedback", () => 
   press(harness.component, "c", "D", "e", "l", "e", "t", "e", "\r");
 
   press(harness.component, "d");
-  assert.deepEqual(harness.session.getComments(), []);
+  assert.deepEqual(harness.state.review.comments, []);
   assert.match(renderText(harness), /Deleted the comment/);
 
   press(harness.component, "d");
@@ -734,7 +816,7 @@ test("aborts pending verification and ignores its late result", async () => {
   resolveVerification?.();
   await waitForImmediate();
   assert.equal(harness.completedResults.length, 0);
-  assert.equal(harness.session.getComments()[0]?.body, "Draft");
+  assert.equal(harness.state.review.comments[0]?.body, "Draft");
 });
 
 test("pauses explicitly without discarding drafts", () => {
@@ -780,8 +862,9 @@ test("supports an empty walkthrough when no hunk requires review", async () => {
 
 test("validates missing route coverage before opening custom UI", async () => {
   const fixture = makeUiFixture();
-  const route = structuredClone(fixture.routeCandidate);
-  route.units.splice(1, 1);
+  const candidate = structuredClone(fixture.routeCandidate);
+  candidate.units.splice(1, 1);
+  const review = makeReviewWithRoute(fixture, forgeRoute(fixture, candidate));
   let customCalls = 0;
   const custom: ExtensionContext["ui"]["custom"] = async () => {
     customCalls += 1;
@@ -791,12 +874,7 @@ test("validates missing route coverage before opening custom UI", async () => {
   await assert.rejects(
     openGuidedReview(
       { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
-      {
-        snapshot: fixture.snapshot,
-        delta: fixture.delta,
-        route,
-        verifySnapshot: async () => {},
-      },
+      { review, onReviewChange: () => {}, onSubmit: unusedSubmit },
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewRouteValidationError);
@@ -809,10 +887,11 @@ test("validates missing route coverage before opening custom UI", async () => {
 
 test("rejects carried-forward route references before opening custom UI", async () => {
   const fixture = makeUiFixture();
-  const route = structuredClone(fixture.routeCandidate);
-  const firstUnit = route.units[0];
+  const candidate = structuredClone(fixture.routeCandidate);
+  const firstUnit = candidate.units[0];
   assert.ok(firstUnit);
   firstUnit.hunkIds.push(hunkId("h-carried"));
+  const review = makeReviewWithRoute(fixture, forgeRoute(fixture, candidate));
   let customCalls = 0;
   const custom: ExtensionContext["ui"]["custom"] = async () => {
     customCalls += 1;
@@ -822,12 +901,7 @@ test("rejects carried-forward route references before opening custom UI", async 
   await assert.rejects(
     openGuidedReview(
       { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
-      {
-        snapshot: fixture.snapshot,
-        delta: fixture.delta,
-        route,
-        verifySnapshot: async () => {},
-      },
+      { review, onReviewChange: () => {}, onSubmit: unusedSubmit },
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewRouteValidationError);
@@ -842,12 +916,12 @@ test("rejects carried-forward route references before opening custom UI", async 
   assert.equal(customCalls, 0);
 });
 
-test("opens a full-screen overlay and verifies before submission", async () => {
+test("opens a full-screen overlay and submits through one domain pipeline", async () => {
   const fixture = makeUiFixture();
   const terminal = new FakeTerminal(80, 24);
   const tui = new TUI(terminal, false);
-  let verifiedSnapshotId: string | undefined;
-  let verifiedSignal: AbortSignal | undefined;
+  let submittedReview: InProgressReview | undefined;
+  let submittedSignal: AbortSignal | undefined;
   let customOptions: Parameters<ExtensionContext["ui"]["custom"]>[1];
   const custom: ExtensionContext["ui"]["custom"] = async <Result>(
     factory: Parameters<ExtensionContext["ui"]["custom"]>[0],
@@ -875,18 +949,27 @@ test("opens a full-screen overlay and verifies before submission", async () => {
   const result = await openGuidedReview(
     { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
     {
-      snapshot: fixture.snapshot,
-      delta: fixture.delta,
-      route: fixture.routeCandidate,
-      verifySnapshot: async (snapshot, signal) => {
-        verifiedSnapshotId = snapshot.id;
-        verifiedSignal = signal;
+      review: makeReview(fixture),
+      onReviewChange: () => {},
+      onSubmit: async (review, signal) => {
+        submittedReview = review;
+        submittedSignal = signal;
+        return {
+          status: "submitted",
+          snapshotId: review.snapshot.id,
+          submissionMode: review.submissionMode,
+          comments: review.comments,
+        };
       },
     },
   );
 
-  assert.equal(verifiedSnapshotId, fixture.snapshot.id);
-  assert.equal(verifiedSignal?.aborted, false);
+  assert.equal(submittedReview?.snapshot.id, fixture.snapshot.id);
+  assert.deepEqual(
+    submittedReview?.unitProgress.map((progress) => progress.disposition),
+    ["reviewed", "reviewed"],
+  );
+  assert.equal(submittedSignal?.aborted, false);
   assert.deepEqual(customOptions, {
     overlay: true,
     overlayOptions: {
@@ -899,7 +982,7 @@ test("opens a full-screen overlay and verifies before submission", async () => {
   assert.equal(result.status, "submitted");
 });
 
-async function openWithVerificationFailure(error: Error): Promise<{
+async function openWithSubmissionFailure(error: Error): Promise<{
   readonly output: string;
   readonly outputAfterModeChange: string;
   readonly result: GuidedReviewResult;
@@ -953,10 +1036,9 @@ async function openWithVerificationFailure(error: Error): Promise<{
   const review = openGuidedReview(
     { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
     {
-      snapshot: fixture.snapshot,
-      delta: fixture.delta,
-      route: fixture.routeCandidate,
-      verifySnapshot: async () => {
+      review: makeReview(fixture),
+      onReviewChange: () => {},
+      onSubmit: async () => {
         throw error;
       },
     },
@@ -969,7 +1051,7 @@ async function openWithVerificationFailure(error: Error): Promise<{
 }
 
 test("keeps repository drift in the UI with drafts preserved", async () => {
-  const failure = await openWithVerificationFailure(
+  const failure = await openWithSubmissionFailure(
     new ReviewSnapshotDriftError("repository changed"),
   );
 
@@ -983,8 +1065,22 @@ test("keeps repository drift in the UI with drafts preserved", async () => {
   assert.equal(failure.result.status, "paused");
 });
 
+test("keeps domain drift rejections in the UI with drafts preserved", async () => {
+  const failure = await openWithSubmissionFailure(
+    new InProgressReviewError(
+      "repository-drifted",
+      "Repository state no longer matches review snapshot snapshot-ui.",
+    ),
+  );
+
+  assert.match(failure.output, /Repository drift blocks submission/);
+  assert.match(failure.output, /no longer matches review snapshot/);
+  assert.match(failure.output, /Draft/);
+  assert.equal(failure.result.status, "paused");
+});
+
 test("keeps generic verification failures distinct from drift", async () => {
-  const failure = await openWithVerificationFailure(
+  const failure = await openWithSubmissionFailure(
     new Error("git executable unavailable"),
   );
 
@@ -1003,10 +1099,9 @@ test("fails clearly before opening custom UI outside TUI mode", async () => {
     openGuidedReview(
       { mode: "print", ui },
       {
-        snapshot: fixture.snapshot,
-        delta: fixture.delta,
-        route: fixture.routeCandidate,
-        verifySnapshot: async () => {},
+        review: makeReview(fixture),
+        onReviewChange: () => {},
+        onSubmit: unusedSubmit,
       },
     ),
     (error: unknown) => {

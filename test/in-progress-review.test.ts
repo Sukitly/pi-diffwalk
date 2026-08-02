@@ -203,6 +203,49 @@ test("rejects stale optimistic mutations", () => {
   );
 });
 
+test("rejects a blank mutation timestamp with an input-specific code", () => {
+  const fixture = readyReview();
+  const unitId = fixture.route.units[0]?.id;
+  assert.ok(unitId);
+
+  assert.throws(
+    () =>
+      markReviewUnitReviewed(fixture.review, unitId, {
+        expectedVersion: fixture.review.version,
+        timestamp: " ",
+      }),
+    (error: unknown) => hasCode(error, "invalid-timestamp"),
+  );
+});
+
+test("rejects submission into a foreign series with a series-mismatch code", () => {
+  const fixture = readyReview();
+  let review = fixture.review;
+  for (const unit of fixture.route.units) {
+    review = markReviewUnitReviewed(
+      review,
+      unit.id,
+      mutate(review, "2026-01-01T00:02:00.000Z"),
+    );
+  }
+  const foreignSeries = createReviewSeries({
+    repositoryRoot: review.snapshot.repositoryRoot,
+    sourceBranch: "another-branch",
+    targetRef: review.snapshot.comparison.targetRef,
+  });
+
+  assert.throws(
+    () =>
+      submitInProgressReview(
+        review,
+        foreignSeries,
+        review.snapshot.repositoryState,
+        mutate(review, "2026-01-01T00:03:00.000Z"),
+      ),
+    (error: unknown) => hasCode(error, "series-mismatch"),
+  );
+});
+
 test("owns draft comments and submission mode outside the TUI", () => {
   const fixture = readyReview();
   const unit = fixture.route.units[0];
@@ -249,7 +292,7 @@ test("derives submission blockers from domain state and repository state", () =>
       "different" as typeof fixture.review.snapshot.repositoryState.unstagedFingerprint,
   });
 
-  assert.equal(current.lifecycle, undefined);
+  assert.equal(current.blockingLifecycle, undefined);
   assert.equal(current.routeNotAttached, false);
   assert.equal(current.pendingReviewUnitIds.length, 2);
   assert.equal(current.repositoryDrifted, false);

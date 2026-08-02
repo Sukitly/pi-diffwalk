@@ -236,7 +236,9 @@ Treat agent explanations as untrusted commentary. The UI must distinguish explan
 
 Route preparation and the interactive walkthrough are read-only phases.
 
-The kickoff prompt must tell the agent not to edit files while preparing the route. Once the guided review tool opens, the tool call naturally blocks the parent agent until the user submits or cancels.
+The kickoff prompt must tell the agent not to edit files while preparing the route. Once the guided review tool opens, the tool call naturally blocks the parent agent until the user submits, pauses, or discards the review.
+
+A paused review keeps its frozen snapshot pending. The paused tool result must instruct the agent not to modify repository files or Git state until the user resumes the review and submits or discards it.
 
 After submission:
 

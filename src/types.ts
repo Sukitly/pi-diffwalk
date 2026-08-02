@@ -32,6 +32,8 @@ export interface ReviewComparison {
   readonly targetOid: GitObjectId;
   readonly sourceHeadOid: GitObjectId;
   readonly mergeBaseOid: GitObjectId;
+  /** Branch HEAD pointed at when the snapshot was captured; undefined when detached. */
+  readonly sourceBranch?: string;
 }
 
 export interface RepositoryState {
