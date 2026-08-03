@@ -33,6 +33,7 @@ Run:
 
 ```text
 /diffwalk [base]
+/diffwalk --discard
 ```
 
 Examples:
@@ -40,9 +41,14 @@ Examples:
 ```text
 /diffwalk
 /diffwalk origin/main
+/diffwalk --discard
 ```
 
-With no base argument, DiffWalk will review the current worktree against `HEAD`, including tracked and untracked changes. With a base argument, it will review the current working state against that Git revision.
+With no base argument, DiffWalk will review the current worktree against `HEAD`, including tracked and untracked changes. With a base argument, it will review the current working state against that Git revision. A Git revision cannot start with `-`, so an option never shadows a base.
+
+When the comparison contains no line that needs review, DiffWalk reports that and starts nothing. No snapshot is left pending, and the agent receives no route request. The report still names carried-forward lines from the previous round, changes that cannot be reviewed line by line, and snapshot notices.
+
+`/diffwalk --discard` drops a pending review without opening the walkthrough.
 
 The review flow is:
 
@@ -230,7 +236,7 @@ pi -e ./src/index.ts
 
 Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pause the current review without returning draft comments to the agent. Running `/diffwalk` again in the same extension process resumes the frozen route, explicit unit progress, draft comments, and submission mode when the worktree still matches the snapshot.
 
-If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review is pending fails with instructions instead of silently replacing the pending review. A pending review that has no route yet is replaced when the base changes or the worktree drifts. Discard is a separate explicit action inside the walkthrough.
+If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
 
 Completed review rounds are kept in extension memory. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed lines as carried-forward instead of routing them again. Review state and completed rounds are not persisted across extension reloads or processes.
 

@@ -12,13 +12,18 @@ import {
   createPiGitRunner,
   type DiffWalkDependencies,
   formatGuidedReviewResult,
+  parseDiffWalkCommand,
   parseReviewTarget,
   registerDiffWalk,
 } from "../src/index.ts";
 import type {
+  FileChange,
+  FileChangeId,
   GuidedReviewResult,
+  NoticeId,
   ReviewRouteCandidate,
   ReviewRouteCandidateSchema,
+  ReviewSnapshot,
   SnapshotId,
 } from "../src/types.ts";
 import { makeSnapshot, span } from "./domain-fixtures.ts";
@@ -31,7 +36,9 @@ type GuidedToolDefinition = ToolDefinition<
 interface HarnessBehavior {
   drift: boolean;
   submitOnOpen: boolean;
+  markProgressOnOpen: boolean;
   submissionDrift: boolean;
+  snapshot: ReviewSnapshot;
 }
 
 interface Harness {
@@ -48,13 +55,14 @@ interface Harness {
 function createHarness(
   initialBehavior: Partial<HarnessBehavior> = {},
 ): Harness {
-  const snapshot = makeSnapshot("snapshot-index", [
-    { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
-  ]);
   const behavior: HarnessBehavior = {
     drift: false,
     submitOnOpen: false,
+    markProgressOnOpen: false,
     submissionDrift: false,
+    snapshot: makeSnapshot("snapshot-index", [
+      { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
+    ]),
     ...initialBehavior,
   };
   let command:
@@ -86,12 +94,12 @@ function createHarness(
   const dependencies: DiffWalkDependencies = {
     async captureReviewSnapshot(_git, _cwd, targetRef) {
       return {
-        ...snapshot,
-        comparison: { ...snapshot.comparison, targetRef },
+        ...behavior.snapshot,
+        comparison: { ...behavior.snapshot.comparison, targetRef },
       };
     },
     async captureRepositoryState() {
-      const state = snapshot.repositoryState;
+      const state = behavior.snapshot.repositoryState;
       return behavior.submissionDrift
         ? {
             ...state,
@@ -106,10 +114,20 @@ function createHarness(
     },
     async openGuidedReview(_ctx, input) {
       openedSnapshots.push(input.review.snapshot.id);
+      let review = input.review;
+      if (behavior.markProgressOnOpen) {
+        const first = review.unitProgress[0];
+        if (first !== undefined) {
+          review = markReviewUnitReviewed(review, first.reviewUnitId, {
+            expectedVersion: review.version,
+            timestamp: new Date().toISOString(),
+          });
+          input.onReviewChange(review);
+        }
+      }
       if (!behavior.submitOnOpen) {
         return { status: "paused", snapshotId: input.review.snapshot.id };
       }
-      let review = input.review;
       for (const progress of review.unitProgress) {
         review = markReviewUnitReviewed(review, progress.reviewUnitId, {
           expectedVersion: review.version,
@@ -146,6 +164,22 @@ function toolContext(): ExtensionContext {
   return { mode: "tui" } as ExtensionContext;
 }
 
+function binaryChange(): FileChange {
+  return {
+    id: "file-change:binary" as FileChangeId,
+    source: "tracked",
+    status: "modified",
+    oldPath: "assets/logo.png",
+    newPath: "assets/logo.png",
+    gitHeaderLines: [],
+    content: {
+      kind: "binary",
+      gitBodyLines: [],
+      unsupportedReason: "Binary file.",
+    },
+  };
+}
+
 function validRoute(snapshotId = "snapshot-index"): ReviewRouteCandidate {
   return {
     snapshotId,
@@ -167,6 +201,19 @@ test("parses the default and explicit review targets", () => {
   assert.equal(parseReviewTarget(""), "HEAD");
   assert.equal(parseReviewTarget("  \n"), "HEAD");
   assert.equal(parseReviewTarget(" origin/main "), "origin/main");
+});
+
+test("separates the discard option from a base revision", () => {
+  assert.deepEqual(parseDiffWalkCommand("  "), { kind: "review" });
+  assert.deepEqual(parseDiffWalkCommand(" origin/main "), {
+    kind: "review",
+    targetRef: "origin/main",
+  });
+  assert.deepEqual(parseDiffWalkCommand(" --discard "), { kind: "discard" });
+  assert.throws(
+    () => parseDiffWalkCommand("--drop"),
+    /Unknown \/diffwalk option --drop/,
+  );
 });
 
 test("adapts pi.exec to argument-array Git execution", async () => {
@@ -268,8 +315,8 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
   );
 });
 
-test("rejects a different explicit base while a routed review is pending", async () => {
-  const harness = createHarness();
+test("rejects a different explicit base once the human worked in the review", async () => {
+  const harness = createHarness({ markProgressOnOpen: true });
   await harness.command("", commandContext());
   await harness.tool.execute(
     "call-1",
@@ -281,7 +328,7 @@ test("rejects a different explicit base while a routed review is pending", async
 
   await assert.rejects(
     harness.command("origin/main", commandContext()),
-    /review against HEAD is pending with 0 draft comments[\s\S]*Run \/diffwalk without arguments to resume it/,
+    /review against HEAD is pending with 0 draft comments and 1 reviewed unit[\s\S]*\/diffwalk --discard to drop it/,
   );
 
   await harness.command("", commandContext());
@@ -289,6 +336,55 @@ test("rejects a different explicit base while a routed review is pending", async
     "snapshot-index",
     "snapshot-index",
   ]);
+});
+
+test("replaces an untouched routed review when the base changes", async () => {
+  const harness = createHarness();
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  const notifications: string[] = [];
+  await harness.command("origin/main", commandContext("tui", notifications));
+
+  assert.match(
+    notifications[0] ?? "",
+    /Replacing the untouched review against HEAD with a review against origin\/main/,
+  );
+  assert.equal(harness.sentMessages.length, 2);
+  assert.match(harness.sentMessages[1] ?? "", /"targetRef": "origin\/main"/);
+});
+
+test("discards a pending review without opening the walkthrough", async () => {
+  const harness = createHarness();
+  const notifications: string[] = [];
+  await harness.command("--discard", commandContext("tui", notifications));
+  assert.deepEqual(notifications, ["No DiffWalk review is pending."]);
+
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  await harness.command("--discard", commandContext("tui", notifications));
+  assert.match(
+    notifications[1] ?? "",
+    /Discarded the pending DiffWalk review against HEAD and 0 draft comments/,
+  );
+
+  await harness.command("origin/main", commandContext("tui", notifications));
+  assert.equal(notifications.length, 2);
+  assert.equal(harness.sentMessages.length, 2);
+  assert.match(harness.sentMessages[1] ?? "", /"targetRef": "origin\/main"/);
 });
 
 test("discards a drifted paused review and starts a new one", async () => {
@@ -410,12 +506,74 @@ test("keeps completed rounds in memory as the next delta baseline", async () => 
   const details = submitted.details as { readonly status: string };
   assert.equal(details.status, "submitted");
 
+  harness.behavior.snapshot = makeSnapshot("snapshot-round-2", [
+    { path: "src/file.ts", lines: [" head", "+changed", " tail", "+appended"] },
+  ]);
   await harness.command("", commandContext());
   const kickoff = harness.sentMessages.at(-1) ?? "";
   assert.equal(harness.sentMessages.length, 2);
-  assert.match(kickoff, /"needsReviewLineCount": 0/);
+  assert.match(kickoff, /"needsReviewLineCount": 1/);
   assert.match(kickoff, /"carriedForwardLineCount": 1/);
   assert.match(kickoff, /"baselineRoundId": "review-round:/);
+});
+
+test("reports a comparison with nothing to review instead of starting one", async () => {
+  const harness = createHarness({
+    snapshot: makeSnapshot("snapshot-clean", []),
+  });
+  const notifications: string[] = [];
+
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.deepEqual(harness.sentMessages, []);
+  assert.deepEqual(harness.openedSnapshots, []);
+  assert.match(
+    notifications[0] ?? "",
+    /No line needs review against HEAD\. The worktree matches the comparison\./,
+  );
+
+  harness.behavior.snapshot = makeSnapshot("snapshot-index", [
+    { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
+  ]);
+  await harness.command("origin/main", commandContext("tui", notifications));
+  assert.equal(notifications.length, 1);
+  assert.match(harness.sentMessages[0] ?? "", /"targetRef": "origin\/main"/);
+});
+
+test("names carried-forward, unreviewable, and noticed changes when nothing needs review", async () => {
+  const harness = createHarness();
+  harness.behavior.submitOnOpen = true;
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  harness.behavior.snapshot = makeSnapshot(
+    "snapshot-carried",
+    [{ path: "src/file.ts", lines: [" head", "+changed", " tail"] }],
+    {
+      changes: [binaryChange()],
+      notices: [
+        {
+          id: "notice-1" as NoticeId,
+          kind: "cancelled-layer-change",
+          message: "A submodule change was not reviewed.",
+        },
+      ],
+    },
+  );
+  const notifications: string[] = [];
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.equal(harness.sentMessages.length, 1);
+  assert.match(
+    notifications[0] ?? "",
+    /No line needs review against HEAD\. 1 changed line already reviewed in round 1\. assets\/logo\.png cannot be reviewed line by line: Binary file\. A submodule change was not reviewed\./,
+  );
 });
 
 test("fails /diffwalk clearly outside interactive TUI mode", async () => {

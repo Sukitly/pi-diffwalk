@@ -190,10 +190,7 @@ test("reports an empty snapshot without inventing review work", () => {
 
   assert.deepEqual(inventory.files, []);
   assert.equal(inventory.delta.changedLineCount, 0);
-  assert.match(
-    buildReviewKickoffPrompt(snapshot, computeReviewDelta(snapshot)),
-    /submit empty units and skippedSpans arrays/,
-  );
+  assert.equal(inventory.delta.needsReviewLineCount, 0);
 });
 
 test("rejects a malformed review delta before creating model-facing input", () => {

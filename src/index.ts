@@ -1,6 +1,7 @@
 import type {
   ExecResult,
   ExtensionAPI,
+  ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -13,6 +14,7 @@ import {
 import {
   attachReviewRoute,
   createInProgressReview,
+  discardInProgressReview,
   submitInProgressReview,
 } from "./in-progress-review.ts";
 import {
@@ -26,6 +28,7 @@ import { validateReviewRoute } from "./route-validation.ts";
 import {
   type GuidedReviewResult,
   type InProgressReview,
+  type ReviewDelta,
   ReviewRouteCandidateSchema,
   type ReviewSeries,
   type ReviewSeriesId,
@@ -34,6 +37,9 @@ import {
 } from "./types.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
+const DISCARD_OPTION = "--discard";
+
+type CommandContext = Pick<ExtensionCommandContext, "cwd" | "ui">;
 
 interface PendingReview {
   review: InProgressReview;
@@ -44,6 +50,28 @@ interface PendingReview {
 export function parseReviewTarget(args: string): string {
   const target = args.trim();
   return target.length === 0 ? DEFAULT_REVIEW_TARGET : target;
+}
+
+/**
+ * `/diffwalk` takes either a base revision or an option.
+ *
+ * A Git revision cannot start with `-`, so an option can never shadow a base
+ * the user meant to review.
+ */
+export type DiffWalkCommand =
+  | { readonly kind: "review"; readonly targetRef?: string }
+  | { readonly kind: "discard" };
+
+export function parseDiffWalkCommand(args: string): DiffWalkCommand {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) return { kind: "review" };
+  if (trimmed === DISCARD_OPTION) return { kind: "discard" };
+  if (trimmed.startsWith("-")) {
+    throw new Error(
+      `Unknown /diffwalk option ${trimmed}. Use /diffwalk [base] to review a revision, or /diffwalk ${DISCARD_OPTION} to drop a pending review.`,
+    );
+  }
+  return { kind: "review", targetRef: parseReviewTarget(trimmed) };
 }
 
 export function createPiGitRunner(
@@ -86,10 +114,13 @@ export function registerDiffWalk(
   let pendingReview: PendingReview | undefined;
   const completedSeriesById = new Map<ReviewSeriesId, ReviewSeries>();
 
-  async function startNewReview(cwd: string, targetRef: string): Promise<void> {
+  async function startNewReview(
+    ctx: CommandContext,
+    targetRef: string,
+  ): Promise<void> {
     const snapshot = await dependencies.captureReviewSnapshot(
       createPiGitRunner(pi),
-      cwd,
+      ctx.cwd,
       targetRef,
     );
     const sourceBranch =
@@ -102,6 +133,16 @@ export function registerDiffWalk(
     });
     const series = completedSeriesById.get(createdSeries.id) ?? createdSeries;
     const delta = computeReviewDelta(snapshot, series.rounds.at(-1));
+    if (
+      !delta.lines.some((requirement) => requirement.type === "needs-review")
+    ) {
+      pendingReview = undefined;
+      ctx.ui.notify(
+        describeNothingToReview(snapshot, delta, series, targetRef),
+        "info",
+      );
+      return;
+    }
     const review = createInProgressReview({
       series,
       snapshot,
@@ -166,6 +207,28 @@ export function registerDiffWalk(
     }
   }
 
+  function discardPendingReview(ctx: CommandContext): void {
+    const existing = pendingReview;
+    if (existing === undefined) {
+      ctx.ui.notify("No DiffWalk review is pending.", "info");
+      return;
+    }
+    if (existing.inProgress) {
+      throw new Error(
+        `Review ${existing.review.id} is open. Discard it from the walkthrough.`,
+      );
+    }
+    discardInProgressReview(existing.review, {
+      expectedVersion: existing.review.version,
+      timestamp: new Date().toISOString(),
+    });
+    pendingReview = undefined;
+    ctx.ui.notify(
+      `Discarded the pending DiffWalk review against ${existing.series.targetRef} and ${describeDrafts(existing.review)}.`,
+      "info",
+    );
+  }
+
   pi.registerCommand("diffwalk", {
     description: "Start or resume a guided review of the current Git changes",
     handler: async (args, ctx) => {
@@ -175,8 +238,13 @@ export function registerDiffWalk(
         );
       }
 
-      const requestedTarget =
-        args.trim().length === 0 ? undefined : parseReviewTarget(args);
+      const command = parseDiffWalkCommand(args);
+      if (command.kind === "discard") {
+        discardPendingReview(ctx);
+        return;
+      }
+
+      const requestedTarget = command.targetRef;
       const existing = pendingReview;
       if (existing?.review.lifecycle === "ready") {
         if (existing.inProgress) {
@@ -187,10 +255,19 @@ export function registerDiffWalk(
           requestedTarget !== undefined &&
           requestedTarget !== pendingTarget
         ) {
-          throw new Error(
-            `A DiffWalk review against ${pendingTarget} is pending with ${describeDrafts(existing.review)}. ` +
-              `Run /diffwalk without arguments to resume it, or discard it from the walkthrough before reviewing against ${requestedTarget}.`,
+          if (hasReviewProgress(existing.review)) {
+            throw new Error(
+              `A DiffWalk review against ${pendingTarget} is pending with ${describeDrafts(existing.review)} and ${describeReviewedUnits(existing.review)}. ` +
+                `Run /diffwalk without arguments to resume it, or /diffwalk ${DISCARD_OPTION} to drop it before reviewing against ${requestedTarget}.`,
+            );
+          }
+          pendingReview = undefined;
+          ctx.ui.notify(
+            `Replacing the untouched review against ${pendingTarget} with a review against ${requestedTarget}.`,
+            "info",
           );
+          await startNewReview(ctx, requestedTarget);
+          return;
         }
         try {
           await verifySnapshot(
@@ -207,7 +284,7 @@ export function registerDiffWalk(
               `Discarded the stale review and ${describeDrafts(existing.review)}. Starting a new review against ${requestedTarget ?? pendingTarget}.`,
             "warning",
           );
-          await startNewReview(ctx.cwd, requestedTarget ?? pendingTarget);
+          await startNewReview(ctx, requestedTarget ?? pendingTarget);
           return;
         }
         const result = await runPendingReview(ctx, existing);
@@ -246,7 +323,7 @@ export function registerDiffWalk(
               : `Replacing the pending review against ${pendingTarget} with a review against ${requestedTarget}.`,
             "info",
           );
-          await startNewReview(ctx.cwd, requestedTarget ?? pendingTarget);
+          await startNewReview(ctx, requestedTarget ?? pendingTarget);
           return;
         }
         pi.sendUserMessage(
@@ -258,7 +335,7 @@ export function registerDiffWalk(
         return;
       }
 
-      await startNewReview(ctx.cwd, requestedTarget ?? DEFAULT_REVIEW_TARGET);
+      await startNewReview(ctx, requestedTarget ?? DEFAULT_REVIEW_TARGET);
     },
   });
 
@@ -344,6 +421,61 @@ async function verifySnapshot(
 function describeDrafts(review: InProgressReview): string {
   const count = review.comments.length;
   return `${count} draft comment${count === 1 ? "" : "s"}`;
+}
+
+function describeReviewedUnits(review: InProgressReview): string {
+  const count = review.unitProgress.filter(
+    (progress) => progress.disposition !== "pending",
+  ).length;
+  return `${count} reviewed unit${count === 1 ? "" : "s"}`;
+}
+
+/** A pending review is replaceable until the human records work inside it. */
+function hasReviewProgress(review: InProgressReview): boolean {
+  return (
+    review.comments.length > 0 ||
+    review.unitProgress.some((progress) => progress.disposition !== "pending")
+  );
+}
+
+/**
+ * A walkthrough without a needs-review line has nothing to walk, so the command
+ * reports the comparison instead of starting a review the agent would have to
+ * route as an empty walkthrough. Carried-forward and unreviewable changes are
+ * still named here so they cannot disappear silently.
+ */
+function describeNothingToReview(
+  snapshot: ReviewSnapshot,
+  delta: ReviewDelta,
+  series: ReviewSeries,
+  targetRef: string,
+): string {
+  const parts = [`No line needs review against ${targetRef}.`];
+  const carriedForward = delta.lines.filter(
+    (requirement) => requirement.type === "carried-forward",
+  ).length;
+  if (carriedForward > 0) {
+    parts.push(
+      `${carriedForward} changed line${carriedForward === 1 ? "" : "s"} already reviewed in round ${series.rounds.length}.`,
+    );
+  }
+  let unreviewableCount = 0;
+  for (const change of snapshot.changes) {
+    const content = change.content;
+    if (content.kind === "text") continue;
+    unreviewableCount += 1;
+    const path = change.newPath ?? change.oldPath ?? change.id;
+    parts.push(
+      `${path} cannot be reviewed line by line: ${content.unsupportedReason}`,
+    );
+  }
+  for (const notice of snapshot.notices) {
+    parts.push(notice.message);
+  }
+  if (carriedForward === 0 && unreviewableCount === 0) {
+    parts.push("The worktree matches the comparison.");
+  }
+  return parts.join(" ");
 }
 
 export function formatGuidedReviewResult(result: GuidedReviewResult): string {
