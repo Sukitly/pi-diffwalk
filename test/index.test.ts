@@ -21,7 +21,7 @@ import type {
   ReviewRouteCandidateSchema,
   SnapshotId,
 } from "../src/types.ts";
-import { hunkId, makeSnapshot } from "./domain-fixtures.ts";
+import { makeSnapshot, span } from "./domain-fixtures.ts";
 
 type GuidedToolDefinition = ToolDefinition<
   typeof ReviewRouteCandidateSchema,
@@ -49,7 +49,7 @@ function createHarness(
   initialBehavior: Partial<HarnessBehavior> = {},
 ): Harness {
   const snapshot = makeSnapshot("snapshot-index", [
-    { id: "h1", fingerprint: "fp1" },
+    { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
   ]);
   const behavior: HarnessBehavior = {
     drift: false,
@@ -156,10 +156,10 @@ function validRoute(snapshotId = "snapshot-index"): ReviewRouteCandidate {
         context: "entry -> implementation",
         changeSummary: "Updates behavior.",
         reviewFocus: ["Is the behavior correct?"],
-        hunkIds: [hunkId("h1")],
+        spans: [span("src/file.ts", { new: [2, 2] })],
       },
     ],
-    skippedHunks: [],
+    skippedSpans: [],
   };
 }
 
@@ -234,7 +234,7 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
       undefined,
       toolContext(),
     ),
-    /Invalid review route:[\s\S]*does not cover required hunk h1[\s\S]*must contain at least one non-empty review unit/,
+    /Invalid review route:[\s\S]*src\/file\.ts new 2-2[\s\S]*must contain at least one review unit with spans/,
   );
 
   const completed = await harness.tool.execute(
@@ -398,7 +398,7 @@ test("keeps completed rounds in memory as the next delta baseline", async () => 
   const harness = createHarness();
   harness.behavior.submitOnOpen = true;
   await harness.command("", commandContext());
-  assert.match(harness.sentMessages[0] ?? "", /"needsReviewHunkCount": 1/);
+  assert.match(harness.sentMessages[0] ?? "", /"needsReviewLineCount": 1/);
 
   const submitted = await harness.tool.execute(
     "call-1",
@@ -413,8 +413,8 @@ test("keeps completed rounds in memory as the next delta baseline", async () => 
   await harness.command("", commandContext());
   const kickoff = harness.sentMessages.at(-1) ?? "";
   assert.equal(harness.sentMessages.length, 2);
-  assert.match(kickoff, /"needsReviewHunkCount": 0/);
-  assert.match(kickoff, /"carriedForwardHunkCount": 1/);
+  assert.match(kickoff, /"needsReviewLineCount": 0/);
+  assert.match(kickoff, /"carriedForwardLineCount": 1/);
   assert.match(kickoff, /"baselineRoundId": "review-round:/);
 });
 

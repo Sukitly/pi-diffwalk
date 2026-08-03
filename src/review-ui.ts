@@ -28,24 +28,27 @@ import {
   ReviewCommentInputError,
   type ReviewCommentTarget,
 } from "./review-comments.ts";
+import { assertReviewDeltaMatchesSnapshot } from "./review-delta.ts";
 import {
-  assertReviewDeltaMatchesSnapshot,
-  listSnapshotHunks,
-} from "./review-delta.ts";
+  changedLineKey,
+  listFileChangedLines,
+  resolvedSpanChangedLines,
+  textContent,
+} from "./review-span.ts";
 import { validateReviewRoute } from "./route-validation.ts";
 import type {
-  DiffHunk,
+  ChangeSide,
   DiffLine,
   FileChange,
   GuidedReviewResult,
-  HunkId,
-  HunkReviewRequirement,
   InProgressReview,
+  ResolvedSpan,
   ReviewComment,
   ReviewDelta,
   ReviewRoute,
   ReviewRouteCandidate,
   ReviewSnapshot,
+  ReviewSpanCandidate,
   ReviewSubmissionMode,
   ReviewUnit,
   SubmittedGuidedReviewResult,
@@ -106,23 +109,26 @@ interface SubmissionFailure {
   readonly error: unknown;
 }
 
-interface HunkView {
-  readonly hunk: DiffHunk;
+/** One file region of a review unit, sliced out of the frozen file. */
+interface SpanView {
   readonly change: FileChange;
+  readonly span: ResolvedSpan;
+  readonly lines: readonly DiffLine[];
 }
 
 interface UnitView {
   readonly unit: ReviewUnit;
-  readonly hunks: readonly HunkView[];
+  readonly spans: readonly SpanView[];
   readonly targets: readonly ReviewCommentTarget[];
 }
 
 type InventoryEntry =
   | {
-      readonly kind: "hunk";
+      readonly kind: "file";
       readonly title: string;
       readonly detail: string;
-      readonly hunkView: HunkView;
+      readonly change: FileChange;
+      readonly regions: readonly DiffLine[][];
     }
   | {
       readonly kind: "metadata-only" | "binary" | "unsupported" | "notice";
@@ -220,10 +226,25 @@ export function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
       context: unit.context,
       changeSummary: unit.changeSummary,
       reviewFocus: [...unit.reviewFocus],
-      hunkIds: [...unit.hunkIds],
+      spans: unit.spans.map((span) => spanCandidate(span)),
     })),
-    skippedHunks: route.skippedHunks.map((skip) => ({ ...skip })),
+    skippedSpans: route.skippedSpans.map((skip) => ({
+      span: spanCandidate(skip.span),
+      reason: skip.reason,
+    })),
   };
+}
+
+function spanCandidate(span: ResolvedSpan): ReviewSpanCandidate {
+  return {
+    path: span.path,
+    ...(span.oldStart === undefined
+      ? {}
+      : { oldStart: span.oldStart, oldEnd: span.oldEnd }),
+    ...(span.newStart === undefined
+      ? {}
+      : { newStart: span.newStart, newEnd: span.newEnd }),
+  } as ReviewSpanCandidate;
 }
 
 export class GuidedReviewComponent implements Component, Focusable {
@@ -285,15 +306,9 @@ export class GuidedReviewComponent implements Component, Focusable {
     );
     this.units = viewModel.units;
     this.inventory = viewModel.inventory;
-    this.skippedCount = options.route.skippedHunks.length;
+    this.skippedCount = options.route.skippedSpans.length;
     this.unsupportedCount = viewModel.unsupportedCount;
-    this.selectedTargetByUnit = this.units.map((unit) => {
-      const changedLine = unit.targets.findIndex(
-        (target) =>
-          target.line.kind === "added" || target.line.kind === "removed",
-      );
-      return changedLine < 0 ? 0 : changedLine;
-    });
+    this.selectedTargetByUnit = this.units.map(() => 0);
 
     this.editor = new Editor(this.tui, createEditorTheme(this.theme), {
       paddingX: 0,
@@ -494,11 +509,11 @@ export class GuidedReviewComponent implements Component, Focusable {
     if (target !== undefined) {
       body.push(
         ...wrapStyled(
-          `${this.theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.line)}`,
+          `${this.theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.diffLine)}`,
           width,
         ),
       );
-      body.push(renderSelectedDiffText(target.line, this.theme, width));
+      body.push(renderSelectedDiffText(target.diffLine, this.theme, width));
     }
     if (this.commentInputError !== undefined) {
       body.push(
@@ -591,8 +606,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     const viewportHeight = Math.max(0, rows - header.length - footer.length);
     const entry = this.inventory[this.inventoryIndex];
     const content =
-      entry?.kind === "hunk"
-        ? renderReadOnlyHunk(entry, this.theme, width)
+      entry?.kind === "file"
+        ? renderReadOnlyFile(entry, this.theme, width)
         : [this.theme.fg("muted", "This inventory entry has no text diff.")];
     this.inventoryDiffOffset = clampOffset(
       this.inventoryDiffOffset,
@@ -827,7 +842,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.right)) {
       const entry = this.inventory[this.inventoryIndex];
-      if (entry?.kind === "hunk") {
+      if (entry?.kind === "file") {
         this.inventoryDiffOffset = 0;
         this.openScreen("inventory-diff");
       } else {
@@ -1266,12 +1281,8 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private findComment(anchor: ReviewCommentAnchor): ReviewComment | undefined {
-    return this.review.comments.find(
-      (comment) =>
-        comment.reviewUnitId === anchor.reviewUnitId &&
-        comment.hunkId === anchor.hunkId &&
-        comment.diffLineIndex === anchor.diffLineIndex,
-    );
+    const key = targetKey(anchor);
+    return this.review.comments.find((comment) => targetKey(comment) === key);
   }
 
   private clearRenderCache(): void {
@@ -1297,16 +1308,9 @@ function buildReviewViewModel(
   readonly unsupportedCount: number;
 } {
   assertReviewDeltaMatchesSnapshot(snapshot, delta);
-  const hunks = listSnapshotHunks(snapshot);
   const changesById = new Map(
     snapshot.changes.map((change) => [change.id, change]),
   );
-  const hunkViewsById = new Map<HunkId, HunkView>();
-  for (const hunk of hunks) {
-    const change = changesById.get(hunk.fileChangeId);
-    assert.ok(change, `Snapshot hunk ${hunk.id} has no file change.`);
-    hunkViewsById.set(hunk.id, { hunk, change });
-  }
 
   const targetsByUnit = new Map<string, ReviewCommentTarget[]>();
   for (const target of targets) {
@@ -1317,44 +1321,76 @@ function buildReviewViewModel(
 
   const units = route.units.map((unit) => ({
     unit,
-    hunks: unit.hunkIds.map((hunkId) => {
-      const hunkView = hunkViewsById.get(hunkId);
-      assert.ok(hunkView, `Validated route references missing hunk ${hunkId}.`);
-      return hunkView;
+    spans: unit.spans.map((span) => {
+      const change = changesById.get(span.fileChangeId);
+      assert.ok(
+        change,
+        `Validated route references missing file change ${span.fileChangeId}.`,
+      );
+      return { change, span, lines: sliceSpan(change, span) };
     }),
     targets: targetsByUnit.get(unit.id) ?? [],
   }));
 
-  const requirementsById = new Map(
-    delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
-  );
-  const unitsByHunkId = new Map(
-    route.units.flatMap((unit) =>
-      unit.hunkIds.map((hunkId) => [hunkId, unit] as const),
-    ),
-  );
-  const skipsByHunkId = new Map(
-    route.skippedHunks.map((skip) => [skip.hunkId, skip.reason]),
-  );
-  const inventory: InventoryEntry[] = hunks.map((hunk) => {
-    const hunkView = hunkViewsById.get(hunk.id);
-    const requirement = requirementsById.get(hunk.id);
-    assert.ok(hunkView, `Snapshot inventory lost hunk ${hunk.id}.`);
-    assert.ok(
+  const requirements = new Map(
+    delta.lines.map((requirement) => [
+      changedLineKey(requirement),
       requirement,
-      `Review delta has no requirement for hunk ${hunk.id}.`,
-    );
-    return {
-      kind: "hunk",
-      title: `${inventoryStatus(requirement, unitsByHunkId.get(hunk.id), skipsByHunkId.get(hunk.id))}: ${displayChangePath(hunkView.change)} ${hunk.header.raw}`,
-      detail: inventoryDetail(
-        requirement,
-        unitsByHunkId.get(hunk.id),
-        skipsByHunkId.get(hunk.id),
+    ]),
+  );
+  const plannedKeys = new Set<string>();
+  for (const unit of route.units) {
+    for (const span of unit.spans) {
+      for (const line of resolvedSpanChangedLines(snapshot, span)) {
+        plannedKeys.add(changedLineKey(line));
+      }
+    }
+  }
+  const skipReasonByKey = new Map<string, string>();
+  for (const skip of route.skippedSpans) {
+    for (const line of resolvedSpanChangedLines(snapshot, skip.span)) {
+      skipReasonByKey.set(changedLineKey(line), skip.reason);
+    }
+  }
+
+  const inventory: InventoryEntry[] = [];
+  for (const change of snapshot.changes) {
+    const content = textContent(change);
+    if (content === undefined) continue;
+    const changed = listFileChangedLines(change);
+    if (changed.length === 0) continue;
+    let planned = 0;
+    let skipped = 0;
+    let carried = 0;
+    const skipReasons = new Set<string>();
+    for (const line of changed) {
+      const key = changedLineKey(line);
+      if (requirements.get(key)?.type === "carried-forward") {
+        carried += 1;
+        continue;
+      }
+      const reason = skipReasonByKey.get(key);
+      if (reason !== undefined) {
+        skipped += 1;
+        skipReasons.add(reason);
+        continue;
+      }
+      if (plannedKeys.has(key)) planned += 1;
+    }
+    inventory.push({
+      kind: "file",
+      title: `${fileInventoryStatus(planned, skipped, carried)}: ${displayChangePath(change)}`,
+      detail: fileInventoryDetail(
+        changed.length,
+        planned,
+        skipped,
+        carried,
+        skipReasons,
       ),
-      hunkView,
-    };
-  });
+      change,
+      regions: buildDisplayRegions(content.lines),
+    });
+  }
 
   let unsupportedCount = 0;
   for (const change of snapshot.changes) {
@@ -1460,28 +1496,26 @@ function renderUnitDiff(
   const rows: RenderedRow[] = [];
   const targetsByLine = new Map(
     unit.targets.map((target) => [
-      hunkLineKey(target.hunkId, target.diffLineIndex),
+      fileLineKey(target.fileChangeId, target.side, target.line),
       target,
     ]),
   );
   const commentedTargets = new Set(
     comments.map((comment) => targetKey(comment)),
   );
-  for (const [hunkIndex, hunkView] of unit.hunks.entries()) {
-    if (hunkIndex > 0) rows.push({ text: "" });
+  for (const [spanIndex, spanView] of unit.spans.entries()) {
+    if (spanIndex > 0) rows.push({ text: "" });
     rows.push(
       ...wrapStyled(
         theme.fg(
           "muted",
-          `${displayChangePath(hunkView.change)}  ${safeText(hunkView.hunk.header.raw)}`,
+          `${displayChangePath(spanView.change)}  ${safeText(describeSpanRange(spanView.span))}`,
         ),
         width,
       ).map((text) => ({ text })),
     );
-    for (const line of hunkView.hunk.lines) {
-      const target = targetsByLine.get(
-        hunkLineKey(hunkView.hunk.id, line.index),
-      );
+    for (const line of spanView.lines) {
+      const target = lineTarget(targetsByLine, spanView.change.id, line);
       const isSelected =
         target !== undefined &&
         selectedTarget !== undefined &&
@@ -1501,8 +1535,33 @@ function renderUnitDiff(
   return rows;
 }
 
-function renderReadOnlyHunk(
-  entry: Extract<InventoryEntry, { readonly kind: "hunk" }>,
+function lineTarget(
+  targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
+  fileChangeId: FileChange["id"],
+  line: DiffLine,
+): ReviewCommentTarget | undefined {
+  if (line.kind === "added" && line.newLine !== undefined) {
+    return targetsByLine.get(fileLineKey(fileChangeId, "new", line.newLine));
+  }
+  if (line.kind === "removed" && line.oldLine !== undefined) {
+    return targetsByLine.get(fileLineKey(fileChangeId, "old", line.oldLine));
+  }
+  return undefined;
+}
+
+function describeSpanRange(span: ResolvedSpan): string {
+  const parts: string[] = [];
+  if (span.oldStart !== undefined && span.oldEnd !== undefined) {
+    parts.push(`old ${span.oldStart}-${span.oldEnd}`);
+  }
+  if (span.newStart !== undefined && span.newEnd !== undefined) {
+    parts.push(`new ${span.newStart}-${span.newEnd}`);
+  }
+  return parts.join("  ");
+}
+
+function renderReadOnlyFile(
+  entry: Extract<InventoryEntry, { readonly kind: "file" }>,
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
@@ -1511,8 +1570,11 @@ function renderReadOnlyHunk(
     ...wrapStyled(theme.fg("muted", safeText(entry.detail)), width),
     "",
   ];
-  for (const line of entry.hunkView.hunk.lines) {
-    lines.push(...renderDiffLine(line, false, false, theme, width));
+  for (const [index, region] of entry.regions.entries()) {
+    if (index > 0) lines.push("");
+    for (const line of region) {
+      lines.push(...renderDiffLine(line, false, false, theme, width));
+    }
   }
   return lines;
 }
@@ -1528,7 +1590,7 @@ function renderDiffLine(
   const newLine = line.newLine === undefined ? "" : String(line.newLine);
   const marker = selected ? ">" : hasComment ? "●" : " ";
   const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
-  const raw = theme.fg(diffColor(line), safeText(line.raw));
+  const raw = theme.fg(diffColor(line), safeText(diffLineText(line)));
   const lines = wrapWithPrefix(prefix, raw, width);
   if (!selected) return lines;
   return lines.map((rendered) =>
@@ -1541,7 +1603,10 @@ function renderSelectedDiffText(
   theme: ReviewUiTheme,
   width: number,
 ): string {
-  return fitLine(theme.fg(diffColor(line), safeText(line.raw)), width);
+  return fitLine(
+    theme.fg(diffColor(line), safeText(diffLineText(line))),
+    width,
+  );
 }
 
 function renderInventoryRows(
@@ -1699,7 +1764,7 @@ function renderSummaryLines(
     lines.push(
       ...wrapWithPrefix(
         "   ",
-        theme.fg("toolDiffContext", safeText(comment.selectedDiffText)),
+        theme.fg("toolDiffContext", safeText(comment.selectedText)),
         width,
       ),
     );
@@ -1708,16 +1773,16 @@ function renderSummaryLines(
     );
   }
 
-  lines.push("", theme.fg("muted", theme.bold("Explicitly skipped hunks")));
-  if (route.skippedHunks.length === 0) {
+  lines.push("", theme.fg("muted", theme.bold("Explicitly skipped regions")));
+  if (route.skippedSpans.length === 0) {
     lines.push(theme.fg("dim", "None."));
   } else {
-    for (const skip of route.skippedHunks) {
+    for (const skip of route.skippedSpans) {
       lines.push(
         ...wrapStyled(
           theme.fg(
             "warning",
-            `${safeText(skip.hunkId)}: ${safeText(skip.reason)}`,
+            `${safeText(displayPath(skip.span.path))} ${safeText(describeSpanRange(skip.span))}: ${safeText(skip.reason)}`,
           ),
           width,
         ),
@@ -1725,7 +1790,7 @@ function renderSummaryLines(
     }
   }
 
-  const nonTextChanges = inventory.filter((entry) => entry.kind !== "hunk");
+  const nonTextChanges = inventory.filter((entry) => entry.kind !== "file");
   lines.push("", theme.fg("muted", theme.bold("Non-text changes and notices")));
   if (nonTextChanges.length === 0) {
     lines.push(theme.fg("dim", "None."));
@@ -1773,39 +1838,125 @@ function createEditorTheme(theme: ReviewUiTheme): EditorTheme {
   };
 }
 
-function inventoryStatus(
-  requirement: HunkReviewRequirement,
-  unit: ReviewUnit | undefined,
-  skipReason: string | undefined,
-): string {
-  if (requirement.type === "carried-forward") {
-    if (unit !== undefined || skipReason !== undefined) {
-      throw new GuidedReviewUiInvariantError(
-        `Carried-forward hunk ${requirement.hunkId} appears in the planned route.`,
-      );
-    }
-    return "carried-forward";
+/** Unchanged lines rendered around a span so a narrow region is never shown bare. */
+const SPAN_DISPLAY_CONTEXT_RADIUS = 3;
+
+/**
+ * Contiguous slice of the frozen file covering one span.
+ *
+ * The slice is padded with neighbouring unchanged lines so that a span drawn
+ * tightly around its changed lines is still readable. Padding stops at the
+ * first changed line outside the span, because that line belongs to another
+ * unit and must not look reviewable here. Padding is display only and never
+ * affects coverage.
+ */
+function sliceSpan(
+  change: FileChange,
+  span: ResolvedSpan,
+): readonly DiffLine[] {
+  const content = textContent(change);
+  if (content === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Validated route references non-text file change ${change.id}.`,
+    );
   }
-  if (skipReason !== undefined) return "skipped";
-  if (unit !== undefined) return "planned";
-  throw new GuidedReviewUiInvariantError(
-    `Needs-review hunk ${requirement.hunkId} is neither planned nor explicitly skipped.`,
+  let start = -1;
+  let end = -1;
+  for (const [index, line] of content.lines.entries()) {
+    if (!lineWithinSpan(span, line)) continue;
+    if (start < 0) start = index;
+    end = index;
+  }
+  if (start < 0) return [];
+
+  for (let padded = 0; padded < SPAN_DISPLAY_CONTEXT_RADIUS; padded += 1) {
+    if (start === 0 || content.lines[start - 1]?.kind !== "context") break;
+    start -= 1;
+  }
+  for (let padded = 0; padded < SPAN_DISPLAY_CONTEXT_RADIUS; padded += 1) {
+    if (
+      end === content.lines.length - 1 ||
+      content.lines[end + 1]?.kind !== "context"
+    ) {
+      break;
+    }
+    end += 1;
+  }
+  return content.lines.slice(start, end + 1);
+}
+
+function lineWithinSpan(span: ResolvedSpan, line: DiffLine): boolean {
+  if (
+    line.oldLine !== undefined &&
+    span.oldStart !== undefined &&
+    span.oldEnd !== undefined &&
+    line.oldLine >= span.oldStart &&
+    line.oldLine <= span.oldEnd
+  ) {
+    return true;
+  }
+  return (
+    line.newLine !== undefined &&
+    span.newStart !== undefined &&
+    span.newEnd !== undefined &&
+    line.newLine >= span.newStart &&
+    line.newLine <= span.newEnd
   );
 }
 
-function inventoryDetail(
-  requirement: HunkReviewRequirement,
-  unit: ReviewUnit | undefined,
-  skipReason: string | undefined,
+/** Changed regions of a whole file, padded with context, for read-only inspection. */
+function buildDisplayRegions(
+  lines: readonly DiffLine[],
+  radius = 3,
+): readonly DiffLine[][] {
+  const regions: DiffLine[][] = [];
+  let start = -1;
+  let end = -1;
+  for (const [index, line] of lines.entries()) {
+    if (line.kind === "context") continue;
+    const from = Math.max(0, index - radius);
+    const to = Math.min(lines.length - 1, index + radius);
+    if (start < 0) {
+      start = from;
+      end = to;
+      continue;
+    }
+    if (from <= end + 1) {
+      end = Math.max(end, to);
+      continue;
+    }
+    regions.push([...lines.slice(start, end + 1)]);
+    start = from;
+    end = to;
+  }
+  if (start >= 0) regions.push([...lines.slice(start, end + 1)]);
+  return regions;
+}
+
+function fileInventoryStatus(
+  planned: number,
+  skipped: number,
+  carried: number,
 ): string {
-  if (requirement.type === "carried-forward") {
-    return `Reviewed in round ${requirement.reviewedInRoundId}; available for explicit inspection outside the planned route.`;
-  }
-  if (skipReason !== undefined) return `Skip reason: ${skipReason}`;
-  if (unit !== undefined) {
-    return `Review unit: ${unit.title}. Requirement: ${requirement.reason}.`;
-  }
-  return `Requirement: ${requirement.reason}.`;
+  const parts: string[] = [];
+  if (planned > 0) parts.push("planned");
+  if (skipped > 0) parts.push("skipped");
+  if (carried > 0) parts.push("carried-forward");
+  return parts.length === 0 ? "unrouted" : parts.join("+");
+}
+
+function fileInventoryDetail(
+  total: number,
+  planned: number,
+  skipped: number,
+  carried: number,
+  skipReasons: ReadonlySet<string>,
+): string {
+  const parts = [
+    `${total} changed line${total === 1 ? "" : "s"}: ${planned} planned, ${skipped} skipped, ${carried} carried forward.`,
+  ];
+  for (const reason of skipReasons) parts.push(`Skip reason: ${reason}`);
+  return parts.join(" ");
 }
 
 function lastTargetKey(rows: readonly RenderedRow[]): string | undefined {
@@ -1997,29 +2148,36 @@ function diffColor(line: DiffLine): Parameters<ReviewUiTheme["fg"]>[0] {
     case "removed":
       return "toolDiffRemoved";
     case "context":
-    case "no-newline-marker":
       return "toolDiffContext";
   }
+}
+
+/** Restores the unified diff prefix that the frozen model stores separately. */
+function diffLineText(line: DiffLine): string {
+  const prefix =
+    line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " ";
+  return `${prefix}${line.text}`;
 }
 
 function anchorFromTarget(target: ReviewCommentTarget): ReviewCommentAnchor {
   return {
     reviewUnitId: target.reviewUnitId,
-    hunkId: target.hunkId,
-    diffLineIndex: target.diffLineIndex,
+    fileChangeId: target.fileChangeId,
+    side: target.side,
+    line: target.line,
   };
 }
 
 function targetKey(anchor: ReviewCommentAnchor): string {
-  return JSON.stringify([
-    anchor.reviewUnitId,
-    anchor.hunkId,
-    anchor.diffLineIndex,
-  ]);
+  return `${anchor.reviewUnitId}\u0000${changedLineKey(anchor)}`;
 }
 
-function hunkLineKey(hunkId: HunkId, diffLineIndex: number): string {
-  return JSON.stringify([hunkId, diffLineIndex]);
+function fileLineKey(
+  fileChangeId: FileChange["id"],
+  side: ChangeSide,
+  line: number,
+): string {
+  return `${fileChangeId}\u0000${side}\u0000${line}`;
 }
 
 function submissionLabel(status: SubmissionStatus): string {

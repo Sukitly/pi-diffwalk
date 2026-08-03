@@ -84,6 +84,7 @@ Use this source layout unless an approved plan establishes a better one:
 src/
   index.ts
   git-diff.ts
+  review-span.ts
   review-delta.ts
   in-progress-review.ts
   route-validation.ts
@@ -95,6 +96,7 @@ src/
   types.ts
 test/
   git-diff.test.ts
+  review-span.test.ts
   review-delta.test.ts
   in-progress-review.test.ts
   route-validation.test.ts
@@ -108,11 +110,12 @@ Responsibilities:
 | File | Responsibility |
 |---|---|
 | `src/index.ts` | Register `/diffwalk`, register the guided review tool, and coordinate the workflow |
-| `src/git-diff.ts` | Capture repository state, parse unified diffs, include untracked files, and assign stable identifiers |
-| `src/review-delta.ts` | Classify snapshot hunks against the previous completed round and validate delta coverage |
+| `src/git-diff.ts` | Capture repository state, parse unified diffs, include untracked files, and reconstruct each changed file as one frozen line sequence |
+| `src/review-span.ts` | Own the changed-line atom, span resolution, and coverage set arithmetic |
+| `src/review-delta.ts` | Classify changed lines against the previous completed round and validate delta coverage |
 | `src/in-progress-review.ts` | Own resumable review identity, lifecycle, explicit unit progress, drafts, submission eligibility, and optimistic versioning |
 | `src/route-validation.ts` | Validate route references, coverage, ordering, and explicit skips |
-| `src/review-coverage.ts` | Materialize submitted review outcomes for every snapshot hunk |
+| `src/review-coverage.ts` | Materialize submitted review outcomes for every changed line |
 | `src/review-series.ts` | Create and append immutable completed review rounds |
 | `src/review-comments.ts` | Own comment anchors, drafts, ordering, cancellation, and drift-gated submission results |
 | `src/review-ui.ts` | Render the walkthrough, navigate diff lines, and connect the comment session to the TUI |
@@ -126,17 +129,19 @@ Keep Git parsing, route validation, model protocol, and TUI state separate. They
 These rules define the product. Do not weaken them without explicit user approval.
 
 1. Git output is the source of truth for displayed changes.
-2. The model may reference hunks by stable identifier, but it must not provide the patch text rendered to the user.
-3. Every hunk marked `needs-review` must appear exactly once in the review route or be explicitly skipped with a visible reason. Hunks marked `unresolved-comment` cannot be skipped. Carried-forward hunks remain visible in inventory and coverage but are excluded from the model-planned route.
-4. The extension must reject unknown, duplicate, or missing hunk references.
-5. A review uses a frozen snapshot. The implementation agent must not mutate the worktree during the walkthrough.
-6. The extension must detect worktree drift before submitting comments.
-7. Comments must retain file, hunk, old line, new line, and nearby diff context where available.
-8. Comments are returned to the agent as one batch after explicit user submission.
-9. Review order should follow behavior, contracts, data flow, and failure paths rather than alphabetical file order.
-10. The human owns the review and approval decision.
-11. Unsupported changes must be reported. They must never disappear silently.
-12. Non-interactive modes must fail clearly instead of pretending that an interactive review occurred.
+2. The model may address regions by file path and line range, but it must not provide the patch text rendered to the user.
+3. The unit of review coverage is the changed line, not the Git hunk. A hunk is an artifact of the diff algorithm's context radius and carries no semantic meaning, so it must not appear in the agent protocol, the coverage contract, or the comment anchor.
+4. Every changed line marked `needs-review` must be covered by exactly one review unit or explicitly skipped with a visible reason. Lines marked `unresolved-comment` cannot be skipped. Carried-forward lines remain visible in inventory and coverage but must not be covered or skipped by the model-planned route.
+5. The extension must reject a span that names an unknown file, falls outside the frozen file, or contains no changed line, and must reject a route that leaves a changed line uncovered or covered twice.
+6. The kickoff inventory tells the agent which lines changed, not what they contain. The extension must not push file or patch content into the model prompt. The agent reads the code with its own tools.
+7. A review uses a frozen snapshot. The implementation agent must not mutate the worktree during the walkthrough.
+8. The extension must detect worktree drift before submitting comments.
+9. Comments must retain file, side, line number, selected text, and nearby file context.
+10. Comments are returned to the agent as one batch after explicit user submission.
+11. Review order should follow behavior, contracts, data flow, and failure paths rather than alphabetical file order.
+12. The human owns the review and approval decision.
+13. Unsupported changes must be reported. They must never disappear silently.
+14. Non-interactive modes must fail clearly instead of pretending that an interactive review occurred.
 
 ## Workflow for Changes
 
@@ -200,33 +205,43 @@ Biome is the formatting and linting authority. Do not hand-format code against B
 - Never mutate the index or worktree while collecting a snapshot.
 - Do not use `git checkout`, `git switch`, `git reset`, `git clean`, or `git stash` as part of review collection.
 
-The snapshot collector must be deterministic. The same repository state and base revision must produce the same hunk identifiers.
+The snapshot collector must be deterministic. The same repository state and base revision must produce the same file change identifiers and the same changed-line set.
+
+Each changed text file is stored as one line sequence covering the whole file, not only the regions Git chose to emit. A review span may address any line, so the untouched regions are reconstructed from the frozen merge-base blob. Reconstruction must be verified against the real file content, never assumed.
 
 ## Agent Protocol Rules
 
-The model plans the route only after the extension has created the snapshot inventory and calculated the review delta. The model-planned route covers `needs-review` hunks only. Carried-forward hunks remain available for explicit human inspection outside the planned route and must not be routed or skipped by the model.
+The model plans the route only after the extension has created the snapshot inventory and calculated the review delta. The model-planned route covers `needs-review` lines only. Carried-forward lines remain available for explicit human inspection outside the planned route and must not be covered or skipped by the model.
 
-The route schema must reference stable identifiers and contain only explanatory metadata, such as:
+The kickoff inventory carries no file content. It states the frozen comparison, which lines changed on which side, how each line is classified, and the Git hunk boundaries offered as suggested spans. The agent reads the code itself: the new side is the worktree, and the old side is reachable with `git show <mergeBase>:<path>`.
+
+The route schema must address regions by path and line range and contain only explanatory metadata, such as:
 
 - review unit title
 - reason for reviewing the unit at this point
 - required context and call path
 - description of the change
 - concrete review questions
-- ordered hunk identifiers
-- explicit skipped identifiers and reasons
+- ordered spans, each a path with an old range, a new range, or both
+- explicit skipped spans and reasons
+
+A review unit is a semantic region. It may span several files, it may cover part of a Git hunk, and it may include unchanged lines for context. Suggested spans mirror hunk boundaries and are a starting point the agent is expected to redraw when a semantic region disagrees with them.
 
 Validate all model output before opening the TUI.
 
 A valid route must satisfy:
 
-- no unknown identifiers
-- no duplicate identifiers
-- no uncovered `needs-review` hunks
-- no carried-forward hunk references
-- no skipped `unresolved-comment` hunk
-- no skipped hunk without a reason
-- at least one review unit when `needs-review` hunks exist
+- every span names a changed file in the frozen snapshot
+- every span stays inside the frozen file on the side it addresses
+- every span covers at least one changed line
+- every `needs-review` line is covered exactly once, or skipped with a reason
+- no changed line is covered by two units
+- no changed line is both covered and skipped
+- no carried-forward line is covered or skipped
+- no `unresolved-comment` line is skipped
+- at least one review unit when `needs-review` lines exist
+
+Unchanged lines may appear in any number of spans. Only changed lines are counted for coverage, so two units can share context without conflict.
 
 Return validation errors to the agent so it can repair the tool call. Do not silently repair a route in a way that could hide missing coverage.
 
@@ -263,6 +278,7 @@ Do not infer permission to edit from a concern or question.
 - Keep navigation available when a unit is taller than the terminal.
 - Show review progress, comment count, skipped count, and snapshot drift status.
 - Make cancellation explicit and preserve comments when practical.
+- Render a span with a few unchanged lines of padding so a narrowly drawn region is still readable. Stop padding at the first changed line outside the span, because that line belongs to another unit and must not look reviewable. Padding is display only and must not affect coverage.
 
 Do not put model-generated patch text into the TUI, even as a fallback.
 
@@ -273,16 +289,20 @@ A submitted comment must include:
 ```text
 snapshot ID
 review unit ID
-hunk ID
+file change ID
+side, either old or new
+line number on that side
 selected file path
 old file path, when available
 new file path, when available
 old line number, when available
 new line number, when available
-selected diff text
-nearby diff context
+selected line text
+nearby file context
 comment body
 ```
+
+Only a changed line covered by the unit's spans can be commented on, so a comment can never fall outside the route the human is walking.
 
 Comments must be editable before submission. The final page must show the complete batch and the selected submission mode.
 
@@ -304,13 +324,16 @@ At minimum, cover:
 - empty files
 - files without a trailing newline
 - paths containing spaces and Unicode
-- multiple hunks in one file
-- deterministic hunk identifiers
-- unknown route identifiers
-- duplicate route identifiers
-- missing route coverage
+- several separate changed regions in one file
+- whole-file reconstruction matching the real old and new content
+- deterministic file change identifiers and changed-line sets
+- spans naming an unknown path, an out-of-range line, or no changed line
+- a changed line left uncovered, covered twice, or both covered and skipped
 - valid explicit skips
-- comment anchors on added, removed, and context lines
+- a span covering part of a Git hunk, and a unit spanning several files
+- carried-forward lines surviving a line shift and a neighbouring edit
+- comment anchors on added and removed lines, and rejection of context lines
+- a kickoff prompt that does not grow with the amount of changed source text
 - snapshot drift detection
 
 Use temporary Git repositories for integration tests. Keep fixtures small enough that failures can be understood from test output.

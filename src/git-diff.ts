@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
   BinaryChange,
-  DiffHunk,
-  DiffHunkHeader,
   DiffLine,
   FileChange,
   FileChangeContent,
@@ -10,15 +8,15 @@ import type {
   FileChangeSource,
   FileChangeStatus,
   GitObjectId,
-  HunkFingerprint,
-  HunkId,
   MetadataOnlyChange,
   NoticeId,
   RepositoryState,
   ReviewSnapshot,
+  ReviewSpan,
   SnapshotId,
   SnapshotNotice,
   StateFingerprint,
+  TextChange,
   UnsupportedChange,
 } from "./types.ts";
 
@@ -74,9 +72,27 @@ interface UntrackedFile {
   readonly patch: string;
 }
 
+/** Unified diff hunk header. Hunks are an internal parsing artifact only. */
+interface HunkHeader {
+  readonly raw: string;
+  readonly oldStart: number;
+  readonly oldCount: number;
+  readonly newStart: number;
+  readonly newCount: number;
+}
+
+type ParsedLineKind = "context" | "added" | "removed" | "no-newline-marker";
+
+interface ParsedLine {
+  readonly kind: ParsedLineKind;
+  readonly raw: string;
+  readonly oldLine?: number;
+  readonly newLine?: number;
+}
+
 interface HunkDraft {
-  readonly header: DiffHunkHeader;
-  readonly lines: readonly DiffLine[];
+  readonly header: HunkHeader;
+  readonly lines: readonly ParsedLine[];
 }
 
 type ContentDraft =
@@ -205,9 +221,11 @@ export async function captureReviewSnapshot(
     unmergedPaths,
   );
   const untrackedDrafts = before.untrackedFiles.map(buildUntrackedDraft);
-  const changes = [...trackedDrafts, ...untrackedDrafts]
-    .map(buildFileChange)
-    .sort(compareFileChanges);
+  const built: FileChange[] = [];
+  for (const draft of [...trackedDrafts, ...untrackedDrafts]) {
+    built.push(await buildFileChange(git, repositoryRoot, mergeBaseOid, draft));
+  }
+  const changes = built.sort(compareFileChanges);
   const notices = buildCancelledLayerNotices(before, changes);
 
   const after = await captureStateArtifacts(git, repositoryRoot);
@@ -814,7 +832,7 @@ function parseHunks(lines: readonly string[]): readonly HunkDraft[] {
   while (index < lines.length) {
     const header = parseHunkHeader(requiredAt(lines, index, "hunk header"));
     index += 1;
-    const diffLines: DiffLine[] = [];
+    const diffLines: ParsedLine[] = [];
     let oldLine = header.oldStart;
     let newLine = header.newStart;
     let oldSeen = 0;
@@ -823,29 +841,22 @@ function parseHunks(lines: readonly string[]): readonly HunkDraft[] {
     while (index < lines.length) {
       const raw = requiredAt(lines, index, "hunk line");
       if (raw.startsWith("@@ ")) break;
-      const lineIndex = diffLines.length;
       if (raw.startsWith(" ")) {
-        diffLines.push({
-          index: lineIndex,
-          kind: "context",
-          raw,
-          oldLine,
-          newLine,
-        });
+        diffLines.push({ kind: "context", raw, oldLine, newLine });
         oldLine += 1;
         newLine += 1;
         oldSeen += 1;
         newSeen += 1;
       } else if (raw.startsWith("+")) {
-        diffLines.push({ index: lineIndex, kind: "added", raw, newLine });
+        diffLines.push({ kind: "added", raw, newLine });
         newLine += 1;
         newSeen += 1;
       } else if (raw.startsWith("-")) {
-        diffLines.push({ index: lineIndex, kind: "removed", raw, oldLine });
+        diffLines.push({ kind: "removed", raw, oldLine });
         oldLine += 1;
         oldSeen += 1;
       } else if (raw === "\\ No newline at end of file") {
-        diffLines.push({ index: lineIndex, kind: "no-newline-marker", raw });
+        diffLines.push({ kind: "no-newline-marker", raw });
       } else {
         throw new GitSnapshotError(
           `Unexpected unified diff line ${JSON.stringify(raw)}.`,
@@ -865,7 +876,7 @@ function parseHunks(lines: readonly string[]): readonly HunkDraft[] {
   return hunks;
 }
 
-function parseHunkHeader(raw: string): DiffHunkHeader {
+function parseHunkHeader(raw: string): HunkHeader {
   const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/.exec(raw);
   if (!match) {
     throw new GitSnapshotError(
@@ -895,15 +906,35 @@ function contentBodyLines(content: ContentDraft): readonly string[] {
   return content.gitBodyLines;
 }
 
-function buildFileChange(draft: FileChangeDraft): FileChange {
+async function buildFileChange(
+  git: GitRunner,
+  repositoryRoot: string,
+  mergeBaseOid: GitObjectId,
+  draft: FileChangeDraft,
+): Promise<FileChange> {
   const id = hashAs<FileChangeId>("file-change", draft);
-  const content: FileChangeContent =
-    draft.content.kind === "text"
-      ? {
-          kind: "text",
-          hunks: draft.content.hunks.map((hunk) => buildHunk(draft, id, hunk)),
-        }
-      : draft.content;
+  let content: FileChangeContent;
+  if (draft.content.kind === "text") {
+    const hunks = draft.content.hunks;
+    try {
+      const oldFile = await readOldFile(
+        git,
+        repositoryRoot,
+        mergeBaseOid,
+        draft,
+      );
+      content = buildTextContent(draft, hunks, oldFile);
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      content = {
+        kind: "unsupported",
+        gitBodyLines: contentBodyLines(draft.content),
+        unsupportedReason: `DiffWalk could not reconstruct the frozen file content: ${reason}`,
+      };
+    }
+  } else {
+    content = draft.content;
+  }
   return {
     id,
     source: draft.source,
@@ -917,32 +948,185 @@ function buildFileChange(draft: FileChangeDraft): FileChange {
   };
 }
 
-function buildHunk(
+interface OldFileContent {
+  readonly lines: readonly string[];
+  readonly noTrailingNewline: boolean;
+}
+
+async function readOldFile(
+  git: GitRunner,
+  repositoryRoot: string,
+  mergeBaseOid: GitObjectId,
   draft: FileChangeDraft,
-  fileChangeId: FileChangeId,
-  hunk: HunkDraft,
-): DiffHunk {
-  const fileIdentity = {
-    status: draft.status,
-    oldPath: draft.oldPath,
-    newPath: draft.newPath,
-  };
-  const fingerprint = hashAs<HunkFingerprint>("hunk-fingerprint", {
-    file: fileIdentity,
-    lines: hunk.lines.map((line) => ({ kind: line.kind, raw: line.raw })),
-  });
-  const id = hashAs<HunkId>("hunk", {
-    fileChangeId,
-    header: hunk.header,
-    lines: hunk.lines,
-  });
+): Promise<OldFileContent> {
+  if (
+    draft.source === "untracked" ||
+    draft.status === "added" ||
+    draft.oldPath === undefined
+  ) {
+    return { lines: [], noTrailingNewline: false };
+  }
+  const output = await runGit(
+    git,
+    repositoryRoot,
+    ["cat-file", "blob", `${mergeBaseOid}:${draft.oldPath}`],
+    [0],
+    `Unable to read the frozen content of ${JSON.stringify(draft.oldPath)} at the merge base.`,
+  );
   return {
-    id,
-    fingerprint,
-    fileChangeId,
-    header: hunk.header,
-    lines: hunk.lines,
+    lines: splitLines(output),
+    noTrailingNewline: output.length > 0 && !output.endsWith("\n"),
   };
+}
+
+/**
+ * Rebuilds the whole file as one unified line sequence.
+ *
+ * Git only emits changed regions plus a small context radius, but a review span
+ * may address any line, so the snapshot reconstructs the untouched regions from
+ * the frozen old blob. The result is also the old-to-new line number mapping.
+ */
+function buildTextContent(
+  draft: FileChangeDraft,
+  hunks: readonly HunkDraft[],
+  oldFile: OldFileContent,
+): TextChange {
+  const lines: DiffLine[] = [];
+  let oldCursor = 1;
+  let newCursor = 1;
+  let oldNoTrailingNewline = false;
+  let newNoTrailingNewline = false;
+  let markerSeen = false;
+
+  const takeOldLine = (label: string): string => {
+    const text = oldFile.lines[oldCursor - 1];
+    if (text === undefined) {
+      throw new GitSnapshotError(
+        `The frozen old file has ${oldFile.lines.length} lines, but ${label} needs line ${oldCursor}.`,
+      );
+    }
+    return text;
+  };
+
+  for (const hunk of hunks) {
+    const oldBegin =
+      hunk.header.oldCount === 0
+        ? hunk.header.oldStart + 1
+        : hunk.header.oldStart;
+    const newBegin =
+      hunk.header.newCount === 0
+        ? hunk.header.newStart + 1
+        : hunk.header.newStart;
+    while (oldCursor < oldBegin) {
+      lines.push({
+        kind: "context",
+        oldLine: oldCursor,
+        newLine: newCursor,
+        text: takeOldLine(`hunk ${JSON.stringify(hunk.header.raw)}`),
+      });
+      oldCursor += 1;
+      newCursor += 1;
+    }
+    if (newCursor !== newBegin) {
+      throw new GitSnapshotError(
+        `Hunk ${JSON.stringify(hunk.header.raw)} starts at new line ${newBegin}, but reconstruction reached new line ${newCursor}.`,
+      );
+    }
+
+    let previousKind: DiffLine["kind"] | undefined;
+    for (const line of hunk.lines) {
+      if (line.kind === "no-newline-marker") {
+        markerSeen = true;
+        if (previousKind === "removed" || previousKind === "context") {
+          oldNoTrailingNewline = true;
+        }
+        if (previousKind === "added" || previousKind === "context") {
+          newNoTrailingNewline = true;
+        }
+        continue;
+      }
+      const text = line.raw.slice(1);
+      if (line.kind === "context") {
+        lines.push({
+          kind: "context",
+          oldLine: oldCursor,
+          newLine: newCursor,
+          text,
+        });
+        oldCursor += 1;
+        newCursor += 1;
+      } else if (line.kind === "added") {
+        lines.push({ kind: "added", newLine: newCursor, text });
+        newCursor += 1;
+      } else {
+        lines.push({ kind: "removed", oldLine: oldCursor, text });
+        oldCursor += 1;
+      }
+      previousKind = line.kind;
+    }
+  }
+
+  while (oldCursor <= oldFile.lines.length) {
+    lines.push({
+      kind: "context",
+      oldLine: oldCursor,
+      newLine: newCursor,
+      text: takeOldLine("the trailing unchanged region"),
+    });
+    oldCursor += 1;
+    newCursor += 1;
+  }
+
+  if (!markerSeen) {
+    oldNoTrailingNewline = oldFile.noTrailingNewline;
+    newNoTrailingNewline = oldFile.noTrailingNewline;
+  }
+
+  const oldLineCount = lines.filter(
+    (line) => line.oldLine !== undefined,
+  ).length;
+  const newLineCount = lines.filter(
+    (line) => line.newLine !== undefined,
+  ).length;
+  if (oldLineCount !== oldFile.lines.length) {
+    throw new GitSnapshotError(
+      `Reconstruction produced ${oldLineCount} old lines, but the frozen old file has ${oldFile.lines.length}.`,
+    );
+  }
+
+  return {
+    kind: "text",
+    lines,
+    oldLineCount,
+    newLineCount,
+    oldNoTrailingNewline,
+    newNoTrailingNewline,
+    suggestedSpans: buildSuggestedSpans(draft, hunks),
+  };
+}
+
+/** One span per Git hunk, offered to the agent as a starting point it may redraw. */
+function buildSuggestedSpans(
+  draft: FileChangeDraft,
+  hunks: readonly HunkDraft[],
+): readonly ReviewSpan[] {
+  const path = draft.newPath ?? draft.oldPath;
+  if (path === undefined) return [];
+  return hunks.map((hunk) => ({
+    path,
+    ...(hunk.header.oldCount === 0
+      ? {}
+      : {
+          oldStart: hunk.header.oldStart,
+          oldEnd: hunk.header.oldStart + hunk.header.oldCount - 1,
+        }),
+    ...(hunk.header.newCount === 0
+      ? {}
+      : {
+          newStart: hunk.header.newStart,
+          newEnd: hunk.header.newStart + hunk.header.newCount - 1,
+        }),
+  }));
 }
 
 function buildCancelledLayerNotices(

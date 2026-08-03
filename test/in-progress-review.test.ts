@@ -16,13 +16,11 @@ import { computeReviewDelta } from "../src/review-delta.ts";
 import { createReviewSeries } from "../src/review-series.ts";
 import { validateReviewRoute } from "../src/route-validation.ts";
 import type {
-  DiffLine,
   InProgressReview,
   ReviewRoute,
   ReviewSeries,
-  ReviewSnapshot,
 } from "../src/types.ts";
-import { hunkId, makeSnapshot } from "./domain-fixtures.ts";
+import { fileChangeId, makeSnapshot, span } from "./domain-fixtures.ts";
 
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
 
@@ -33,23 +31,13 @@ interface ReviewFixture {
 }
 
 function makeReviewFixture(): ReviewFixture {
-  const base = makeSnapshot(
+  const snapshot = makeSnapshot(
     "snapshot-progress",
     [
-      { id: "h1", fingerprint: "fp1", path: "src/entry.ts" },
-      { id: "h2", fingerprint: "fp2", path: "src/contract.ts" },
+      { path: "src/entry.ts", lines: [" head", "+entry", " tail"] },
+      { path: "src/contract.ts", lines: [" head", "+contract", " tail"] },
     ],
     { repositoryRoot: "/repo", targetRef: "main" },
-  );
-  const snapshot = withHunkLines(
-    base,
-    new Map([
-      [hunkId("h1"), [{ index: 0, kind: "added", raw: "+entry", newLine: 1 }]],
-      [
-        hunkId("h2"),
-        [{ index: 0, kind: "added", raw: "+contract", newLine: 1 }],
-      ],
-    ]),
   );
   const delta = computeReviewDelta(snapshot);
   const series = createReviewSeries({
@@ -66,7 +54,7 @@ function makeReviewFixture(): ReviewFixture {
         context: "entry -> contract",
         changeSummary: "Changes the entry behavior.",
         reviewFocus: ["Is the entry behavior correct?"],
-        hunkIds: ["h1"],
+        spans: [span("src/entry.ts", { new: [2, 2] })],
       },
       {
         title: "Contract",
@@ -74,10 +62,10 @@ function makeReviewFixture(): ReviewFixture {
         context: "entry -> contract",
         changeSummary: "Changes the contract.",
         reviewFocus: ["Is the contract compatible?"],
-        hunkIds: ["h2"],
+        spans: [span("src/contract.ts", { new: [2, 2] })],
       },
     ],
-    skippedHunks: [],
+    skippedSpans: [],
   });
   const review = createInProgressReview({
     series,
@@ -88,26 +76,11 @@ function makeReviewFixture(): ReviewFixture {
   return { review, route, series };
 }
 
-function withHunkLines(
-  snapshot: ReviewSnapshot,
-  linesByHunkId: ReadonlyMap<string, readonly DiffLine[]>,
-): ReviewSnapshot {
+function anchor(path: string, line: number) {
   return {
-    ...snapshot,
-    changes: snapshot.changes.map((change) =>
-      change.content.kind === "text"
-        ? {
-            ...change,
-            content: {
-              kind: "text",
-              hunks: change.content.hunks.map((hunk) => ({
-                ...hunk,
-                lines: linesByHunkId.get(hunk.id) ?? hunk.lines,
-              })),
-            },
-          }
-        : change,
-    ),
+    fileChangeId: fileChangeId("modified", path),
+    side: "new" as const,
+    line,
   };
 }
 
@@ -254,8 +227,7 @@ test("owns draft comments and submission mode outside the TUI", () => {
     fixture.review,
     {
       reviewUnitId: unit.id,
-      hunkId: hunkId("h1"),
-      diffLineIndex: 0,
+      ...anchor("src/entry.ts", 2),
       body: "Explain this behavior.",
     },
     mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
@@ -269,8 +241,7 @@ test("owns draft comments and submission mode outside the TUI", () => {
     withMode,
     {
       reviewUnitId: unit.id,
-      hunkId: hunkId("h1"),
-      diffLineIndex: 0,
+      ...anchor("src/entry.ts", 2),
     },
     mutate(withMode, "2026-01-01T00:04:00.000Z"),
   );
@@ -350,7 +321,9 @@ test("submits only a complete current review and appends an immutable round", ()
   assert.equal(submitted.series.rounds.length, 1);
   assert.equal(submitted.round.snapshot.id, complete.snapshot.id);
   assert.deepEqual(
-    submitted.round.coverage.records.map((record) => record.disposition),
+    submitted.round.coverage.files.flatMap((file) =>
+      file.lines.map((record) => record.disposition),
+    ),
     ["reviewed-without-comment", "reviewed-without-comment"],
   );
   assert.deepEqual(fixture.series.rounds, []);
@@ -364,8 +337,7 @@ test("discard is explicit, clears drafts, and is terminal", () => {
     fixture.review,
     {
       reviewUnitId: unit.id,
-      hunkId: hunkId("h1"),
-      diffLineIndex: 0,
+      ...anchor("src/entry.ts", 2),
       body: "Draft",
     },
     mutate(fixture.review, "2026-01-01T00:02:00.000Z"),

@@ -2,13 +2,18 @@ import { createHash } from "node:crypto";
 import {
   assertReviewDeltaMatchesSnapshot,
   isNeedsReviewReasonSkippable,
-  listSnapshotHunks,
-  ReviewDeltaError,
 } from "./review-delta.ts";
+import {
+  type ChangedLine,
+  changedLineKey,
+  computeSpanCoverage,
+  describeChangedLines,
+  describeSpan,
+  resolveSpan,
+} from "./review-span.ts";
 import type {
-  DiffHunk,
-  HunkId,
-  HunkReviewRequirement,
+  ChangedLineRequirement,
+  ResolvedSpan,
   ReviewDelta,
   ReviewRoute,
   ReviewRouteCandidate,
@@ -22,12 +27,13 @@ export type ReviewRouteValidationIssueCode =
   | "snapshot-mismatch"
   | "empty-field"
   | "empty-unit"
-  | "unknown-hunk"
+  | "invalid-span"
   | "carried-forward-reference"
-  | "duplicate-hunk"
-  | "missing-hunk"
+  | "duplicate-coverage"
+  | "missing-coverage"
   | "empty-skip-reason"
   | "unresolved-comment-skip"
+  | "skip-coverage-conflict"
   | "missing-review-unit";
 
 export interface ReviewRouteValidationIssue {
@@ -47,25 +53,19 @@ export class ReviewRouteValidationError extends Error {
   }
 }
 
-interface ValidatedHunkReference {
-  readonly hunkId: HunkId;
-  readonly requirement: HunkReviewRequirement;
-}
-
 export function validateReviewRoute(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
   candidate: ReviewRouteCandidate,
 ): ReviewRoute {
   assertReviewDeltaMatchesSnapshot(snapshot, delta);
-  const hunks = listSnapshotHunks(snapshot);
-  const hunksById = new Map<string, DiffHunk>(
-    hunks.map((hunk) => [hunk.id, hunk]),
-  );
-  const requirementsById = new Map(
-    delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
-  );
   const issues: ReviewRouteValidationIssue[] = [];
+  const requirements = new Map(
+    delta.lines.map((requirement) => [
+      changedLineKey(requirement),
+      requirement,
+    ]),
+  );
 
   if (candidate.snapshotId !== snapshot.id) {
     issues.push({
@@ -74,8 +74,8 @@ export function validateReviewRoute(
     });
   }
 
-  const referencedHunkIds = new Set<string>();
-  const units: ReviewUnit[] = candidate.units.map((unit, unitIndex) => {
+  const unitSpans: ResolvedSpan[][] = [];
+  const units = candidate.units.map((unit, unitIndex) => {
     const unitNumber = unitIndex + 1;
     validateNonBlank(unit.title, `Review unit ${unitNumber} title`, issues);
     validateNonBlank(unit.whyHere, `Review unit ${unitNumber} whyHere`, issues);
@@ -98,136 +98,158 @@ export function validateReviewRoute(
         issues,
       );
     }
-    if (unit.hunkIds.length === 0) {
+    if (unit.spans.length === 0) {
       issues.push({
         code: "empty-unit",
-        message: `Review unit ${unitNumber} must reference at least one hunk.`,
+        message: `Review unit ${unitNumber} must reference at least one span.`,
       });
     }
 
-    const hunkIds = unit.hunkIds.flatMap((candidateHunkId) => {
-      const reference = validateCandidateHunkReference(
-        candidateHunkId,
-        `review unit ${unitNumber}`,
-        hunksById,
-        requirementsById,
-        referencedHunkIds,
-        issues,
+    const spans = unit.spans.flatMap((span, spanIndex) => {
+      const result = resolveSpan(
+        snapshot,
+        span,
+        `Review unit ${unitNumber} span ${spanIndex + 1} (${describeSpan(span)})`,
       );
-      return reference === undefined ? [] : [reference.hunkId];
+      for (const issue of result.issues) {
+        issues.push({ code: "invalid-span", message: issue.message });
+      }
+      return result.span === undefined ? [] : [result.span];
     });
+    unitSpans.push(spans);
 
     return {
-      id: createReviewUnitId(snapshot.id, unitIndex, hunkIds),
       title: unit.title,
       whyHere: unit.whyHere,
       context: unit.context,
       changeSummary: unit.changeSummary,
       reviewFocus: [...unit.reviewFocus],
-      hunkIds,
+      spans,
     };
   });
 
-  const skippedHunks: ReviewRouteSkip[] = candidate.skippedHunks.flatMap(
+  const skippedSpans: ReviewRouteSkip[] = candidate.skippedSpans.flatMap(
     (skipped, skipIndex) => {
       const skipNumber = skipIndex + 1;
       if (skipped.reason.trim().length === 0) {
         issues.push({
           code: "empty-skip-reason",
-          message: `Skipped hunk ${skipped.hunkId} requires a non-empty reason.`,
+          message: `Skipped span ${skipNumber} (${describeSpan(skipped.span)}) requires a non-empty reason.`,
         });
       }
-      const reference = validateCandidateHunkReference(
-        skipped.hunkId,
-        `skip ${skipNumber}`,
-        hunksById,
-        requirementsById,
-        referencedHunkIds,
-        issues,
+      const result = resolveSpan(
+        snapshot,
+        skipped.span,
+        `Skipped span ${skipNumber} (${describeSpan(skipped.span)})`,
       );
-      if (
-        reference?.requirement.type === "needs-review" &&
-        !isNeedsReviewReasonSkippable(reference.requirement.reason)
-      ) {
-        issues.push({
-          code: "unresolved-comment-skip",
-          message: `Hunk ${reference.hunkId} has an unresolved comment and cannot be skipped.`,
-        });
+      for (const issue of result.issues) {
+        issues.push({ code: "invalid-span", message: issue.message });
       }
-      return reference === undefined
+      return result.span === undefined
         ? []
-        : [{ hunkId: reference.hunkId, reason: skipped.reason }];
+        : [{ span: result.span, reason: skipped.reason }];
     },
   );
 
-  for (const requirement of delta.hunks) {
-    if (
-      requirement.type === "needs-review" &&
-      !referencedHunkIds.has(requirement.hunkId)
-    ) {
-      issues.push({
-        code: "missing-hunk",
-        message: `Review route does not cover required hunk ${requirement.hunkId}.`,
-      });
+  const coverage = computeSpanCoverage(snapshot, {
+    unitSpans,
+    skippedSpans: skippedSpans.map((skip) => skip.span),
+  });
+
+  for (const duplicate of coverage.duplicated) {
+    issues.push({
+      code: "duplicate-coverage",
+      message: `${describeLine(snapshot, duplicate.line)} is covered by review units ${duplicate.unitIndexes
+        .map((index) => index + 1)
+        .join(", ")}. Every changed line must belong to exactly one unit.`,
+    });
+  }
+
+  for (const line of coverage.conflicting) {
+    issues.push({
+      code: "skip-coverage-conflict",
+      message: `${describeLine(snapshot, line)} is both covered by a review unit and explicitly skipped.`,
+    });
+  }
+
+  const carriedForward: ChangedLine[] = [];
+  const unskippable: ChangedLine[] = [];
+  for (const lines of coverage.coveredByUnit) {
+    for (const line of lines) {
+      if (requirementOf(requirements, line)?.type === "carried-forward") {
+        carriedForward.push(line);
+      }
     }
   }
-  if (
-    delta.hunks.some((requirement) => requirement.type === "needs-review") &&
-    !candidate.units.some((unit) => unit.hunkIds.length > 0)
-  ) {
+  for (const line of coverage.skipped) {
+    const requirement = requirementOf(requirements, line);
+    if (requirement === undefined) continue;
+    if (requirement.type === "carried-forward") {
+      carriedForward.push(line);
+      continue;
+    }
+    if (!isNeedsReviewReasonSkippable(requirement.reason)) {
+      unskippable.push(line);
+    }
+  }
+
+  for (const description of describeChangedLines(snapshot, carriedForward)) {
+    issues.push({
+      code: "carried-forward-reference",
+      message: `${description} was reviewed in an earlier round and must stay outside the planned route.`,
+    });
+  }
+  for (const description of describeChangedLines(snapshot, unskippable)) {
+    issues.push({
+      code: "unresolved-comment-skip",
+      message: `${description} has an unresolved comment and cannot be skipped.`,
+    });
+  }
+
+  const uncovered = coverage.uncovered.filter(
+    (line) => requirementOf(requirements, line)?.type === "needs-review",
+  );
+  for (const description of describeChangedLines(snapshot, uncovered)) {
+    issues.push({
+      code: "missing-coverage",
+      message: `${description} needs review but no unit covers it and no skip excludes it.`,
+    });
+  }
+
+  const needsReviewExists = delta.lines.some(
+    (requirement) => requirement.type === "needs-review",
+  );
+  if (needsReviewExists && !unitSpans.some((spans) => spans.length > 0)) {
     issues.push({
       code: "missing-review-unit",
       message:
-        "A route with hunks requiring review must contain at least one non-empty review unit.",
+        "A route with changed lines requiring review must contain at least one review unit with spans.",
     });
   }
 
   throwIfIssues(issues);
+
   return {
     snapshotId: snapshot.id,
-    units,
-    skippedHunks,
+    units: units.map(
+      (unit, index): ReviewUnit => ({
+        id: createReviewUnitId(snapshot.id, index, unit.spans),
+        ...unit,
+      }),
+    ),
+    skippedSpans,
   } as unknown as ReviewRoute;
 }
 
-function validateCandidateHunkReference(
-  candidateHunkId: string,
-  location: string,
-  hunksById: ReadonlyMap<string, DiffHunk>,
-  requirementsById: ReadonlyMap<HunkId, HunkReviewRequirement>,
-  referencedHunkIds: Set<string>,
-  issues: ReviewRouteValidationIssue[],
-): ValidatedHunkReference | undefined {
-  const hunk = hunksById.get(candidateHunkId);
-  if (hunk === undefined) {
-    issues.push({
-      code: "unknown-hunk",
-      message: `Route ${location} references unknown hunk ${candidateHunkId}.`,
-    });
-    return undefined;
-  }
-  const requirement = requirementsById.get(hunk.id);
-  if (requirement === undefined) {
-    throw new ReviewDeltaError(
-      `Validated review delta has no requirement for snapshot hunk ${hunk.id}.`,
-    );
-  }
-  if (requirement.type === "carried-forward") {
-    issues.push({
-      code: "carried-forward-reference",
-      message: `Route ${location} references carried-forward hunk ${candidateHunkId}; carried-forward hunks are available outside the planned route.`,
-    });
-    return undefined;
-  }
-  if (referencedHunkIds.has(candidateHunkId)) {
-    issues.push({
-      code: "duplicate-hunk",
-      message: `Hunk ${candidateHunkId} is referenced more than once; duplicate appears in ${location}.`,
-    });
-    return undefined;
-  }
-  referencedHunkIds.add(candidateHunkId);
-  return { hunkId: hunk.id, requirement };
+function requirementOf(
+  requirements: ReadonlyMap<string, ChangedLineRequirement>,
+  line: ChangedLine,
+): ChangedLineRequirement | undefined {
+  return requirements.get(changedLineKey(line));
+}
+
+function describeLine(snapshot: ReviewSnapshot, line: ChangedLine): string {
+  return describeChangedLines(snapshot, [line])[0] ?? "A changed line";
 }
 
 function validateNonBlank(
@@ -250,7 +272,7 @@ function throwIfIssues(issues: readonly ReviewRouteValidationIssue[]): void {
 function createReviewUnitId(
   snapshotId: string,
   unitIndex: number,
-  hunkIds: readonly HunkId[],
+  spans: readonly ResolvedSpan[],
 ): ReviewUnitId {
   const hash = createHash("sha256");
   hash.update("review-unit");
@@ -259,7 +281,13 @@ function createReviewUnitId(
     JSON.stringify({
       snapshotId,
       sequence: unitIndex + 1,
-      hunkIds,
+      spans: spans.map((span) => ({
+        fileChangeId: span.fileChangeId,
+        oldStart: span.oldStart ?? null,
+        oldEnd: span.oldEnd ?? null,
+        newStart: span.newStart ?? null,
+        newEnd: span.newEnd ?? null,
+      })),
     }),
   );
   return `review-unit:${hash.digest("hex")}` as ReviewUnitId;

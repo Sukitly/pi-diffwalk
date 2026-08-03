@@ -21,6 +21,7 @@ import {
   createInProgressReview,
   InProgressReviewError,
 } from "../src/in-progress-review.ts";
+import { computeReviewDelta } from "../src/review-delta.ts";
 import { createReviewSeries } from "../src/review-series.ts";
 import {
   GuidedReviewComponent,
@@ -32,11 +33,9 @@ import {
   validateReviewRoute,
 } from "../src/route-validation.ts";
 import type {
-  DiffLine,
   FileChange,
   FileChangeId,
   GuidedReviewResult,
-  HunkId,
   InProgressReview,
   NoticeId,
   ReviewDelta,
@@ -48,7 +47,7 @@ import type {
   ReviewUnitId,
   SubmittedGuidedReviewResult,
 } from "../src/types.ts";
-import { hunkId, makeSnapshot } from "./domain-fixtures.ts";
+import { fileChangeId, makeSnapshot, span } from "./domain-fixtures.ts";
 
 interface UiFixture {
   readonly snapshot: ReviewSnapshot;
@@ -112,155 +111,124 @@ const ansiTheme = {
   bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
 } satisfies Pick<Theme, "fg" | "bg" | "bold">;
 
+const metadataOnly: FileChange = {
+  id: "file:metadata:script.sh" as FileChangeId,
+  source: "tracked",
+  status: "mode-changed",
+  oldPath: "script.sh",
+  newPath: "script.sh",
+  oldMode: "100644",
+  newMode: "100755",
+  gitHeaderLines: ["old mode 100644", "new mode 100755"],
+  content: {
+    kind: "metadata-only",
+    gitBodyLines: [],
+    unsupportedReason: "This file change has no textual diff hunks.",
+  },
+};
+
+const addedBinary: FileChange = {
+  id: "file:binary:asset.bin" as FileChangeId,
+  source: "tracked",
+  status: "added",
+  newPath: "asset.bin",
+  newMode: "100644",
+  gitHeaderLines: [],
+  content: {
+    kind: "binary",
+    gitBodyLines: ["Binary files differ"],
+    unsupportedReason: "Binary content cannot be reviewed line by line.",
+  },
+};
+
+const deletedBinary: FileChange = {
+  id: "file:binary:removed.bin" as FileChangeId,
+  source: "tracked",
+  status: "deleted",
+  oldPath: "removed.bin",
+  oldMode: "100644",
+  gitHeaderLines: [],
+  content: {
+    kind: "binary",
+    gitBodyLines: ["Binary files differ"],
+    unsupportedReason: "Binary content cannot be reviewed line by line.",
+  },
+};
+
+const ENTRY_PATH = "src/entry \u6587\nfile.ts";
+const CONTRACT_PATH = "src/contract\u202egnp.ts";
+const CARRIED_PATH = "src/carried.ts";
+const SKIPPED_PATH = "src/generated.ts";
+
+/** Long added line used to exercise wrapping and horizontal truncation. */
+const LONG_ADDED = `+const value = validate(request.value) \u4e2d\u6587 ${"segment ".repeat(12)}TAIL_END`;
+
 function makeUiFixture(): UiFixture {
-  const base = makeSnapshot("snapshot-ui", [
-    {
-      id: "h-entry",
-      fingerprint: "fp-entry",
-      path: "src/entry 文\nfile.ts",
-      start: 10,
-      count: 10,
-    },
-    {
-      id: "h-contract",
-      fingerprint: "fp-contract",
-      path: "src/contract\u202egnp.ts",
-      start: 30,
-    },
-    {
-      id: "h-carried",
-      fingerprint: "fp-carried",
-      path: "src/carried.ts",
-      start: 40,
-    },
-    {
-      id: "h-skipped",
-      fingerprint: "fp-skipped",
-      path: "src/generated.ts",
-      start: 50,
-    },
-  ]);
-  const snapshotWithLines = replaceHunkLines(
-    base,
-    new Map([
-      [hunkId("h-entry"), makeEntryLines()],
-      [
-        hunkId("h-contract"),
-        [
-          {
-            index: 0,
-            kind: "added",
-            raw: "+export interface Contract { value: string }",
-            newLine: 30,
-          },
+  const snapshot = makeSnapshot(
+    "snapshot-ui",
+    [
+      {
+        path: ENTRY_PATH,
+        lines: [
+          " context line 0\u001b[31m",
+          " context line 1",
+          " context line 2",
+          " context line 3",
+          "-const value = request.value",
+          LONG_ADDED,
+          " context line 6",
+          " context line 7",
+          " context line 8",
         ],
-      ],
-      [
-        hunkId("h-carried"),
-        [
-          {
-            index: 0,
-            kind: "context",
-            raw: " export const carried = true",
-            oldLine: 40,
-            newLine: 40,
-          },
+      },
+      {
+        path: CONTRACT_PATH,
+        lines: [
+          " export interface Contract {",
+          "+export interface Contract { value: string }",
+          " }",
         ],
+      },
+      {
+        path: CARRIED_PATH,
+        lines: [" head", "+export const carried = true", " tail"],
+      },
+      {
+        path: SKIPPED_PATH,
+        lines: [" head", "+generated output", " tail"],
+      },
+    ],
+    {
+      changes: [metadataOnly, addedBinary, deletedBinary],
+      notices: [
+        {
+          id: brand<NoticeId>("notice:cancelled-layer"),
+          kind: "cancelled-layer-change",
+          filePath: "src/cancelled.ts",
+          message:
+            "Staged and unstaged changes cancel in the effective worktree.",
+        },
       ],
-      [
-        hunkId("h-skipped"),
-        [
-          {
-            index: 0,
-            kind: "added",
-            raw: "+generated output",
-            newLine: 50,
-          },
-        ],
-      ],
-    ]),
+    },
   );
-  const metadataOnly: FileChange = {
-    id: brand<FileChangeId>("file:metadata:script.sh"),
-    source: "tracked",
-    status: "mode-changed",
-    oldPath: "script.sh",
-    newPath: "script.sh",
-    oldMode: "100644",
-    newMode: "100755",
-    gitHeaderLines: ["old mode 100644", "new mode 100755"],
-    content: {
-      kind: "metadata-only",
-      gitBodyLines: [],
-      unsupportedReason: "This file change has no textual diff hunks.",
-    },
-  };
-  const addedBinary: FileChange = {
-    id: brand<FileChangeId>("file:binary:asset.bin"),
-    source: "tracked",
-    status: "added",
-    newPath: "asset.bin",
-    newMode: "100644",
-    gitHeaderLines: [],
-    content: {
-      kind: "binary",
-      gitBodyLines: ["Binary files differ"],
-      unsupportedReason: "Binary content cannot be reviewed line by line.",
-    },
-  };
-  const deletedBinary: FileChange = {
-    id: brand<FileChangeId>("file:binary:removed.bin"),
-    source: "tracked",
-    status: "deleted",
-    oldPath: "removed.bin",
-    oldMode: "100644",
-    gitHeaderLines: [],
-    content: {
-      kind: "binary",
-      gitBodyLines: ["Binary files differ"],
-      unsupportedReason: "Binary content cannot be reviewed line by line.",
-    },
-  };
-  const snapshot: ReviewSnapshot = {
-    ...snapshotWithLines,
-    changes: [
-      ...snapshotWithLines.changes,
-      metadataOnly,
-      addedBinary,
-      deletedBinary,
-    ],
-    notices: [
-      {
-        id: brand<NoticeId>("notice:cancelled-layer"),
-        kind: "cancelled-layer-change",
-        filePath: "src/cancelled.ts",
-        message:
-          "Staged and unstaged changes cancel in the effective worktree.",
-      },
-    ],
-  };
+
+  const baseDelta = computeReviewDelta(snapshot);
+  const carriedId = fileChangeId("modified", CARRIED_PATH);
   const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      { type: "needs-review", hunkId: hunkId("h-entry"), reason: "new" },
-      {
-        type: "needs-review",
-        hunkId: hunkId("h-contract"),
-        reason: "changed",
-      },
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h-carried"),
-        reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
-      },
-      {
-        type: "needs-review",
-        hunkId: hunkId("h-skipped"),
-        reason: "new",
-      },
-    ],
-    removedHunkFingerprints: [],
+    ...baseDelta,
+    lines: baseDelta.lines.map((line) =>
+      line.fileChangeId === carriedId
+        ? {
+            type: "carried-forward",
+            fileChangeId: line.fileChangeId,
+            side: line.side,
+            line: line.line,
+            reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
+          }
+        : line,
+    ),
   };
+
   const routeCandidate: ReviewRouteCandidate = {
     snapshotId: snapshot.id,
     units: [
@@ -275,7 +243,7 @@ function makeUiFixture(): UiFixture {
           "Does validation preserve compatibility?",
           "Does the failure path remain explicit?",
         ],
-        hunkIds: [hunkId("h-entry")],
+        spans: [span(ENTRY_PATH, { old: [1, 8], new: [1, 8] })],
       },
       {
         title: "Public contract",
@@ -283,12 +251,12 @@ function makeUiFixture(): UiFixture {
         context: "entry -> Contract",
         changeSummary: "The public contract now exposes the validated value.",
         reviewFocus: ["Is the type narrow enough?"],
-        hunkIds: [hunkId("h-contract")],
+        spans: [span(CONTRACT_PATH, { new: [1, 3] })],
       },
     ],
-    skippedHunks: [
+    skippedSpans: [
       {
-        hunkId: hunkId("h-skipped"),
+        span: span(SKIPPED_PATH, { new: [2, 2] }),
         reason: "Generated output is represented but reviewed at its source.",
       },
     ],
@@ -310,65 +278,6 @@ function makeLongExplanationFixture(): UiFixture {
     ...fixture,
     routeCandidate,
     route: validateReviewRoute(fixture.snapshot, fixture.delta, routeCandidate),
-  };
-}
-
-function makeEntryLines(): readonly DiffLine[] {
-  const lines: DiffLine[] = [];
-  for (let index = 0; index < 10; index += 1) {
-    if (index === 4) {
-      lines.push({
-        index,
-        kind: "removed",
-        raw: "-const value = request.value",
-        oldLine: 14,
-      });
-    } else if (index === 5) {
-      lines.push({
-        index,
-        kind: "added",
-        raw: `+const value = validate(request.value) 中文 ${"segment ".repeat(12)}TAIL_END`,
-        newLine: 14,
-      });
-    } else if (index === 9) {
-      lines.push({
-        index,
-        kind: "no-newline-marker",
-        raw: "\\ No newline at end of file",
-      });
-    } else {
-      lines.push({
-        index,
-        kind: "context",
-        raw: ` context line ${index}\u001b[31m`,
-        oldLine: 10 + index,
-        newLine: 10 + index,
-      });
-    }
-  }
-  return lines;
-}
-
-function replaceHunkLines(
-  snapshot: ReviewSnapshot,
-  linesByHunkId: ReadonlyMap<HunkId, readonly DiffLine[]>,
-): ReviewSnapshot {
-  return {
-    ...snapshot,
-    changes: snapshot.changes.map((change) =>
-      change.content.kind === "text"
-        ? {
-            ...change,
-            content: {
-              kind: "text",
-              hunks: change.content.hunks.map((hunk) => ({
-                ...hunk,
-                lines: linesByHunkId.get(hunk.id) ?? hunk.lines,
-              })),
-            },
-          }
-        : change,
-    ),
   };
 }
 
@@ -410,10 +319,16 @@ function forgeRoute(
       context: unit.context,
       changeSummary: unit.changeSummary,
       reviewFocus: [...unit.reviewFocus],
-      hunkIds: unit.hunkIds.map((id) => hunkId(id)),
+      spans: unit.spans.map((s) => ({
+        ...s,
+        fileChangeId: fileChangeId("modified", s.path),
+      })),
     })),
-    skippedHunks: candidate.skippedHunks.map((skip) => ({
-      hunkId: hunkId(skip.hunkId),
+    skippedSpans: candidate.skippedSpans.map((skip) => ({
+      span: {
+        ...skip.span,
+        fileChangeId: fileChangeId("modified", skip.span.path),
+      },
       reason: skip.reason,
     })),
   } as unknown as ReviewRoute;
@@ -498,7 +413,7 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
 
   assert.match(walkthrough, /Review this change/);
   assert.match(walkthrough, /Git snapshot diff/);
-  assert.match(walkthrough, />\s+14\s+-const value = request\.value/);
+  assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
   assert.doesNotMatch(walkthrough, /Why here/);
 
   press(harness.component, "e");
@@ -571,7 +486,7 @@ test("keeps every wrapped row of the selected diff line visible", () => {
   press(harness.component, "j");
   const output = renderText(harness);
 
-  assert.match(output, />\s+\d*\s+14\s+\+const value = validate/);
+  assert.match(output, />\s+\d*\s+5\s+\+const value = validate/);
   assert.match(output, /TAIL_END/);
   assert.match(output, /Git snapshot diff/);
 });
@@ -600,7 +515,109 @@ test("moves between semantic units and preserves each unit cursor", () => {
   press(harness.component, "p");
   assert.match(renderText(harness), /unit 1\/2/);
   press(harness.component, "c");
-  assert.match(renderText(harness), /context line 6/);
+  assert.match(renderText(harness), /const value = validate\(request\.value\)/);
+});
+
+test("pads a narrow span with unchanged context without making it reviewable", () => {
+  const snapshot = makeSnapshot("snapshot-pad", [
+    {
+      path: "src/pad.ts",
+      lines: [
+        " head 1",
+        " head 2",
+        " head 3",
+        " head 4",
+        "+changed",
+        " tail 1",
+        " tail 2",
+        " tail 3",
+        " tail 4",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Narrow span",
+        whyHere: "The agent framed only the changed line.",
+        context: "pad",
+        changeSummary: "Adds one line.",
+        reviewFocus: ["Is the surrounding code still correct?"],
+        spans: [span("src/pad.ts", { new: [5, 5] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  const harness = createHarness(80, 24, {
+    snapshot,
+    delta,
+    routeCandidate,
+    route,
+  });
+
+  const output = renderText(harness);
+  assert.match(output, /head 2/);
+  assert.match(output, /tail 3/);
+  assert.doesNotMatch(output, /head 1/);
+  assert.doesNotMatch(output, /tail 4/);
+  assert.match(output, />\s+5\s+\+changed/);
+
+  // Padding is display only: the unit still owns exactly one commentable line.
+  press(harness.component, "j", "j", "c", "O", "k", "\r");
+  assert.deepEqual(
+    harness.state.review.comments.map((comment) => [
+      comment.side,
+      comment.line,
+    ]),
+    [["new", 5]],
+  );
+});
+
+test("stops padding at a changed line owned by another unit", () => {
+  const snapshot = makeSnapshot("snapshot-neighbour", [
+    {
+      path: "src/pad.ts",
+      lines: [" head", "+first", " middle", "+second", " tail"],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Second change",
+        whyHere: "Reviewed on its own.",
+        context: "pad",
+        changeSummary: "Adds the second line.",
+        reviewFocus: ["Is it correct?"],
+        spans: [span("src/pad.ts", { new: [4, 4] })],
+      },
+      {
+        title: "First change",
+        whyHere: "Reviewed separately.",
+        context: "pad",
+        changeSummary: "Adds the first line.",
+        reviewFocus: ["Is it correct?"],
+        spans: [span("src/pad.ts", { new: [2, 2] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  const harness = createHarness(80, 24, {
+    snapshot,
+    delta,
+    routeCandidate,
+    route,
+  });
+
+  const output = renderText(harness);
+  assert.match(output, /middle/);
+  assert.match(output, /tail/);
+  assert.doesNotMatch(output, /\+first/);
 });
 
 test("moves between units with arrow keys without marking them reviewed", () => {
@@ -639,7 +656,8 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
 
   const comment = harness.state.review.comments[0];
   assert.equal(comment?.body, "请检查\n失败路径");
-  assert.equal(comment?.diffLineIndex, 4);
+  assert.equal(comment?.side, "old");
+  assert.equal(comment?.line, 5);
   assert.match(renderText(harness), /comments 1/);
 });
 
@@ -709,7 +727,7 @@ test("pages the complete explanation by its current viewport", () => {
 test("pages inventory diffs by the current viewport", () => {
   const harness = createHarness(60, 8);
   press(harness.component, "i", "\r");
-  assert.match(renderText(harness), /context line 0/);
+  assert.match(renderText(harness), /context line 1/);
 
   press(harness.component, "\u001b[6~");
   const secondPage = renderText(harness);
@@ -769,7 +787,7 @@ test("shows the complete batch and selected submission mode", async () => {
   assert.match(output, /Comment batch and submission mode/);
   assert.match(output, /> Discuss first/);
   assert.match(output, /Check/);
-  assert.match(output, /Explicitly skipped hunks/);
+  assert.match(output, /Explicitly skipped regions/);
   assert.match(output, /Non-text changes and notices/);
 
   press(harness.component, "\u001b[C");
@@ -837,13 +855,13 @@ test("supports an empty walkthrough when no hunk requires review", async () => {
   const snapshot = makeSnapshot("snapshot-empty-ui", []);
   const delta: ReviewDelta = {
     currentSnapshotId: snapshot.id,
-    hunks: [],
-    removedHunkFingerprints: [],
+    lines: [],
+    removedLineCount: 0,
   };
   const routeCandidate: ReviewRouteCandidate = {
     snapshotId: snapshot.id,
     units: [],
-    skippedHunks: [],
+    skippedSpans: [],
   };
   const route = validateReviewRoute(snapshot, delta, routeCandidate);
   const harness = createHarness(80, 12, {
@@ -878,7 +896,9 @@ test("validates missing route coverage before opening custom UI", async () => {
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewRouteValidationError);
-      assert.ok(error.issues.some((issue) => issue.code === "missing-hunk"));
+      assert.ok(
+        error.issues.some((issue) => issue.code === "missing-coverage"),
+      );
       return true;
     },
   );
@@ -890,7 +910,7 @@ test("rejects carried-forward route references before opening custom UI", async 
   const candidate = structuredClone(fixture.routeCandidate);
   const firstUnit = candidate.units[0];
   assert.ok(firstUnit);
-  firstUnit.hunkIds.push(hunkId("h-carried"));
+  firstUnit.spans.push(span(CARRIED_PATH, { new: [2, 2] }));
   const review = makeReviewWithRoute(fixture, forgeRoute(fixture, candidate));
   let customCalls = 0;
   const custom: ExtensionContext["ui"]["custom"] = async () => {

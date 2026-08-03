@@ -11,8 +11,6 @@ export type ReviewRoundId = Brand<string, "ReviewRoundId">;
 export type InProgressReviewId = Brand<string, "InProgressReviewId">;
 export type SnapshotId = Brand<string, "SnapshotId">;
 export type FileChangeId = Brand<string, "FileChangeId">;
-export type HunkId = Brand<string, "HunkId">;
-export type HunkFingerprint = Brand<string, "HunkFingerprint">;
 export type NoticeId = Brand<string, "NoticeId">;
 export type ReviewUnitId = Brand<string, "ReviewUnitId">;
 export type GitObjectId = Brand<string, "GitObjectId">;
@@ -74,9 +72,23 @@ export type FileChangeContent =
   | MetadataOnlyChange
   | UnsupportedChange;
 
+/**
+ * Frozen text content of one changed file.
+ *
+ * `lines` covers the entire file, not only the regions Git chose to emit as
+ * hunks. A review span may address any line, so the snapshot must be able to
+ * render and classify any line. The array is also the old-to-new line number
+ * mapping and the source of the changed-line set.
+ */
 export interface TextChange {
   readonly kind: "text";
-  readonly hunks: readonly DiffHunk[];
+  readonly lines: readonly DiffLine[];
+  readonly oldLineCount: number;
+  readonly newLineCount: number;
+  readonly oldNoTrailingNewline: boolean;
+  readonly newNoTrailingNewline: boolean;
+  /** Spans derived from Git hunk boundaries, offered to the agent as a starting point. */
+  readonly suggestedSpans: readonly ReviewSpan[];
 }
 
 export interface BinaryChange {
@@ -97,34 +109,38 @@ export interface UnsupportedChange {
   readonly unsupportedReason: string;
 }
 
-export interface DiffHunk {
-  readonly id: HunkId;
-  readonly fingerprint: HunkFingerprint;
-  readonly fileChangeId: FileChangeId;
-  readonly header: DiffHunkHeader;
-  readonly lines: readonly DiffLine[];
-}
+export type DiffLineKind = "context" | "added" | "removed";
 
-export interface DiffHunkHeader {
-  readonly raw: string;
-  readonly oldStart: number;
-  readonly oldCount: number;
-  readonly newStart: number;
-  readonly newCount: number;
-}
-
-export type DiffLineKind =
-  | "context"
-  | "added"
-  | "removed"
-  | "no-newline-marker";
-
+/** One line of one file in the frozen snapshot, addressed on the side it exists. */
 export interface DiffLine {
-  readonly index: number;
   readonly kind: DiffLineKind;
-  readonly raw: string;
   readonly oldLine?: number;
   readonly newLine?: number;
+  readonly text: string;
+}
+
+/** Added lines exist only on the new side; removed lines only on the old side. */
+export type ChangeSide = "old" | "new";
+
+/** Identity of one changed line. This is the atom of review coverage. */
+export interface ChangedLineRef {
+  readonly fileChangeId: FileChangeId;
+  readonly side: ChangeSide;
+  readonly line: number;
+}
+
+/** A region of one file, proposed by the agent. Line numbers are 1-based and inclusive. */
+export interface ReviewSpan {
+  readonly path: string;
+  readonly oldStart?: number;
+  readonly oldEnd?: number;
+  readonly newStart?: number;
+  readonly newEnd?: number;
+}
+
+/** A span whose path has been resolved to a file in the frozen snapshot. */
+export interface ResolvedSpan extends ReviewSpan {
+  readonly fileChangeId: FileChangeId;
 }
 
 export type SnapshotNoticeKind = "cancelled-layer-change";
@@ -183,36 +199,110 @@ export interface ReviewUnitProgress {
 export interface ReviewDelta {
   readonly currentSnapshotId: SnapshotId;
   readonly baselineRoundId?: ReviewRoundId;
-  readonly hunks: readonly HunkReviewRequirement[];
-  readonly removedHunkFingerprints: readonly HunkFingerprint[];
+  readonly lines: readonly ChangedLineRequirement[];
+  /** Changed lines present in the baseline round that no longer exist. */
+  readonly removedLineCount: number;
 }
 
-export type HunkReviewRequirement = NeedsReviewHunk | CarriedForwardHunk;
+export type ChangedLineRequirement = NeedsReviewLine | CarriedForwardLine;
 
 export type NeedsReviewReason =
   | "new"
-  | "changed"
   | "unresolved-comment"
-  | "previously-skipped"
-  | "ambiguous-match";
+  | "previously-skipped";
 
-export interface NeedsReviewHunk {
+export interface NeedsReviewLine extends ChangedLineRef {
   readonly type: "needs-review";
-  readonly hunkId: HunkId;
   readonly reason: NeedsReviewReason;
-  readonly previousFingerprint?: HunkFingerprint;
 }
 
-export interface CarriedForwardHunk {
+export interface CarriedForwardLine extends ChangedLineRef {
   readonly type: "carried-forward";
-  readonly hunkId: HunkId;
   readonly reviewedInRoundId: ReviewRoundId;
+}
+
+export type ChangedLineDisposition =
+  | "reviewed-without-comment"
+  | "commented"
+  | "skipped";
+
+interface ChangedLineRecordBase {
+  readonly side: ChangeSide;
+  readonly line: number;
+  readonly text: string;
+}
+
+export type ChangedLineRecord =
+  | (ChangedLineRecordBase & {
+      readonly disposition: "reviewed-without-comment";
+      readonly reviewedInRoundId: ReviewRoundId;
+    })
+  | (ChangedLineRecordBase & {
+      readonly disposition: "commented";
+      readonly commentedInRoundId: ReviewRoundId;
+    })
+  | (ChangedLineRecordBase & {
+      readonly disposition: "skipped";
+      readonly skippedInRoundId: ReviewRoundId;
+      readonly skipReason: string;
+    });
+
+/**
+ * Coverage is grouped by file and keyed by path rather than by file change ID,
+ * because file change IDs are snapshot-scoped while a review series must match
+ * the same file across rounds.
+ */
+export interface FileCoverage {
+  readonly oldPath?: string;
+  readonly newPath?: string;
+  readonly lines: readonly ChangedLineRecord[];
 }
 
 export interface ReviewCoverage {
   readonly snapshotId: SnapshotId;
-  readonly records: readonly HunkReviewRecord[];
+  readonly files: readonly FileCoverage[];
 }
+
+const ReviewSpanCandidateSchema = Type.Object(
+  {
+    path: Type.String({
+      description: "Path of a changed file in the frozen snapshot",
+    }),
+    oldStart: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "First line of the region in the old file, 1-based inclusive",
+      }),
+    ),
+    oldEnd: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Last line of the region in the old file, 1-based inclusive",
+      }),
+    ),
+    newStart: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "First line of the region in the new file, 1-based inclusive",
+      }),
+    ),
+    newEnd: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Last line of the region in the new file, 1-based inclusive",
+      }),
+    ),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "A region of one file. Use the new side for added lines and the old side for removed lines; set both when a region contains each.",
+  },
+);
 
 const ReviewUnitCandidateSchema = Type.Object(
   {
@@ -231,8 +321,9 @@ const ReviewUnitCandidateSchema = Type.Object(
       description: "Concrete questions for the human reviewer",
       minItems: 1,
     }),
-    hunkIds: Type.Array(Type.String(), {
-      description: "Ordered stable needs-review hunk identifiers in this unit",
+    spans: Type.Array(ReviewSpanCandidateSchema, {
+      description:
+        "File regions covered by this unit; a unit may span several files",
       minItems: 1,
     }),
   },
@@ -241,12 +332,10 @@ const ReviewUnitCandidateSchema = Type.Object(
 
 const ReviewRouteSkipCandidateSchema = Type.Object(
   {
-    hunkId: Type.String({
-      description: "Stable identifier of the skipped hunk",
-    }),
+    span: ReviewSpanCandidateSchema,
     reason: Type.String({
       description:
-        "Visible reason why the hunk is excluded from the walkthrough",
+        "Visible reason why the changed lines in this region are excluded from the walkthrough",
     }),
   },
   { additionalProperties: false },
@@ -260,9 +349,9 @@ export const ReviewRouteCandidateSchema = Type.Object(
     units: Type.Array(ReviewUnitCandidateSchema, {
       description: "Semantic review units in walkthrough order",
     }),
-    skippedHunks: Type.Array(ReviewRouteSkipCandidateSchema, {
+    skippedSpans: Type.Array(ReviewRouteSkipCandidateSchema, {
       description:
-        "Eligible needs-review hunks explicitly skipped with visible reasons; unresolved-comment hunks cannot be skipped",
+        "Regions whose changed lines are explicitly skipped with visible reasons; lines with unresolved comments cannot be skipped",
     }),
   },
   { additionalProperties: false },
@@ -272,11 +361,13 @@ export type ReviewRouteCandidate = Type.Static<
   typeof ReviewRouteCandidateSchema
 >;
 
+export type ReviewSpanCandidate = Type.Static<typeof ReviewSpanCandidateSchema>;
+
 export interface ReviewRoute {
   readonly [brand]: "ValidatedReviewRoute";
   readonly snapshotId: SnapshotId;
   readonly units: readonly ReviewUnit[];
-  readonly skippedHunks: readonly ReviewRouteSkip[];
+  readonly skippedSpans: readonly ReviewRouteSkip[];
 }
 
 export interface ReviewUnit {
@@ -286,26 +377,27 @@ export interface ReviewUnit {
   readonly context: string;
   readonly changeSummary: string;
   readonly reviewFocus: readonly string[];
-  readonly hunkIds: readonly HunkId[];
+  readonly spans: readonly ResolvedSpan[];
 }
 
 export interface ReviewRouteSkip {
-  readonly hunkId: HunkId;
+  readonly span: ResolvedSpan;
   readonly reason: string;
 }
 
 export interface ReviewComment {
   readonly snapshotId: SnapshotId;
   readonly reviewUnitId: ReviewUnitId;
-  readonly hunkId: HunkId;
-  readonly diffLineIndex: number;
+  readonly fileChangeId: FileChangeId;
+  readonly side: ChangeSide;
+  readonly line: number;
   readonly filePath: string;
   readonly oldPath?: string;
   readonly newPath?: string;
   readonly oldLine?: number;
   readonly newLine?: number;
-  readonly selectedDiffText: string;
-  readonly nearbyDiffContext: readonly DiffLine[];
+  readonly selectedText: string;
+  readonly nearbyContext: readonly DiffLine[];
   readonly body: string;
 }
 
@@ -332,28 +424,3 @@ export type GuidedReviewResult =
   | SubmittedGuidedReviewResult
   | PausedGuidedReviewResult
   | DiscardedGuidedReviewResult;
-
-interface HunkReviewRecordBase {
-  readonly hunkId: HunkId;
-  readonly fingerprint: HunkFingerprint;
-}
-
-export type HunkReviewDisposition =
-  | "reviewed-without-comment"
-  | "commented"
-  | "skipped";
-
-export type HunkReviewRecord =
-  | (HunkReviewRecordBase & {
-      readonly disposition: "reviewed-without-comment";
-      readonly reviewedInRoundId: ReviewRoundId;
-    })
-  | (HunkReviewRecordBase & {
-      readonly disposition: "commented";
-      readonly commentedInRoundId: ReviewRoundId;
-    })
-  | (HunkReviewRecordBase & {
-      readonly disposition: "skipped";
-      readonly skippedInRoundId: ReviewRoundId;
-      readonly skipReason: string;
-    });

@@ -245,8 +245,12 @@ export function submitInProgressReview(
     review.snapshot,
     review.delta,
     {
-      commentedHunkIds: review.comments.map((comment) => comment.hunkId),
-      skippedHunks: route.skippedHunks,
+      commentedLines: review.comments.map((comment) => ({
+        fileChangeId: comment.fileChangeId,
+        side: comment.side,
+        line: comment.line,
+      })),
+      skippedSpans: route.skippedSpans,
     },
   );
   const round = createReviewRound(
@@ -286,8 +290,9 @@ function materializeReviewSession(review: InProgressReview): ReviewSession {
   for (const comment of review.comments) {
     session.upsertComment({
       reviewUnitId: comment.reviewUnitId,
-      hunkId: comment.hunkId,
-      diffLineIndex: comment.diffLineIndex,
+      fileChangeId: comment.fileChangeId,
+      side: comment.side,
+      line: comment.line,
       body: comment.body,
     });
   }

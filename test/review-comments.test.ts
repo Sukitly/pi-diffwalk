@@ -11,413 +11,290 @@ import {
 import { computeReviewDelta } from "../src/review-delta.ts";
 import { validateReviewRoute } from "../src/route-validation.ts";
 import type {
-  DiffLine,
-  HunkId,
   ReviewRoute,
   ReviewSnapshot,
+  ReviewSpan,
   ReviewUnitId,
 } from "../src/types.ts";
-import { hunkId, makeSnapshot } from "./domain-fixtures.ts";
+import {
+  type FileFixture,
+  fileChangeId,
+  makeSnapshot,
+  span,
+} from "./domain-fixtures.ts";
 
-interface CommentFixture {
+interface Fixture {
   readonly snapshot: ReviewSnapshot;
   readonly route: ReviewRoute;
   readonly unitId: ReviewUnitId;
 }
 
-function makeCommentFixture(): CommentFixture {
-  const path = "src/space and 文\nfile.ts";
-  const base = makeSnapshot("snapshot-comments", [
-    { id: "h-comment", fingerprint: "fp-comment", path, start: 10 },
-  ]);
-  const lines: readonly DiffLine[] = [
-    {
-      index: 0,
-      kind: "context",
-      raw: " const before = true",
-      oldLine: 10,
-      newLine: 10,
-    },
-    {
-      index: 1,
-      kind: "removed",
-      raw: "-const removed = 1",
-      oldLine: 11,
-    },
-    {
-      index: 2,
-      kind: "added",
-      raw: "+const added = 1",
-      newLine: 11,
-    },
-    {
-      index: 3,
-      kind: "context",
-      raw: " callContract()",
-      oldLine: 12,
-      newLine: 12,
-    },
-    {
-      index: 4,
-      kind: "removed",
-      raw: "-return oldValue",
-      oldLine: 13,
-    },
-    {
-      index: 5,
-      kind: "added",
-      raw: "+return newValue",
-      newLine: 13,
-    },
-    {
-      index: 6,
-      kind: "context",
-      raw: " }",
-      oldLine: 14,
-      newLine: 14,
-    },
-    {
-      index: 7,
-      kind: "context",
-      raw: " export { result }",
-      oldLine: 15,
-      newLine: 15,
-    },
-    {
-      index: 8,
-      kind: "no-newline-marker",
-      raw: "\\ No newline at end of file",
-    },
-  ];
-  const snapshot = replaceHunkLines(
-    base,
-    new Map([[hunkId("h-comment"), lines]]),
-  );
-  const route = makeRoute(snapshot, [[hunkId("h-comment")]]);
-  return {
-    snapshot,
-    route,
-    unitId: requiredAt(route.units, 0, "review unit").id,
-  };
-}
-
-function makeRenamedFixture(): CommentFixture {
-  const base = makeSnapshot("snapshot-rename", [
-    {
-      id: "h-rename",
-      fingerprint: "fp-rename",
-      path: "src/new-name.ts",
-      status: "renamed",
-    },
-  ]);
-  const change = requiredAt(base.changes, 0, "renamed file change");
-  if (change.content.kind !== "text") {
-    throw new Error("Expected a text rename fixture.");
-  }
-  const hunk = requiredAt(change.content.hunks, 0, "rename hunk");
-  const snapshot: ReviewSnapshot = {
-    ...base,
-    changes: [
-      {
-        ...change,
-        oldPath: "src/old-name.ts",
-        newPath: "src/new-name.ts",
-        content: {
-          kind: "text",
-          hunks: [
-            {
-              ...hunk,
-              lines: [
-                {
-                  index: 0,
-                  kind: "removed",
-                  raw: "-export const oldName = true",
-                  oldLine: 1,
-                },
-                {
-                  index: 1,
-                  kind: "added",
-                  raw: "+export const newName = true",
-                  newLine: 1,
-                },
-                {
-                  index: 2,
-                  kind: "context",
-                  raw: " export const stable = true",
-                  oldLine: 2,
-                  newLine: 2,
-                },
-              ],
-            },
-          ],
-        },
-      },
-    ],
-  };
-  const route = makeRoute(snapshot, [[hunkId("h-rename")]]);
-  return {
-    snapshot,
-    route,
-    unitId: requiredAt(route.units, 0, "rename review unit").id,
-  };
-}
-
-function makeOrderedFixture(): {
-  readonly snapshot: ReviewSnapshot;
-  readonly route: ReviewRoute;
-} {
-  const base = makeSnapshot("snapshot-order", [
-    { id: "h-first", fingerprint: "fp-first", path: "src/first.ts" },
-    { id: "h-second", fingerprint: "fp-second", path: "src/second.ts" },
-  ]);
-  const snapshot = replaceHunkLines(
-    base,
-    new Map([
-      [
-        hunkId("h-first"),
-        [
-          {
-            index: 0,
-            kind: "added",
-            raw: "+first",
-            newLine: 1,
-          },
-        ],
-      ],
-      [
-        hunkId("h-second"),
-        [
-          {
-            index: 0,
-            kind: "added",
-            raw: "+second",
-            newLine: 1,
-          },
-        ],
-      ],
-    ]),
-  );
-  return {
-    snapshot,
-    route: makeRoute(snapshot, [[hunkId("h-second")], [hunkId("h-first")]]),
-  };
-}
-
-function replaceHunkLines(
-  snapshot: ReviewSnapshot,
-  linesByHunkId: ReadonlyMap<HunkId, readonly DiffLine[]>,
-): ReviewSnapshot {
-  return {
-    ...snapshot,
-    changes: snapshot.changes.map((change) =>
-      change.content.kind === "text"
-        ? {
-            ...change,
-            content: {
-              kind: "text",
-              hunks: change.content.hunks.map((hunk) => ({
-                ...hunk,
-                lines: linesByHunkId.get(hunk.id) ?? hunk.lines,
-              })),
-            },
-          }
-        : change,
-    ),
-  };
-}
-
-function makeRoute(
-  snapshot: ReviewSnapshot,
-  unitHunkIds: readonly (readonly HunkId[])[],
-): ReviewRoute {
-  return validateReviewRoute(snapshot, computeReviewDelta(snapshot), {
+function build(
+  id: string,
+  files: readonly FileFixture[],
+  unitSpans: readonly (readonly ReviewSpan[])[],
+): Fixture {
+  const snapshot = makeSnapshot(id, files);
+  const delta = computeReviewDelta(snapshot);
+  const route = validateReviewRoute(snapshot, delta, {
     snapshotId: snapshot.id,
-    units: unitHunkIds.map((hunkIds, index) => ({
+    units: unitSpans.map((spans, index) => ({
       title: `Review unit ${index + 1}`,
       whyHere: `Unit ${index + 1} follows the behavioral review order.`,
       context: `entry -> unit${index + 1} -> result`,
       changeSummary: `Unit ${index + 1} changes its part of the result.`,
       reviewFocus: [`Does unit ${index + 1} preserve its contract?`],
-      hunkIds: [...hunkIds],
+      spans: [...spans],
     })),
-    skippedHunks: [],
+    skippedSpans: [],
   });
+  const unit = route.units[0];
+  assert.ok(unit);
+  return { snapshot, route, unitId: unit.id };
+}
+
+const COMMENT_PATH = "src/space and 文\nfile.ts";
+
+function commentFixture(): Fixture {
+  return build(
+    "snapshot-comments",
+    [
+      {
+        path: COMMENT_PATH,
+        lines: [
+          " const before = true",
+          "-const removed = 1",
+          "+const added = 1",
+          " callContract()",
+          "-return oldValue",
+          "+return newValue",
+          " }",
+          " export { result }",
+        ],
+      },
+    ],
+    [[span(COMMENT_PATH, { old: [1, 6], new: [1, 6] })]],
+  );
 }
 
 function anchor(
-  unitId: ReviewUnitId,
-  hunk: HunkId,
-  diffLineIndex: number,
+  fixture: Fixture,
+  path: string,
+  side: "old" | "new",
+  line: number,
 ): ReviewCommentAnchor {
-  return { reviewUnitId: unitId, hunkId: hunk, diffLineIndex };
+  return {
+    reviewUnitId: fixture.unitId,
+    fileChangeId: fileChangeId("modified", path),
+    side,
+    line,
+  };
 }
 
-test("lists source lines but not no-newline markers as commentable targets", () => {
-  const fixture = makeCommentFixture();
+test("offers every changed line inside a unit span as a comment target", () => {
+  const fixture = commentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
 
   const targets = session.listCommentableLines();
 
-  assert.equal(targets.length, 8);
   assert.deepEqual(
-    targets.map((target) => target.diffLineIndex),
-    [0, 1, 2, 3, 4, 5, 6, 7],
+    targets.map((target) => [target.side, target.line, target.diffLine.text]),
+    [
+      ["old", 2, "const removed = 1"],
+      ["new", 2, "const added = 1"],
+      ["old", 4, "return oldValue"],
+      ["new", 4, "return newValue"],
+    ],
   );
-  assert.ok(
-    targets.every((target) => target.line.kind !== "no-newline-marker"),
-  );
-  assert.equal(targets[0]?.filePath, "src/space and 文\nfile.ts");
+  assert.equal(targets[0]?.filePath, COMMENT_PATH);
   assert.deepEqual(
     listCommentTargets(fixture.snapshot, fixture.route),
     targets,
   );
 });
 
-test("rejects a comment anchored to a no-newline marker", () => {
-  const fixture = makeCommentFixture();
+test("does not offer context lines or lines outside the route", () => {
+  const fixture = build(
+    "snapshot-partial",
+    [{ path: "src/a.ts", lines: [" head", "+first", " middle", "+second"] }],
+    [[span("src/a.ts", { new: [1, 2] })], [span("src/a.ts", { new: [4, 4] })]],
+  );
   const session = new ReviewSession(fixture.snapshot, fixture.route);
 
-  assert.throws(
-    () =>
-      session.upsertComment({
-        ...anchor(fixture.unitId, hunkId("h-comment"), 8),
-        body: "Marker comment.",
-      }),
-    (error: unknown) => {
-      assert.ok(error instanceof ReviewSessionError);
-      assert.equal(error.code, "unknown-comment-anchor");
-      return true;
-    },
+  assert.deepEqual(
+    session
+      .listCommentableLines()
+      .filter((target) => target.reviewUnitId === fixture.unitId)
+      .map((target) => target.line),
+    [2],
   );
 });
 
-test("anchors added, removed, and context comments to independent line numbers", () => {
-  const fixture = makeCommentFixture();
+test("anchors added and removed comments to independent line numbers", () => {
+  const fixture = commentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
 
   const removed = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 1),
+    ...anchor(fixture, COMMENT_PATH, "old", 2),
     body: "Removed line.",
   });
   const added = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 2),
+    ...anchor(fixture, COMMENT_PATH, "new", 2),
     body: "Added line.",
-  });
-  const context = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 3),
-    body: "Context line.",
   });
 
   assert.deepEqual(
     { oldLine: removed.oldLine, newLine: removed.newLine },
-    { oldLine: 11, newLine: undefined },
+    { oldLine: 2, newLine: undefined },
   );
   assert.deepEqual(
     { oldLine: added.oldLine, newLine: added.newLine },
-    { oldLine: undefined, newLine: 11 },
+    { oldLine: undefined, newLine: 2 },
   );
-  assert.deepEqual(
-    { oldLine: context.oldLine, newLine: context.newLine },
-    { oldLine: 12, newLine: 12 },
-  );
+  assert.equal(removed.selectedText, "const removed = 1");
 });
 
 test("retains old and new paths when commenting on a renamed file", () => {
-  const fixture = makeRenamedFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
+  const snapshot = makeSnapshot("snapshot-rename", [
+    {
+      path: "src/new-name.ts",
+      oldPath: "src/old-name.ts",
+      status: "renamed",
+      lines: [
+        "-export const oldName = true",
+        "+export const newName = true",
+        " export const stable = true",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const route = validateReviewRoute(snapshot, delta, {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Rename",
+        whyHere: "The declaration moved.",
+        context: "old -> new",
+        changeSummary: "Renames the declaration.",
+        reviewFocus: ["Are callers updated?"],
+        spans: [span("src/new-name.ts", { old: [1, 1], new: [1, 1] })],
+      },
+    ],
+    skippedSpans: [],
+  });
+  const unit = route.units[0];
+  assert.ok(unit);
+  const session = new ReviewSession(snapshot, route);
 
   const removed = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-rename"), 0),
+    reviewUnitId: unit.id,
+    fileChangeId: fileChangeId("renamed", "src/new-name.ts"),
+    side: "old",
+    line: 1,
     body: "Removed declaration.",
   });
   const added = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-rename"), 1),
+    reviewUnitId: unit.id,
+    fileChangeId: fileChangeId("renamed", "src/new-name.ts"),
+    side: "new",
+    line: 1,
     body: "Added declaration.",
   });
-  const context = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-rename"), 2),
-    body: "Stable declaration.",
-  });
 
-  for (const comment of [removed, added, context]) {
+  for (const comment of [removed, added]) {
     assert.equal(comment.oldPath, "src/old-name.ts");
     assert.equal(comment.newPath, "src/new-name.ts");
   }
   assert.equal(removed.filePath, "src/old-name.ts");
   assert.equal(added.filePath, "src/new-name.ts");
-  assert.equal(context.filePath, "src/new-name.ts");
 });
 
-test("captures nearby diff context by the selected diff line index", () => {
-  const fixture = makeCommentFixture();
+test("captures nearby context from the whole frozen file", () => {
+  const fixture = commentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
 
   const comment = session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 5),
+    ...anchor(fixture, COMMENT_PATH, "new", 4),
     body: "Check the new return value.",
   });
 
   assert.equal(REVIEW_COMMENT_CONTEXT_RADIUS, 3);
   assert.deepEqual(
-    comment.nearbyDiffContext.map((line) => line.index),
-    [2, 3, 4, 5, 6, 7, 8],
+    comment.nearbyContext.map((line) => line.text),
+    [
+      "const added = 1",
+      "callContract()",
+      "return oldValue",
+      "return newValue",
+      "}",
+      "export { result }",
+    ],
   );
 });
 
-test("orders comments by semantic route order across units and hunks", () => {
-  const fixture = makeOrderedFixture();
+test("orders comments by route order across units and files", () => {
+  const fixture = build(
+    "snapshot-order",
+    [
+      { path: "src/first.ts", lines: [" head", "+first"] },
+      { path: "src/second.ts", lines: [" head", "+second"] },
+    ],
+    [
+      [span("src/second.ts", { new: [2, 2] })],
+      [span("src/first.ts", { new: [2, 2] })],
+    ],
+  );
   const session = new ReviewSession(fixture.snapshot, fixture.route);
-  const firstUnit = requiredAt(fixture.route.units, 0, "first route unit");
-  const secondUnit = requiredAt(fixture.route.units, 1, "second route unit");
+  const [firstUnit, secondUnit] = fixture.route.units;
+  assert.ok(firstUnit);
+  assert.ok(secondUnit);
 
   session.upsertComment({
-    ...anchor(secondUnit.id, hunkId("h-first"), 0),
+    reviewUnitId: secondUnit.id,
+    fileChangeId: fileChangeId("modified", "src/first.ts"),
+    side: "new",
+    line: 2,
     body: "Created first but routed second.",
   });
   session.upsertComment({
-    ...anchor(firstUnit.id, hunkId("h-second"), 0),
+    reviewUnitId: firstUnit.id,
+    fileChangeId: fileChangeId("modified", "src/second.ts"),
+    side: "new",
+    line: 2,
     body: "Created second but routed first.",
   });
 
   assert.deepEqual(
-    session.getComments().map((comment) => comment.hunkId),
-    [hunkId("h-second"), hunkId("h-first")],
+    session.getComments().map((comment) => comment.filePath),
+    ["src/second.ts", "src/first.ts"],
   );
 });
 
-test("finds a comment by its frozen diff anchor", () => {
-  const fixture = makeCommentFixture();
+test("finds, replaces, and deletes a comment by its frozen anchor", () => {
+  const fixture = commentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
-  const commentAnchor = anchor(fixture.unitId, hunkId("h-comment"), 3);
-  session.upsertComment({ ...commentAnchor, body: "Anchored question." });
+  const target = anchor(fixture, COMMENT_PATH, "new", 2);
 
-  assert.equal(session.getComment(commentAnchor)?.body, "Anchored question.");
-  assert.equal(
-    session.getComment(anchor(fixture.unitId, hunkId("h-comment"), 4)),
-    undefined,
-  );
-});
+  session.upsertComment({ ...target, body: "Original question." });
+  assert.equal(session.getComment(target)?.body, "Original question.");
 
-test("editing a comment replaces its body without duplicating its anchor", () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-  const commentAnchor = anchor(fixture.unitId, hunkId("h-comment"), 3);
-
-  session.upsertComment({ ...commentAnchor, body: "Original question." });
-  session.upsertComment({ ...commentAnchor, body: "Updated question." });
-
+  session.upsertComment({ ...target, body: "Updated question." });
   assert.equal(session.getComments().length, 1);
   assert.equal(session.getComments()[0]?.body, "Updated question.");
+
+  assert.deepEqual(session.deleteComment(target), { deleted: true });
+  assert.deepEqual(session.getComments(), []);
+  assert.deepEqual(session.deleteComment(target), { deleted: false });
 });
 
-test("rejects a blank comment body with a user-correctable code", () => {
-  const fixture = makeCommentFixture();
+test("rejects a blank body and an anchor the route does not cover", () => {
+  const fixture = commentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
 
   assert.throws(
     () =>
       session.upsertComment({
-        ...anchor(fixture.unitId, hunkId("h-comment"), 3),
+        ...anchor(fixture, COMMENT_PATH, "new", 2),
         body: " \t",
       }),
     (error: unknown) => {
@@ -426,59 +303,39 @@ test("rejects a blank comment body with a user-correctable code", () => {
       return true;
     },
   );
-});
-
-test("rejects a stale comment anchor with a session error code", () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
 
   assert.throws(
     () =>
       session.upsertComment({
-        ...anchor(fixture.unitId, hunkId("h-comment"), 99),
+        ...anchor(fixture, COMMENT_PATH, "new", 99),
         body: "Stale selection.",
       }),
     (error: unknown) => {
       assert.ok(error instanceof ReviewSessionError);
       assert.equal(error.code, "unknown-comment-anchor");
-      assert.match(error.message, /line index 99/);
+      assert.match(error.message, /line 99/);
       return true;
     },
   );
-});
 
-test("deleting an existing comment reports that it was deleted", () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-  const commentAnchor = anchor(fixture.unitId, hunkId("h-comment"), 1);
-  session.upsertComment({ ...commentAnchor, body: "Delete this." });
-
-  assert.deepEqual(session.deleteComment(commentAnchor), { deleted: true });
-  assert.deepEqual(session.getComments(), []);
-});
-
-test("deleting a missing or stale comment is idempotent", () => {
-  const fixture = makeCommentFixture();
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
-
-  assert.deepEqual(
-    session.deleteComment(anchor(fixture.unitId, hunkId("h-comment"), 1)),
-    { deleted: false },
-  );
-  assert.deepEqual(
-    session.deleteComment(anchor(fixture.unitId, hunkId("unknown"), 99)),
-    { deleted: false },
+  assert.throws(
+    () =>
+      session.upsertComment({
+        ...anchor(fixture, COMMENT_PATH, "new", 1),
+        body: "Context line.",
+      }),
+    ReviewSessionError,
   );
 });
 
 test("does not mutate the snapshot or route supplied to the session", () => {
-  const fixture = makeCommentFixture();
+  const fixture = commentFixture();
   const snapshotBefore = structuredClone(fixture.snapshot);
   const routeBefore = structuredClone(fixture.route);
   const session = new ReviewSession(fixture.snapshot, fixture.route);
 
   session.upsertComment({
-    ...anchor(fixture.unitId, hunkId("h-comment"), 2),
+    ...anchor(fixture, COMMENT_PATH, "new", 2),
     body: "Immutable inputs.",
   });
   session.getComments();
@@ -486,14 +343,3 @@ test("does not mutate the snapshot or route supplied to the session", () => {
   assert.deepEqual(fixture.snapshot, snapshotBefore);
   assert.deepEqual(fixture.route, routeBefore);
 });
-
-function requiredAt<Value>(
-  values: readonly Value[],
-  index: number,
-  label: string,
-): Value {
-  const value = values[index];
-  if (value === undefined)
-    throw new Error(`Missing ${label} at index ${index}.`);
-  return value;
-}

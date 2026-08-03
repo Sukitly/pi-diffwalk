@@ -1,35 +1,37 @@
 import assert from "node:assert/strict";
-import { listSnapshotHunks } from "./review-delta.ts";
+import { changedLineKey, textContent } from "./review-span.ts";
 import type {
+  ChangedLineRef,
+  ChangeSide,
   DiffLine,
   FileChange,
-  HunkId,
+  ResolvedSpan,
   ReviewComment,
   ReviewRoute,
   ReviewSnapshot,
   ReviewUnitId,
-  SnapshotId,
 } from "./types.ts";
 
 export const REVIEW_COMMENT_CONTEXT_RADIUS = 3;
 
-export interface ReviewCommentAnchor {
+export interface ReviewCommentAnchor extends ChangedLineRef {
   readonly reviewUnitId: ReviewUnitId;
-  readonly hunkId: HunkId;
-  readonly diffLineIndex: number;
 }
 
 export interface ReviewCommentInput extends ReviewCommentAnchor {
   readonly body: string;
 }
 
+/** A line the reviewer may comment on, together with everything needed to display it. */
 export interface ReviewCommentTarget extends ReviewCommentAnchor {
-  readonly snapshotId: SnapshotId;
+  readonly snapshotId: SnapshotIdOf;
   readonly filePath: string;
   readonly oldPath?: string;
   readonly newPath?: string;
-  readonly line: DiffLine;
+  readonly diffLine: DiffLine;
 }
+
+type SnapshotIdOf = ReviewSnapshot["id"];
 
 export type ReviewCommentInputErrorCode = "blank-comment-body";
 
@@ -55,8 +57,9 @@ export class ReviewSessionError extends Error {
   }
 }
 
-interface InternalReviewCommentTarget extends ReviewCommentTarget {
-  readonly hunkLines: readonly DiffLine[];
+interface InternalTarget extends ReviewCommentTarget {
+  readonly fileLines: readonly DiffLine[];
+  readonly lineIndex: number;
   readonly order: number;
 }
 
@@ -65,13 +68,16 @@ interface StoredComment {
   readonly order: number;
 }
 
+/**
+ * Comment drafts for one frozen snapshot and one validated route.
+ *
+ * Only lines that a review unit actually covers can be commented on, so the
+ * comment set can never drift outside the route the human is walking.
+ */
 export class ReviewSession {
   private readonly snapshot: ReviewSnapshot;
-  private readonly orderedTargets: readonly InternalReviewCommentTarget[];
-  private readonly targetsByAnchor: ReadonlyMap<
-    string,
-    InternalReviewCommentTarget
-  >;
+  private readonly orderedTargets: readonly InternalTarget[];
+  private readonly targetsByAnchor: ReadonlyMap<string, InternalTarget>;
   private readonly commentsByAnchor = new Map<string, StoredComment>();
 
   constructor(snapshot: ReviewSnapshot, route: ReviewRoute) {
@@ -79,16 +85,16 @@ export class ReviewSession {
     const targets = buildCommentTargets(this.snapshot, route);
     this.orderedTargets = targets;
     this.targetsByAnchor = new Map(
-      targets.map((target) => [commentAnchorKey(target), target]),
+      targets.map((target) => [anchorKey(target), target]),
     );
   }
 
-  get snapshotId(): SnapshotId {
+  get snapshotId(): SnapshotIdOf {
     return this.snapshot.id;
   }
 
   listCommentableLines(): readonly ReviewCommentTarget[] {
-    return this.orderedTargets.map(copyCommentTarget);
+    return this.orderedTargets.map(copyTarget);
   }
 
   getComments(): readonly ReviewComment[] {
@@ -98,7 +104,7 @@ export class ReviewSession {
   }
 
   getComment(anchor: ReviewCommentAnchor): ReviewComment | undefined {
-    const stored = this.commentsByAnchor.get(commentAnchorKey(anchor));
+    const stored = this.commentsByAnchor.get(anchorKey(anchor));
     return stored === undefined ? undefined : copyComment(stored.comment);
   }
 
@@ -110,12 +116,12 @@ export class ReviewSession {
       );
     }
 
-    const key = commentAnchorKey(input);
+    const key = anchorKey(input);
     const target = this.targetsByAnchor.get(key);
     if (target === undefined) {
       throw new ReviewSessionError(
         "unknown-comment-anchor",
-        `Comment anchor does not match review unit ${input.reviewUnitId}, hunk ${input.hunkId}, line index ${input.diffLineIndex}.`,
+        `Review unit ${input.reviewUnitId} does not cover ${input.side} line ${input.line} of file change ${input.fileChangeId}.`,
       );
     }
 
@@ -125,7 +131,7 @@ export class ReviewSession {
   }
 
   deleteComment(anchor: ReviewCommentAnchor): { readonly deleted: boolean } {
-    return { deleted: this.commentsByAnchor.delete(commentAnchorKey(anchor)) };
+    return { deleted: this.commentsByAnchor.delete(anchorKey(anchor)) };
   }
 }
 
@@ -139,43 +145,62 @@ export function listCommentTargets(
 function buildCommentTargets(
   snapshot: ReviewSnapshot,
   route: ReviewRoute,
-): readonly InternalReviewCommentTarget[] {
-  const hunksById = new Map(
-    listSnapshotHunks(snapshot).map((hunk) => [hunk.id, hunk]),
-  );
+): readonly InternalTarget[] {
   const changesById = new Map(
     snapshot.changes.map((change) => [change.id, change]),
   );
-  const targets: InternalReviewCommentTarget[] = [];
+  const targets: InternalTarget[] = [];
+  const seen = new Set<string>();
 
   for (const unit of route.units) {
-    for (const hunkId of unit.hunkIds) {
-      const hunk = hunksById.get(hunkId);
-      assert.ok(
-        hunk,
-        `Validated review route references missing hunk ${hunkId}.`,
-      );
-      const change = changesById.get(hunk.fileChangeId);
+    for (const span of unit.spans) {
+      const change = changesById.get(span.fileChangeId);
       assert.ok(
         change,
-        `Snapshot hunk ${hunk.id} references missing file change ${hunk.fileChangeId}.`,
+        `Validated route references missing file change ${span.fileChangeId}.`,
+      );
+      const content = textContent(change);
+      assert.ok(
+        content,
+        `Validated route references non-text file change ${span.fileChangeId}.`,
       );
 
-      for (const line of hunk.lines) {
-        if (line.kind === "no-newline-marker") continue;
-        const target: InternalReviewCommentTarget = {
-          snapshotId: snapshot.id,
+      for (const [lineIndex, diffLine] of content.lines.entries()) {
+        if (!spanContains(span, diffLine)) continue;
+        const side: ChangeSide | undefined =
+          diffLine.kind === "added"
+            ? "new"
+            : diffLine.kind === "removed"
+              ? "old"
+              : undefined;
+        const number =
+          side === "new"
+            ? diffLine.newLine
+            : side === "old"
+              ? diffLine.oldLine
+              : undefined;
+        if (side === undefined || number === undefined) continue;
+
+        const anchor = {
           reviewUnitId: unit.id,
-          hunkId: hunk.id,
-          diffLineIndex: line.index,
-          filePath: commentFilePath(change, line),
+          fileChangeId: change.id,
+          side,
+          line: number,
+        };
+        const key = anchorKey(anchor);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        targets.push({
+          ...anchor,
+          snapshotId: snapshot.id,
+          filePath: commentFilePath(change, side),
           oldPath: change.oldPath,
           newPath: change.newPath,
-          line: { ...line },
-          hunkLines: hunk.lines,
+          diffLine: { ...diffLine },
+          fileLines: content.lines,
+          lineIndex,
           order: targets.length,
-        };
-        targets.push(target);
+        });
       }
     }
   }
@@ -183,9 +208,28 @@ function buildCommentTargets(
   return targets;
 }
 
-function commentFilePath(change: FileChange, line: DiffLine): string {
+function spanContains(span: ResolvedSpan, line: DiffLine): boolean {
+  if (
+    line.oldLine !== undefined &&
+    span.oldStart !== undefined &&
+    span.oldEnd !== undefined &&
+    line.oldLine >= span.oldStart &&
+    line.oldLine <= span.oldEnd
+  ) {
+    return true;
+  }
+  return (
+    line.newLine !== undefined &&
+    span.newStart !== undefined &&
+    span.newEnd !== undefined &&
+    line.newLine >= span.newStart &&
+    line.newLine <= span.newEnd
+  );
+}
+
+function commentFilePath(change: FileChange, side: ChangeSide): string {
   const filePath =
-    line.kind === "removed"
+    side === "old"
       ? (change.oldPath ?? change.newPath)
       : (change.newPath ?? change.oldPath);
   assert.ok(filePath, `Text file change ${change.id} has no old or new path.`);
@@ -193,61 +237,54 @@ function commentFilePath(change: FileChange, line: DiffLine): string {
 }
 
 function materializeComment(
-  target: InternalReviewCommentTarget,
+  target: InternalTarget,
   body: string,
 ): ReviewComment {
-  const contextStart = Math.max(
-    0,
-    target.diffLineIndex - REVIEW_COMMENT_CONTEXT_RADIUS,
-  );
-  const contextEnd = Math.min(
-    target.hunkLines.length,
-    target.diffLineIndex + REVIEW_COMMENT_CONTEXT_RADIUS + 1,
+  const start = Math.max(0, target.lineIndex - REVIEW_COMMENT_CONTEXT_RADIUS);
+  const end = Math.min(
+    target.fileLines.length,
+    target.lineIndex + REVIEW_COMMENT_CONTEXT_RADIUS + 1,
   );
   return {
     snapshotId: target.snapshotId,
     reviewUnitId: target.reviewUnitId,
-    hunkId: target.hunkId,
-    diffLineIndex: target.diffLineIndex,
+    fileChangeId: target.fileChangeId,
+    side: target.side,
+    line: target.line,
     filePath: target.filePath,
     oldPath: target.oldPath,
     newPath: target.newPath,
-    oldLine: target.line.oldLine,
-    newLine: target.line.newLine,
-    selectedDiffText: target.line.raw,
-    nearbyDiffContext: target.hunkLines
-      .slice(contextStart, contextEnd)
-      .map((line) => ({ ...line })),
+    oldLine: target.diffLine.oldLine,
+    newLine: target.diffLine.newLine,
+    selectedText: target.diffLine.text,
+    nearbyContext: target.fileLines.slice(start, end).map((line) => ({
+      ...line,
+    })),
     body,
   };
 }
 
-function copyCommentTarget(
-  target: InternalReviewCommentTarget,
-): ReviewCommentTarget {
+function copyTarget(target: InternalTarget): ReviewCommentTarget {
   return {
-    snapshotId: target.snapshotId,
     reviewUnitId: target.reviewUnitId,
-    hunkId: target.hunkId,
-    diffLineIndex: target.diffLineIndex,
+    fileChangeId: target.fileChangeId,
+    side: target.side,
+    line: target.line,
+    snapshotId: target.snapshotId,
     filePath: target.filePath,
     oldPath: target.oldPath,
     newPath: target.newPath,
-    line: { ...target.line },
+    diffLine: { ...target.diffLine },
   };
 }
 
 function copyComment(comment: ReviewComment): ReviewComment {
   return {
     ...comment,
-    nearbyDiffContext: comment.nearbyDiffContext.map((line) => ({ ...line })),
+    nearbyContext: comment.nearbyContext.map((line) => ({ ...line })),
   };
 }
 
-function commentAnchorKey(anchor: ReviewCommentAnchor): string {
-  return JSON.stringify([
-    anchor.reviewUnitId,
-    anchor.hunkId,
-    anchor.diffLineIndex,
-  ]);
+function anchorKey(anchor: ReviewCommentAnchor): string {
+  return `${anchor.reviewUnitId}\u0000${changedLineKey(anchor)}`;
 }
