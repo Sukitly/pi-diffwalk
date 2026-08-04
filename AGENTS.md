@@ -92,6 +92,7 @@ src/
   route-advisory.ts
   review-coverage.ts
   review-series.ts
+  review-persistence.ts
   review-comments.ts
   review-ui.ts
   prompts.ts
@@ -106,6 +107,7 @@ test/
   route-advisory.test.ts
   review-coverage.test.ts
   review-series.test.ts
+  review-persistence.test.ts
   review-comments.test.ts
   prompt-surface.test.ts
 ```
@@ -124,6 +126,7 @@ Responsibilities:
 | `src/route-advisory.ts` | Assess a validated route for mechanical-route signals and format the one-shot advisory nudge |
 | `src/review-coverage.ts` | Materialize submitted review outcomes for every changed line |
 | `src/review-series.ts` | Create and append immutable completed review rounds |
+| `src/review-persistence.ts` | Serialize completed review series into versioned session entries and parse them back, rejecting incompatible data |
 | `src/review-comments.ts` | Own comment anchors, drafts, ordering, cancellation, and drift-gated submission results |
 | `src/review-ui.ts` | Render the walkthrough, navigate diff lines, and connect the comment session to the TUI |
 | `src/prompts.ts` | Tell the agent how to inspect the change and construct a semantic route |

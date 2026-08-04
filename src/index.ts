@@ -28,6 +28,11 @@ import {
 } from "./prompts.ts";
 import { computeReviewDelta } from "./review-delta.ts";
 import { detectExactMoves } from "./review-moves.ts";
+import {
+  DIFFWALK_SERIES_ENTRY_TYPE,
+  parseReviewSeriesEntry,
+  serializeReviewSeriesEntry,
+} from "./review-persistence.ts";
 import { createReviewSeries } from "./review-series.ts";
 import { openGuidedReview } from "./review-ui.ts";
 import {
@@ -154,6 +159,16 @@ export function registerDiffWalk(
   let pendingReview: PendingReview | undefined;
   const completedSeriesById = new Map<ReviewSeriesId, ReviewSeries>();
 
+  pi.on("session_start", (_event, ctx) => {
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type !== "custom") continue;
+      if (entry.customType !== DIFFWALK_SERIES_ENTRY_TYPE) continue;
+      const series = parseReviewSeriesEntry(entry.data);
+      if (series === undefined) continue;
+      completedSeriesById.set(series.id, series);
+    }
+  });
+
   pi.registerMessageRenderer<KickoffMessageDetails>(
     DIFFWALK_KICKOFF_MESSAGE_TYPE,
     renderKickoffMessage,
@@ -245,6 +260,10 @@ export function registerDiffWalk(
     pending.review = submitted.review;
     pending.series = submitted.series;
     completedSeriesById.set(submitted.series.id, submitted.series);
+    pi.appendEntry(
+      DIFFWALK_SERIES_ENTRY_TYPE,
+      serializeReviewSeriesEntry(submitted.series),
+    );
     return {
       status: "submitted",
       snapshotId: review.snapshot.id,

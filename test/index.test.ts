@@ -24,6 +24,7 @@ import {
   renderSubmittedReviewMessage,
   type SubmittedReviewMessageDetails,
 } from "../src/index.ts";
+import { DIFFWALK_SERIES_ENTRY_TYPE } from "../src/review-persistence.ts";
 import type {
   FileChange,
   FileChangeId,
@@ -55,6 +56,11 @@ interface SentMessageMeta {
   readonly triggerTurn: boolean;
 }
 
+interface AppendedEntry {
+  readonly customType: string;
+  readonly data: unknown;
+}
+
 interface Harness {
   readonly command: (
     args: string,
@@ -65,7 +71,10 @@ interface Harness {
   readonly sentMessageMeta: readonly SentMessageMeta[];
   readonly registeredRenderers: readonly string[];
   readonly openedSnapshots: readonly string[];
+  readonly appendedEntries: readonly AppendedEntry[];
   readonly behavior: HarnessBehavior;
+  /** Replays persisted entries into a fresh harness, as session_start does. */
+  readonly restoreSession: (entries: readonly AppendedEntry[]) => Promise<void>;
 }
 
 function createHarness(
@@ -89,7 +98,19 @@ function createHarness(
   const sentMessageMeta: SentMessageMeta[] = [];
   const registeredRenderers: string[] = [];
   const openedSnapshots: string[] = [];
+  const appendedEntries: AppendedEntry[] = [];
+  let sessionStartHandler:
+    | ((event: unknown, ctx: unknown) => unknown)
+    | undefined;
   const pi = {
+    on(eventName: string, handler: (event: unknown, ctx: unknown) => unknown) {
+      if (eventName === "session_start") {
+        sessionStartHandler = handler;
+      }
+    },
+    appendEntry(customType: string, data?: unknown) {
+      appendedEntries.push({ customType, data });
+    },
     registerCommand(
       name: string,
       options: {
@@ -176,6 +197,24 @@ function createHarness(
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
+  assert.ok(sessionStartHandler);
+  const restoreSession = async (
+    entries: readonly AppendedEntry[],
+  ): Promise<void> => {
+    await sessionStartHandler?.(
+      { type: "session_start" },
+      {
+        sessionManager: {
+          getEntries: () =>
+            entries.map((entry) => ({
+              type: "custom",
+              customType: entry.customType,
+              data: entry.data,
+            })),
+        },
+      },
+    );
+  };
   return {
     command,
     tool,
@@ -183,7 +222,9 @@ function createHarness(
     sentMessageMeta,
     registeredRenderers,
     openedSnapshots,
+    appendedEntries,
     behavior,
+    restoreSession,
   };
 }
 
@@ -645,6 +686,103 @@ test("keeps completed rounds in memory as the next delta baseline", async () => 
   assert.match(kickoff, /"needsReviewLineCount": 1/);
   assert.match(kickoff, /"carriedForwardLineCount": 1/);
   assert.match(kickoff, /"baselineRoundId": "review-round:/);
+});
+
+test("persists submitted rounds and restores the baseline on session start", async () => {
+  const first = createHarness();
+  first.behavior.submitOnOpen = true;
+  await first.command("", commandContext());
+  await first.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  assert.equal(first.appendedEntries.length, 1);
+  assert.equal(
+    first.appendedEntries[0]?.customType,
+    DIFFWALK_SERIES_ENTRY_TYPE,
+  );
+
+  const second = createHarness();
+  await second.restoreSession(first.appendedEntries);
+  second.behavior.snapshot = makeSnapshot("snapshot-round-2", [
+    { path: "src/file.ts", lines: [" head", "+changed", " tail", "+appended"] },
+  ]);
+  await second.command("", commandContext());
+
+  const kickoff = second.sentMessages[0] ?? "";
+  assert.match(kickoff, /"needsReviewLineCount": 1/);
+  assert.match(kickoff, /"carriedForwardLineCount": 1/);
+  assert.match(kickoff, /"baselineRoundId": "review-round:/);
+});
+
+test("the latest persisted entry for a series wins on restore", async () => {
+  const first = createHarness();
+  first.behavior.submitOnOpen = true;
+  await first.command("", commandContext());
+  await first.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  first.behavior.snapshot = makeSnapshot("snapshot-round-2", [
+    { path: "src/file.ts", lines: [" head", "+changed", " tail", "+appended"] },
+  ]);
+  await first.command("", commandContext());
+  await first.tool.execute(
+    "call-2",
+    {
+      ...validRoute("snapshot-round-2"),
+      units: [
+        {
+          title: "Appended line",
+          whyHere: "Only new line this round.",
+          context: "tail -> appended",
+          changeSummary: "Appends a line.",
+          reviewFocus: ["Is the appended line correct?"],
+          spans: [span("src/file.ts", { new: [4, 4] })],
+        },
+      ],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(first.appendedEntries.length, 2);
+
+  const third = createHarness();
+  await third.restoreSession(first.appendedEntries);
+  third.behavior.snapshot = makeSnapshot("snapshot-round-3", [
+    {
+      path: "src/file.ts",
+      lines: [" head", "+changed", " tail", "+appended", "+third"],
+    },
+  ]);
+  await third.command("", commandContext());
+
+  const kickoff = third.sentMessages[0] ?? "";
+  assert.match(kickoff, /"needsReviewLineCount": 1/);
+  assert.match(kickoff, /"carriedForwardLineCount": 2/);
+});
+
+test("ignores incompatible or corrupt persisted entries", async () => {
+  const harness = createHarness();
+  await harness.restoreSession([
+    { customType: DIFFWALK_SERIES_ENTRY_TYPE, data: { formatVersion: 99 } },
+    { customType: DIFFWALK_SERIES_ENTRY_TYPE, data: "garbage" },
+    { customType: "unrelated-extension", data: { anything: true } },
+  ]);
+
+  await harness.command("", commandContext());
+  const kickoff = harness.sentMessages[0] ?? "";
+  assert.match(kickoff, /"baselineRoundId": null/);
+  assert.match(kickoff, /"carriedForwardLineCount": 0/);
 });
 
 test("reports a comparison with nothing to review instead of starting one", async () => {

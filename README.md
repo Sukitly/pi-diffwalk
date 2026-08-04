@@ -224,6 +224,7 @@ src/
   route-advisory.ts     Advisory route-quality signals and the one-shot nudge
   review-coverage.ts    Submitted changed-line outcome calculation
   review-series.ts      Completed review round lifecycle
+  review-persistence.ts Session-entry serialization of completed rounds
   review-comments.ts    Comment anchors, drafts, and submission results
   review-ui.ts           Interactive TUI
   prompts.ts             Agent instructions for route construction
@@ -238,6 +239,7 @@ test/
   route-advisory.test.ts
   review-coverage.test.ts
   review-series.test.ts
+  review-persistence.test.ts
   review-comments.test.ts
   prompt-surface.test.ts
 ```
@@ -257,7 +259,7 @@ Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pa
 
 If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
 
-Completed review rounds are kept in extension memory. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed lines as carried-forward instead of routing them again. Review state and completed rounds are not persisted across extension reloads or processes.
+Completed review rounds persist as custom entries in the pi session, so the carried-forward baseline survives pi restarts, `/reload`, and session resume. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed lines as carried-forward instead of routing them again. Entries with an unknown format version or a broken structure are ignored on restore. A paused in-progress review is still extension memory only: it does not survive a reload, and the next `/diffwalk` starts over from a fresh snapshot.
 
 ## Review Lifecycle Domain
 
@@ -265,7 +267,7 @@ The domain layer represents an in-progress review independently from a TUI, tool
 
 The atom of the domain is the changed line, addressed by file, side, and line number. Review rounds record an outcome for every changed line, and the next round matches the two rounds by aligning each file's changed-line sequence. A line therefore stays carried forward when unrelated edits shift it or rewrite its neighbours.
 
-The lifecycle currently supports route preparation, readiness, submission into an immutable review round, and explicit discard. Submission is rejected until every planned unit is explicitly reviewed and the repository state captured at submission time still matches the snapshot. The extension resumes this domain object within one extension process and keeps completed rounds in memory as the delta baseline for the next round. Persistence across extension reloads or processes is not implemented.
+The lifecycle currently supports route preparation, readiness, submission into an immutable review round, and explicit discard. Submission is rejected until every planned unit is explicitly reviewed and the repository state captured at submission time still matches the snapshot. The extension resumes this domain object within one extension process. Completed rounds are written to the session as versioned entries and restored on session start as the delta baseline for the next round; the in-progress review itself is not persisted across extension reloads or processes.
 
 ## Design Principles
 
@@ -308,7 +310,7 @@ The current version includes:
 - comment summary and batch submission
 - worktree drift detection
 - explicit pause and in-process resume of an interrupted review
-- in-memory incremental review rounds with carried-forward classification
+- incremental review rounds with carried-forward classification, persisted across restarts as session entries
 - parser, route, workflow, comment, and TUI tests
 
 Possible later work includes:
