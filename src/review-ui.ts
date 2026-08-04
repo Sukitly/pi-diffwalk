@@ -15,39 +15,52 @@ import {
 } from "@earendil-works/pi-tui";
 import { ReviewSnapshotDriftError } from "./git-diff.ts";
 import {
+  deleteInProgressReviewComment,
+  discardInProgressReview,
+  InProgressReviewError,
+  markReviewUnitReviewed,
+  setInProgressReviewSubmissionMode,
+  upsertInProgressReviewComment,
+} from "./in-progress-review.ts";
+import {
+  listCommentTargets,
   type ReviewCommentAnchor,
   ReviewCommentInputError,
   type ReviewCommentTarget,
-  ReviewSession,
-  type ReviewSnapshotVerifier,
 } from "./review-comments.ts";
+import { assertReviewDeltaMatchesSnapshot } from "./review-delta.ts";
 import {
-  assertReviewDeltaMatchesSnapshot,
-  listSnapshotHunks,
-} from "./review-delta.ts";
+  changedLineKey,
+  listFileChangedLines,
+  resolvedSpanChangedLines,
+  textContent,
+} from "./review-span.ts";
 import { validateReviewRoute } from "./route-validation.ts";
 import type {
-  DiffHunk,
+  ChangeSide,
   DiffLine,
   FileChange,
   GuidedReviewResult,
-  HunkId,
-  HunkReviewRequirement,
+  InProgressReview,
+  ResolvedSpan,
   ReviewComment,
   ReviewDelta,
   ReviewRoute,
   ReviewRouteCandidate,
   ReviewSnapshot,
+  ReviewSpanCandidate,
   ReviewSubmissionMode,
   ReviewUnit,
   SubmittedGuidedReviewResult,
 } from "./types.ts";
 
 export interface GuidedReviewUiInput {
-  readonly snapshot: ReviewSnapshot;
-  readonly delta: ReviewDelta;
-  readonly route: ReviewRouteCandidate;
-  readonly verifySnapshot: ReviewSnapshotVerifier;
+  readonly review: InProgressReview;
+  readonly onReviewChange: (review: InProgressReview) => void;
+  readonly onSubmit: (
+    review: InProgressReview,
+    signal: AbortSignal,
+  ) => Promise<SubmittedGuidedReviewResult>;
 }
 
 export class GuidedReviewUiUnavailableError extends Error {
@@ -96,23 +109,26 @@ interface SubmissionFailure {
   readonly error: unknown;
 }
 
-interface HunkView {
-  readonly hunk: DiffHunk;
+/** One file region of a review unit, sliced out of the frozen file. */
+interface SpanView {
   readonly change: FileChange;
+  readonly span: ResolvedSpan;
+  readonly lines: readonly DiffLine[];
 }
 
 interface UnitView {
   readonly unit: ReviewUnit;
-  readonly hunks: readonly HunkView[];
+  readonly spans: readonly SpanView[];
   readonly targets: readonly ReviewCommentTarget[];
 }
 
 type InventoryEntry =
   | {
-      readonly kind: "hunk";
+      readonly kind: "file";
       readonly title: string;
       readonly detail: string;
-      readonly hunkView: HunkView;
+      readonly change: FileChange;
+      readonly regions: readonly DiffLine[][];
     }
   | {
       readonly kind: "metadata-only" | "binary" | "unsupported" | "notice";
@@ -130,16 +146,16 @@ interface GuidedReviewComponentOptions {
   readonly tui: TUI;
   readonly theme: ReviewUiTheme;
   readonly keybindings: ReviewUiKeybindings;
-  readonly snapshot: ReviewSnapshot;
-  readonly delta: ReviewDelta;
+  readonly review: InProgressReview;
   readonly route: ReviewRoute;
-  readonly session: ReviewSession;
+  readonly onReviewChange: (review: InProgressReview) => void;
   readonly onSubmit: (
-    mode: ReviewSubmissionMode,
+    review: InProgressReview,
     signal: AbortSignal,
   ) => Promise<SubmittedGuidedReviewResult>;
   readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
-  readonly onCancel: () => void;
+  readonly onPause: () => void;
+  readonly onDiscard: () => void;
 }
 
 export async function openGuidedReview(
@@ -150,8 +166,28 @@ export async function openGuidedReview(
     throw new GuidedReviewUiUnavailableError(ctx.mode);
   }
 
-  const route = validateReviewRoute(input.snapshot, input.delta, input.route);
-  const session = new ReviewSession(input.snapshot, route);
+  const review = input.review;
+  const attachedRoute = review.route;
+  if (review.lifecycle !== "ready" || attachedRoute === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Review ${review.id} is not ready for a walkthrough; lifecycle is ${review.lifecycle}.`,
+    );
+  }
+  const route = validateReviewRoute(
+    review.snapshot,
+    review.delta,
+    routeAsCandidate(attachedRoute),
+  );
+  const progressUnitIds = new Set(
+    review.unitProgress.map((progress) => progress.reviewUnitId),
+  );
+  for (const unit of route.units) {
+    if (!progressUnitIds.has(unit.id)) {
+      throw new GuidedReviewUiInvariantError(
+        `Review ${review.id} has no unit progress for route unit ${unit.id}.`,
+      );
+    }
+  }
 
   return ctx.ui.custom<GuidedReviewResult>(
     (tui, theme, keybindings, done) =>
@@ -159,14 +195,15 @@ export async function openGuidedReview(
         tui,
         theme,
         keybindings,
-        snapshot: input.snapshot,
-        delta: input.delta,
+        review,
         route,
-        session,
-        onSubmit: (mode, signal) =>
-          session.submit(mode, input.verifySnapshot, signal),
+        onReviewChange: input.onReviewChange,
+        onSubmit: input.onSubmit,
         onComplete: done,
-        onCancel: () => done(session.cancel()),
+        onPause: () =>
+          done({ status: "paused", snapshotId: review.snapshot.id }),
+        onDiscard: () =>
+          done({ status: "discarded", snapshotId: review.snapshot.id }),
       }),
     {
       overlay: true,
@@ -180,35 +217,65 @@ export async function openGuidedReview(
   );
 }
 
+export function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
+  return {
+    snapshotId: route.snapshotId,
+    units: route.units.map((unit) => ({
+      title: unit.title,
+      whyHere: unit.whyHere,
+      context: unit.context,
+      changeSummary: unit.changeSummary,
+      reviewFocus: [...unit.reviewFocus],
+      spans: unit.spans.map((span) => spanCandidate(span)),
+    })),
+    skippedSpans: route.skippedSpans.map((skip) => ({
+      span: spanCandidate(skip.span),
+      reason: skip.reason,
+    })),
+  };
+}
+
+function spanCandidate(span: ResolvedSpan): ReviewSpanCandidate {
+  return {
+    path: span.path,
+    ...(span.oldStart === undefined
+      ? {}
+      : { oldStart: span.oldStart, oldEnd: span.oldEnd }),
+    ...(span.newStart === undefined
+      ? {}
+      : { newStart: span.newStart, newEnd: span.newEnd }),
+  } as ReviewSpanCandidate;
+}
+
 export class GuidedReviewComponent implements Component, Focusable {
   private readonly tui: TUI;
   private readonly theme: ReviewUiTheme;
   private readonly keybindings: ReviewUiKeybindings;
   private readonly route: ReviewRoute;
-  private readonly session: ReviewSession;
+  private review: InProgressReview;
+  private readonly onReviewChange: (review: InProgressReview) => void;
   private readonly units: readonly UnitView[];
   private readonly inventory: readonly InventoryEntry[];
   private readonly skippedCount: number;
   private readonly unsupportedCount: number;
   private readonly onSubmit: (
-    mode: ReviewSubmissionMode,
+    review: InProgressReview,
     signal: AbortSignal,
   ) => Promise<SubmittedGuidedReviewResult>;
   private readonly onComplete: (result: SubmittedGuidedReviewResult) => void;
-  private readonly onCancel: () => void;
+  private readonly onPause: () => void;
+  private readonly onDiscard: () => void;
   private readonly editor: Editor;
   private screen: ReviewScreen = "walkthrough";
   private returnScreen: ReviewScreen = "walkthrough";
   private unitIndex = 0;
   private readonly selectedTargetByUnit: number[];
-  private readonly visitedUnits = new Set<number>();
   private diffOffset = 0;
   private explanationOffset = 0;
   private inventoryIndex = 0;
   private inventoryOffset = 0;
   private inventoryDiffOffset = 0;
   private summaryOffset = 0;
-  private submissionMode: ReviewSubmissionMode = "discuss-first";
   private submissionStatus: SubmissionStatus = "not-checked";
   private submissionFailure?: SubmissionFailure;
   private transientFeedback?: TransientFeedback;
@@ -225,22 +292,23 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.theme = options.theme;
     this.keybindings = options.keybindings;
     this.route = options.route;
-    this.session = options.session;
+    this.review = options.review;
+    this.onReviewChange = options.onReviewChange;
     this.onSubmit = options.onSubmit;
     this.onComplete = options.onComplete;
-    this.onCancel = options.onCancel;
+    this.onPause = options.onPause;
+    this.onDiscard = options.onDiscard;
     const viewModel = buildReviewViewModel(
-      options.snapshot,
-      options.delta,
+      options.review.snapshot,
+      options.review.delta,
       options.route,
-      options.session.listCommentableLines(),
+      listCommentTargets(options.review.snapshot, options.route),
     );
     this.units = viewModel.units;
     this.inventory = viewModel.inventory;
-    this.skippedCount = options.route.skippedHunks.length;
+    this.skippedCount = options.route.skippedSpans.length;
     this.unsupportedCount = viewModel.unsupportedCount;
     this.selectedTargetByUnit = this.units.map(() => 0);
-    if (this.units.length > 0) this.visitedUnits.add(0);
 
     this.editor = new Editor(this.tui, createEditorTheme(this.theme), {
       paddingX: 0,
@@ -352,7 +420,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "j/k line • n/p unit • c comment • d delete • e explain • i inventory • s submit • Esc cancel",
+      "j/k select line • c comment • n complete section • e details • s summary • Esc pause",
     );
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
@@ -369,22 +437,19 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...header, ...empty, ...footer];
     }
 
-    const explanation = renderExplanationLines(
-      unitView.unit,
-      this.theme,
-      width,
-    );
-    const previewBudget =
+    const summary = renderWalkthroughSummary(unitView.unit, this.theme, width);
+    const summaryBudget =
       bodyHeight >= 8
         ? Math.min(
-            explanation.length,
-            Math.max(2, Math.floor(bodyHeight * 0.35)),
+            summary.length,
+            8,
+            Math.max(3, Math.floor(bodyHeight * 0.25)),
           )
         : 0;
-    const preview = explanation.slice(0, previewBudget);
-    if (preview.length > 0 && preview.length < explanation.length) {
+    const preview = summary.slice(0, summaryBudget);
+    if (preview.length > 0 && preview.length < summary.length) {
       preview[preview.length - 1] = fitLine(
-        this.theme.fg("dim", "… press e for the complete agent explanation"),
+        this.theme.fg("dim", "… press e for complete context and questions"),
         width,
       );
     }
@@ -405,7 +470,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const renderedDiff = renderUnitDiff(
       unitView,
       this.currentTarget(),
-      this.session,
+      this.review.comments,
       this.theme,
       width,
     );
@@ -444,11 +509,11 @@ export class GuidedReviewComponent implements Component, Focusable {
     if (target !== undefined) {
       body.push(
         ...wrapStyled(
-          `${this.theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.line)}`,
+          `${this.theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.diffLine)}`,
           width,
         ),
       );
-      body.push(renderSelectedDiffText(target.line, this.theme, width));
+      body.push(renderSelectedDiffText(target.diffLine, this.theme, width));
     }
     if (this.commentInputError !== undefined) {
       body.push(
@@ -479,7 +544,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const content =
       unit === undefined
         ? [this.theme.fg("muted", "No agent explanation is available.")]
-        : renderExplanationLines(unit, this.theme, width, true);
+        : renderExplanationLines(unit, this.theme, width);
     this.explanationOffset = clampOffset(
       this.explanationOffset,
       content.length,
@@ -541,8 +606,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     const viewportHeight = Math.max(0, rows - header.length - footer.length);
     const entry = this.inventory[this.inventoryIndex];
     const content =
-      entry?.kind === "hunk"
-        ? renderReadOnlyHunk(entry, this.theme, width)
+      entry?.kind === "file"
+        ? renderReadOnlyFile(entry, this.theme, width)
         : [this.theme.fg("muted", "This inventory entry has no text diff.")];
     this.inventoryDiffOffset = clampOffset(
       this.inventoryDiffOffset,
@@ -565,7 +630,9 @@ export class GuidedReviewComponent implements Component, Focusable {
       width,
       this.submissionStatus === "checking"
         ? "Checking repository state... • Esc cancel verification"
-        : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return",
+        : this.pendingUnits().length > 0
+          ? "Enter continue next pending section • Esc return"
+          : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return",
     );
     const availableHeight = Math.max(0, rows - header.length - footer.length);
     const submissionNotice = renderSubmissionNotice(
@@ -579,12 +646,12 @@ export class GuidedReviewComponent implements Component, Focusable {
       availableHeight - submissionNotice.length,
     );
     const content = renderSummaryLines(
-      this.session.getComments(),
+      this.review.comments,
       this.route,
       this.inventory,
-      this.submissionMode,
+      this.review.submissionMode,
       this.transientFeedback,
-      this.unvisitedUnits(),
+      this.pendingUnits(),
       this.theme,
       width,
     );
@@ -608,15 +675,15 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "Enter/y cancel review • Esc/n keep reviewing",
+      "Enter pause and resume later • d discard review • Esc continue",
     );
-    const comments = this.session.getComments().length;
+    const comments = this.review.comments.length;
     const content = [
-      this.theme.fg("warning", this.theme.bold("Cancel guided review?")),
+      this.theme.fg("warning", this.theme.bold("Leave DiffWalk?")),
       ...wrapStyled(
         this.theme.fg(
           "text",
-          `The ${comments} draft comment${comments === 1 ? "" : "s"} will remain local to this review session and will not be returned to the agent.`,
+          `Pause to keep ${comments} draft comment${comments === 1 ? "" : "s"} and review progress for the next /diffwalk command. Discard permanently removes drafts.`,
         ),
         width,
       ),
@@ -629,8 +696,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     const unitCount = this.units.length;
     const position =
       unitCount === 0 ? "unit 0/0" : `unit ${this.unitIndex + 1}/${unitCount}`;
-    const progress = `visited ${this.visitedUnits.size}/${unitCount}`;
-    const comments = `comments ${this.session.getComments().length}`;
+    const progress = `reviewed ${this.reviewedUnitCount()}/${unitCount}`;
+    const comments = `comments ${this.review.comments.length}`;
     const inventory = `skipped ${this.skippedCount} • unsupported ${this.unsupportedCount}`;
     const verification = `snapshot ${submissionLabel(this.submissionStatus)}`;
     const title = this.screenTitle();
@@ -667,7 +734,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       case "summary":
         return "Submission summary";
       case "cancel-confirmation":
-        return "Cancel guided review";
+        return "Pause or discard review";
     }
   }
 
@@ -692,8 +759,12 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.moveUnit(-1);
       return;
     }
-    if (matchesKey(data, "n") || matchesKey(data, Key.right)) {
+    if (matchesKey(data, Key.right)) {
       this.moveUnit(1);
+      return;
+    }
+    if (matchesKey(data, "n")) {
+      this.completeCurrentUnitAndContinue();
       return;
     }
     if (matchesKey(data, "c")) {
@@ -771,7 +842,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.right)) {
       const entry = this.inventory[this.inventoryIndex];
-      if (entry?.kind === "hunk") {
+      if (entry?.kind === "file") {
         this.inventoryDiffOffset = 0;
         this.openScreen("inventory-diff");
       } else {
@@ -807,10 +878,15 @@ export class GuidedReviewComponent implements Component, Focusable {
       matchesKey(data, Key.right) ||
       matchesKey(data, Key.tab)
     ) {
-      this.submissionMode =
-        this.submissionMode === "discuss-first"
-          ? "apply-change-requests"
-          : "discuss-first";
+      this.updateReview(
+        setInProgressReviewSubmissionMode(
+          this.review,
+          this.review.submissionMode === "discuss-first"
+            ? "apply-change-requests"
+            : "discuss-first",
+          this.mutation(),
+        ),
+      );
       this.transientFeedback = undefined;
       this.refresh();
       return;
@@ -825,11 +901,16 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private handleCancelConfirmationInput(data: string): void {
-    if (matchesKey(data, Key.enter) || matchesKey(data, "y")) {
-      this.onCancel();
+    if (matchesKey(data, Key.enter)) {
+      this.onPause();
       return;
     }
-    if (matchesKey(data, Key.escape) || matchesKey(data, "n")) {
+    if (matchesKey(data, "d")) {
+      this.updateReview(discardInProgressReview(this.review, this.mutation()));
+      this.onDiscard();
+      return;
+    }
+    if (matchesKey(data, Key.escape)) {
       this.openScreen(this.returnScreen);
     }
   }
@@ -870,7 +951,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const rows = renderUnitDiff(
       unit,
       this.currentTarget(),
-      this.session,
+      this.review.comments,
       this.theme,
       width,
     );
@@ -910,11 +991,26 @@ export class GuidedReviewComponent implements Component, Focusable {
   private moveUnit(delta: number): void {
     if (this.units.length === 0) return;
     this.unitIndex = clamp(this.unitIndex + delta, 0, this.units.length - 1);
-    this.visitedUnits.add(this.unitIndex);
     this.diffOffset = 0;
     this.explanationOffset = 0;
     this.transientFeedback = undefined;
     this.refresh();
+  }
+
+  private completeCurrentUnitAndContinue(): void {
+    const unit = this.currentUnit();
+    if (unit === undefined) {
+      this.openScreen("summary");
+      return;
+    }
+    this.updateReview(
+      markReviewUnitReviewed(this.review, unit.unit.id, this.mutation()),
+    );
+    if (this.unitIndex === this.units.length - 1) {
+      this.openScreen("summary");
+      return;
+    }
+    this.moveUnit(1);
   }
 
   private openCommentEditor(): void {
@@ -926,7 +1022,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       );
       return;
     }
-    const existing = this.session.getComment(target);
+    const existing = this.findComment(target);
     this.editor.setText(existing?.body ?? "");
     this.transientFeedback = undefined;
     this.commentInputError = undefined;
@@ -942,7 +1038,13 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     try {
-      this.session.upsertComment({ ...anchorFromTarget(target), body });
+      this.updateReview(
+        upsertInProgressReviewComment(
+          this.review,
+          { ...anchorFromTarget(target), body },
+          this.mutation(),
+        ),
+      );
       this.commentInputError = undefined;
       this.openScreen("walkthrough");
     } catch (error: unknown) {
@@ -959,7 +1061,13 @@ export class GuidedReviewComponent implements Component, Focusable {
   private deleteSelectedComment(): void {
     const target = this.currentTarget();
     if (target === undefined) return;
-    const { deleted } = this.session.deleteComment(target);
+    const next = deleteInProgressReviewComment(
+      this.review,
+      target,
+      this.mutation(),
+    );
+    const deleted = next !== this.review;
+    this.updateReview(next);
     this.setTransientFeedback(
       deleted ? "info" : "warning",
       deleted
@@ -996,10 +1104,18 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private startSubmission(): void {
     if (this.submissionStatus === "checking") return;
-    const unvisited = this.unvisitedUnits();
-    if (unvisited.length > 0) {
-      this.summaryOffset = 0;
-      this.refresh();
+    const firstPendingIndex = this.units.findIndex(
+      (_unit, index) => !this.isUnitReviewed(index),
+    );
+    if (firstPendingIndex >= 0) {
+      this.unitIndex = firstPendingIndex;
+      this.diffOffset = 0;
+      this.explanationOffset = 0;
+      this.transientFeedback = {
+        kind: "info",
+        message: "Continue reviewing this section before submission.",
+      };
+      this.openScreen("walkthrough");
       return;
     }
 
@@ -1014,7 +1130,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
     let submission: Promise<SubmittedGuidedReviewResult>;
     try {
-      submission = this.onSubmit(this.submissionMode, controller.signal);
+      submission = this.onSubmit(this.review, controller.signal);
     } catch (error: unknown) {
       this.failSubmission(attempt, error);
       return;
@@ -1033,7 +1149,9 @@ export class GuidedReviewComponent implements Component, Focusable {
     if (attempt !== this.submissionAttempt) return;
     this.submissionAbortController = undefined;
     const kind =
-      error instanceof ReviewSnapshotDriftError
+      error instanceof ReviewSnapshotDriftError ||
+      (error instanceof InProgressReviewError &&
+        error.code === "repository-drifted")
         ? "repository-drifted"
         : "verification-failed";
     this.submissionStatus = kind;
@@ -1062,9 +1180,9 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
-  private unvisitedUnits(): readonly ReviewUnit[] {
+  private pendingUnits(): readonly ReviewUnit[] {
     return this.units
-      .filter((_unit, index) => !this.visitedUnits.has(index))
+      .filter((_unit, index) => !this.isUnitReviewed(index))
       .map(({ unit }) => unit);
   }
 
@@ -1088,12 +1206,13 @@ export class GuidedReviewComponent implements Component, Focusable {
     const bodyHeight = Math.max(0, rows - 3);
     const unit = this.currentUnit();
     if (unit === undefined) return Math.max(0, bodyHeight - 1);
-    const explanation = renderExplanationLines(unit.unit, this.theme, width);
+    const summary = renderWalkthroughSummary(unit.unit, this.theme, width);
     const previewHeight =
       bodyHeight >= 8
         ? Math.min(
-            explanation.length,
-            Math.max(2, Math.floor(bodyHeight * 0.35)),
+            summary.length,
+            8,
+            Math.max(3, Math.floor(bodyHeight * 0.25)),
           )
         : 0;
     const feedbackHeight = renderTransientFeedback(
@@ -1132,6 +1251,40 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.editor.focused = this._focused && this.screen === "comment-editor";
   }
 
+  private updateReview(review: InProgressReview): void {
+    if (review === this.review) return;
+    this.review = review;
+    this.onReviewChange(review);
+  }
+
+  private mutation(): { expectedVersion: number; timestamp: string } {
+    return {
+      expectedVersion: this.review.version,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private isUnitReviewed(index: number): boolean {
+    const unitView = this.units[index];
+    if (unitView === undefined) return false;
+    return this.review.unitProgress.some(
+      (progress) =>
+        progress.reviewUnitId === unitView.unit.id &&
+        progress.disposition === "reviewed",
+    );
+  }
+
+  private reviewedUnitCount(): number {
+    return this.review.unitProgress.filter(
+      (progress) => progress.disposition === "reviewed",
+    ).length;
+  }
+
+  private findComment(anchor: ReviewCommentAnchor): ReviewComment | undefined {
+    const key = targetKey(anchor);
+    return this.review.comments.find((comment) => targetKey(comment) === key);
+  }
+
   private clearRenderCache(): void {
     this.cachedWidth = undefined;
     this.cachedRows = undefined;
@@ -1155,16 +1308,9 @@ function buildReviewViewModel(
   readonly unsupportedCount: number;
 } {
   assertReviewDeltaMatchesSnapshot(snapshot, delta);
-  const hunks = listSnapshotHunks(snapshot);
   const changesById = new Map(
     snapshot.changes.map((change) => [change.id, change]),
   );
-  const hunkViewsById = new Map<HunkId, HunkView>();
-  for (const hunk of hunks) {
-    const change = changesById.get(hunk.fileChangeId);
-    assert.ok(change, `Snapshot hunk ${hunk.id} has no file change.`);
-    hunkViewsById.set(hunk.id, { hunk, change });
-  }
 
   const targetsByUnit = new Map<string, ReviewCommentTarget[]>();
   for (const target of targets) {
@@ -1175,44 +1321,76 @@ function buildReviewViewModel(
 
   const units = route.units.map((unit) => ({
     unit,
-    hunks: unit.hunkIds.map((hunkId) => {
-      const hunkView = hunkViewsById.get(hunkId);
-      assert.ok(hunkView, `Validated route references missing hunk ${hunkId}.`);
-      return hunkView;
+    spans: unit.spans.map((span) => {
+      const change = changesById.get(span.fileChangeId);
+      assert.ok(
+        change,
+        `Validated route references missing file change ${span.fileChangeId}.`,
+      );
+      return { change, span, lines: sliceSpan(change, span) };
     }),
     targets: targetsByUnit.get(unit.id) ?? [],
   }));
 
-  const requirementsById = new Map(
-    delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
-  );
-  const unitsByHunkId = new Map(
-    route.units.flatMap((unit) =>
-      unit.hunkIds.map((hunkId) => [hunkId, unit] as const),
-    ),
-  );
-  const skipsByHunkId = new Map(
-    route.skippedHunks.map((skip) => [skip.hunkId, skip.reason]),
-  );
-  const inventory: InventoryEntry[] = hunks.map((hunk) => {
-    const hunkView = hunkViewsById.get(hunk.id);
-    const requirement = requirementsById.get(hunk.id);
-    assert.ok(hunkView, `Snapshot inventory lost hunk ${hunk.id}.`);
-    assert.ok(
+  const requirements = new Map(
+    delta.lines.map((requirement) => [
+      changedLineKey(requirement),
       requirement,
-      `Review delta has no requirement for hunk ${hunk.id}.`,
-    );
-    return {
-      kind: "hunk",
-      title: `${inventoryStatus(requirement, unitsByHunkId.get(hunk.id), skipsByHunkId.get(hunk.id))}: ${displayChangePath(hunkView.change)} ${hunk.header.raw}`,
-      detail: inventoryDetail(
-        requirement,
-        unitsByHunkId.get(hunk.id),
-        skipsByHunkId.get(hunk.id),
+    ]),
+  );
+  const plannedKeys = new Set<string>();
+  for (const unit of route.units) {
+    for (const span of unit.spans) {
+      for (const line of resolvedSpanChangedLines(snapshot, span)) {
+        plannedKeys.add(changedLineKey(line));
+      }
+    }
+  }
+  const skipReasonByKey = new Map<string, string>();
+  for (const skip of route.skippedSpans) {
+    for (const line of resolvedSpanChangedLines(snapshot, skip.span)) {
+      skipReasonByKey.set(changedLineKey(line), skip.reason);
+    }
+  }
+
+  const inventory: InventoryEntry[] = [];
+  for (const change of snapshot.changes) {
+    const content = textContent(change);
+    if (content === undefined) continue;
+    const changed = listFileChangedLines(change);
+    if (changed.length === 0) continue;
+    let planned = 0;
+    let skipped = 0;
+    let carried = 0;
+    const skipReasons = new Set<string>();
+    for (const line of changed) {
+      const key = changedLineKey(line);
+      if (requirements.get(key)?.type === "carried-forward") {
+        carried += 1;
+        continue;
+      }
+      const reason = skipReasonByKey.get(key);
+      if (reason !== undefined) {
+        skipped += 1;
+        skipReasons.add(reason);
+        continue;
+      }
+      if (plannedKeys.has(key)) planned += 1;
+    }
+    inventory.push({
+      kind: "file",
+      title: `${fileInventoryStatus(planned, skipped, carried)}: ${displayChangePath(change)}`,
+      detail: fileInventoryDetail(
+        changed.length,
+        planned,
+        skipped,
+        carried,
+        skipReasons,
       ),
-      hunkView,
-    };
-  });
+      change,
+      regions: buildDisplayRegions(content.lines),
+    });
+  }
 
   let unsupportedCount = 0;
   for (const change of snapshot.changes) {
@@ -1240,23 +1418,46 @@ function buildReviewViewModel(
   return { units, inventory, unsupportedCount };
 }
 
+function renderWalkthroughSummary(
+  unit: ReviewUnit,
+  theme: ReviewUiTheme,
+  width: number,
+): string[] {
+  const lines = [theme.fg("accent", theme.bold("Review this change"))];
+  lines.push(
+    ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
+  );
+  lines.push(theme.fg("muted", theme.bold("Focus")));
+  for (const focus of unit.reviewFocus.slice(0, 2)) {
+    lines.push(
+      ...wrapStyled(
+        `${theme.fg("accent", "• ")}${theme.fg("text", safeText(focus))}`,
+        width,
+      ),
+    );
+  }
+  if (unit.reviewFocus.length > 2) {
+    lines.push(
+      theme.fg(
+        "dim",
+        `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`,
+      ),
+    );
+  } else {
+    lines.push(
+      theme.fg("dim", "Press e for context and the full explanation."),
+    );
+  }
+  return lines;
+}
+
 function renderExplanationLines(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
   width: number,
-  complete = false,
 ): string[] {
   const lines: string[] = [];
-  lines.push(
-    theme.fg(
-      "accent",
-      theme.bold(
-        complete
-          ? "Agent explanation"
-          : "Agent explanation (press e to expand)",
-      ),
-    ),
-  );
+  lines.push(theme.fg("accent", theme.bold("Agent explanation")));
   addLabeledText(lines, "Why here", unit.whyHere, theme, width);
   addLabeledText(lines, "Context", unit.context, theme, width);
   addLabeledText(lines, "What changed", unit.changeSummary, theme, width);
@@ -1288,35 +1489,33 @@ function addLabeledText(
 function renderUnitDiff(
   unit: UnitView,
   selectedTarget: ReviewCommentTarget | undefined,
-  session: ReviewSession,
+  comments: readonly ReviewComment[],
   theme: ReviewUiTheme,
   width: number,
 ): readonly RenderedRow[] {
   const rows: RenderedRow[] = [];
   const targetsByLine = new Map(
     unit.targets.map((target) => [
-      hunkLineKey(target.hunkId, target.diffLineIndex),
+      fileLineKey(target.fileChangeId, target.side, target.line),
       target,
     ]),
   );
   const commentedTargets = new Set(
-    session.getComments().map((comment) => targetKey(comment)),
+    comments.map((comment) => targetKey(comment)),
   );
-  for (const [hunkIndex, hunkView] of unit.hunks.entries()) {
-    if (hunkIndex > 0) rows.push({ text: "" });
+  for (const [spanIndex, spanView] of unit.spans.entries()) {
+    if (spanIndex > 0) rows.push({ text: "" });
     rows.push(
       ...wrapStyled(
         theme.fg(
           "muted",
-          `${displayChangePath(hunkView.change)}  ${safeText(hunkView.hunk.header.raw)}`,
+          `${displayChangePath(spanView.change)}  ${safeText(describeSpanRange(spanView.span))}`,
         ),
         width,
       ).map((text) => ({ text })),
     );
-    for (const line of hunkView.hunk.lines) {
-      const target = targetsByLine.get(
-        hunkLineKey(hunkView.hunk.id, line.index),
-      );
+    for (const line of spanView.lines) {
+      const target = lineTarget(targetsByLine, spanView.change.id, line);
       const isSelected =
         target !== undefined &&
         selectedTarget !== undefined &&
@@ -1336,8 +1535,33 @@ function renderUnitDiff(
   return rows;
 }
 
-function renderReadOnlyHunk(
-  entry: Extract<InventoryEntry, { readonly kind: "hunk" }>,
+function lineTarget(
+  targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
+  fileChangeId: FileChange["id"],
+  line: DiffLine,
+): ReviewCommentTarget | undefined {
+  if (line.kind === "added" && line.newLine !== undefined) {
+    return targetsByLine.get(fileLineKey(fileChangeId, "new", line.newLine));
+  }
+  if (line.kind === "removed" && line.oldLine !== undefined) {
+    return targetsByLine.get(fileLineKey(fileChangeId, "old", line.oldLine));
+  }
+  return undefined;
+}
+
+function describeSpanRange(span: ResolvedSpan): string {
+  const parts: string[] = [];
+  if (span.oldStart !== undefined && span.oldEnd !== undefined) {
+    parts.push(`old ${span.oldStart}-${span.oldEnd}`);
+  }
+  if (span.newStart !== undefined && span.newEnd !== undefined) {
+    parts.push(`new ${span.newStart}-${span.newEnd}`);
+  }
+  return parts.join("  ");
+}
+
+function renderReadOnlyFile(
+  entry: Extract<InventoryEntry, { readonly kind: "file" }>,
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
@@ -1346,8 +1570,11 @@ function renderReadOnlyHunk(
     ...wrapStyled(theme.fg("muted", safeText(entry.detail)), width),
     "",
   ];
-  for (const line of entry.hunkView.hunk.lines) {
-    lines.push(...renderDiffLine(line, false, false, theme, width));
+  for (const [index, region] of entry.regions.entries()) {
+    if (index > 0) lines.push("");
+    for (const line of region) {
+      lines.push(...renderDiffLine(line, false, false, theme, width));
+    }
   }
   return lines;
 }
@@ -1363,7 +1590,7 @@ function renderDiffLine(
   const newLine = line.newLine === undefined ? "" : String(line.newLine);
   const marker = selected ? ">" : hasComment ? "●" : " ";
   const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
-  const raw = theme.fg(diffColor(line), safeText(line.raw));
+  const raw = theme.fg(diffColor(line), safeText(diffLineText(line)));
   const lines = wrapWithPrefix(prefix, raw, width);
   if (!selected) return lines;
   return lines.map((rendered) =>
@@ -1376,7 +1603,10 @@ function renderSelectedDiffText(
   theme: ReviewUiTheme,
   width: number,
 ): string {
-  return fitLine(theme.fg(diffColor(line), safeText(line.raw)), width);
+  return fitLine(
+    theme.fg(diffColor(line), safeText(diffLineText(line))),
+    width,
+  );
 }
 
 function renderInventoryRows(
@@ -1469,25 +1699,33 @@ function renderSummaryLines(
   inventory: readonly InventoryEntry[],
   submissionMode: ReviewSubmissionMode,
   feedback: TransientFeedback | undefined,
-  unvisitedUnits: readonly ReviewUnit[],
+  pendingUnits: readonly ReviewUnit[],
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
-  const lines: string[] = [
-    theme.fg("accent", theme.bold("Comment batch and submission mode")),
-  ];
+  const lines: string[] = [];
   lines.push(...renderTransientFeedback(feedback, theme, width));
-  if (unvisitedUnits.length > 0) {
+  if (pendingUnits.length > 0) {
+    lines.unshift(theme.fg("warning", theme.bold("Review incomplete")));
     lines.push(
       ...wrapStyled(
         theme.fg(
           "warning",
-          `Submission requires visiting every planned unit. Remaining: ${safeText(unvisitedUnits.map((unit) => unit.title).join(", "))}.`,
+          `${pendingUnits.length} section${pendingUnits.length === 1 ? "" : "s"} remain: ${safeText(pendingUnits.map((unit) => unit.title).join(", "))}.`,
         ),
         width,
       ),
+      "",
+      theme.fg(
+        "text",
+        "Press Enter to continue with the next pending section.",
+      ),
     );
+    return lines;
   }
+  lines.unshift(
+    theme.fg("accent", theme.bold("Comment batch and submission mode")),
+  );
   lines.push(
     modeLine(
       submissionMode === "discuss-first",
@@ -1526,7 +1764,7 @@ function renderSummaryLines(
     lines.push(
       ...wrapWithPrefix(
         "   ",
-        theme.fg("toolDiffContext", safeText(comment.selectedDiffText)),
+        theme.fg("toolDiffContext", safeText(comment.selectedText)),
         width,
       ),
     );
@@ -1535,16 +1773,16 @@ function renderSummaryLines(
     );
   }
 
-  lines.push("", theme.fg("muted", theme.bold("Explicitly skipped hunks")));
-  if (route.skippedHunks.length === 0) {
+  lines.push("", theme.fg("muted", theme.bold("Explicitly skipped regions")));
+  if (route.skippedSpans.length === 0) {
     lines.push(theme.fg("dim", "None."));
   } else {
-    for (const skip of route.skippedHunks) {
+    for (const skip of route.skippedSpans) {
       lines.push(
         ...wrapStyled(
           theme.fg(
             "warning",
-            `${safeText(skip.hunkId)}: ${safeText(skip.reason)}`,
+            `${safeText(displayPath(skip.span.path))} ${safeText(describeSpanRange(skip.span))}: ${safeText(skip.reason)}`,
           ),
           width,
         ),
@@ -1552,7 +1790,7 @@ function renderSummaryLines(
     }
   }
 
-  const nonTextChanges = inventory.filter((entry) => entry.kind !== "hunk");
+  const nonTextChanges = inventory.filter((entry) => entry.kind !== "file");
   lines.push("", theme.fg("muted", theme.bold("Non-text changes and notices")));
   if (nonTextChanges.length === 0) {
     lines.push(theme.fg("dim", "None."));
@@ -1600,39 +1838,125 @@ function createEditorTheme(theme: ReviewUiTheme): EditorTheme {
   };
 }
 
-function inventoryStatus(
-  requirement: HunkReviewRequirement,
-  unit: ReviewUnit | undefined,
-  skipReason: string | undefined,
-): string {
-  if (requirement.type === "carried-forward") {
-    if (unit !== undefined || skipReason !== undefined) {
-      throw new GuidedReviewUiInvariantError(
-        `Carried-forward hunk ${requirement.hunkId} appears in the planned route.`,
-      );
-    }
-    return "carried-forward";
+/** Unchanged lines rendered around a span so a narrow region is never shown bare. */
+const SPAN_DISPLAY_CONTEXT_RADIUS = 3;
+
+/**
+ * Contiguous slice of the frozen file covering one span.
+ *
+ * The slice is padded with neighbouring unchanged lines so that a span drawn
+ * tightly around its changed lines is still readable. Padding stops at the
+ * first changed line outside the span, because that line belongs to another
+ * unit and must not look reviewable here. Padding is display only and never
+ * affects coverage.
+ */
+function sliceSpan(
+  change: FileChange,
+  span: ResolvedSpan,
+): readonly DiffLine[] {
+  const content = textContent(change);
+  if (content === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Validated route references non-text file change ${change.id}.`,
+    );
   }
-  if (skipReason !== undefined) return "skipped";
-  if (unit !== undefined) return "planned";
-  throw new GuidedReviewUiInvariantError(
-    `Needs-review hunk ${requirement.hunkId} is neither planned nor explicitly skipped.`,
+  let start = -1;
+  let end = -1;
+  for (const [index, line] of content.lines.entries()) {
+    if (!lineWithinSpan(span, line)) continue;
+    if (start < 0) start = index;
+    end = index;
+  }
+  if (start < 0) return [];
+
+  for (let padded = 0; padded < SPAN_DISPLAY_CONTEXT_RADIUS; padded += 1) {
+    if (start === 0 || content.lines[start - 1]?.kind !== "context") break;
+    start -= 1;
+  }
+  for (let padded = 0; padded < SPAN_DISPLAY_CONTEXT_RADIUS; padded += 1) {
+    if (
+      end === content.lines.length - 1 ||
+      content.lines[end + 1]?.kind !== "context"
+    ) {
+      break;
+    }
+    end += 1;
+  }
+  return content.lines.slice(start, end + 1);
+}
+
+function lineWithinSpan(span: ResolvedSpan, line: DiffLine): boolean {
+  if (
+    line.oldLine !== undefined &&
+    span.oldStart !== undefined &&
+    span.oldEnd !== undefined &&
+    line.oldLine >= span.oldStart &&
+    line.oldLine <= span.oldEnd
+  ) {
+    return true;
+  }
+  return (
+    line.newLine !== undefined &&
+    span.newStart !== undefined &&
+    span.newEnd !== undefined &&
+    line.newLine >= span.newStart &&
+    line.newLine <= span.newEnd
   );
 }
 
-function inventoryDetail(
-  requirement: HunkReviewRequirement,
-  unit: ReviewUnit | undefined,
-  skipReason: string | undefined,
+/** Changed regions of a whole file, padded with context, for read-only inspection. */
+function buildDisplayRegions(
+  lines: readonly DiffLine[],
+  radius = 3,
+): readonly DiffLine[][] {
+  const regions: DiffLine[][] = [];
+  let start = -1;
+  let end = -1;
+  for (const [index, line] of lines.entries()) {
+    if (line.kind === "context") continue;
+    const from = Math.max(0, index - radius);
+    const to = Math.min(lines.length - 1, index + radius);
+    if (start < 0) {
+      start = from;
+      end = to;
+      continue;
+    }
+    if (from <= end + 1) {
+      end = Math.max(end, to);
+      continue;
+    }
+    regions.push([...lines.slice(start, end + 1)]);
+    start = from;
+    end = to;
+  }
+  if (start >= 0) regions.push([...lines.slice(start, end + 1)]);
+  return regions;
+}
+
+function fileInventoryStatus(
+  planned: number,
+  skipped: number,
+  carried: number,
 ): string {
-  if (requirement.type === "carried-forward") {
-    return `Reviewed in round ${requirement.reviewedInRoundId}; available for explicit inspection outside the planned route.`;
-  }
-  if (skipReason !== undefined) return `Skip reason: ${skipReason}`;
-  if (unit !== undefined) {
-    return `Review unit: ${unit.title}. Requirement: ${requirement.reason}.`;
-  }
-  return `Requirement: ${requirement.reason}.`;
+  const parts: string[] = [];
+  if (planned > 0) parts.push("planned");
+  if (skipped > 0) parts.push("skipped");
+  if (carried > 0) parts.push("carried-forward");
+  return parts.length === 0 ? "unrouted" : parts.join("+");
+}
+
+function fileInventoryDetail(
+  total: number,
+  planned: number,
+  skipped: number,
+  carried: number,
+  skipReasons: ReadonlySet<string>,
+): string {
+  const parts = [
+    `${total} changed line${total === 1 ? "" : "s"}: ${planned} planned, ${skipped} skipped, ${carried} carried forward.`,
+  ];
+  for (const reason of skipReasons) parts.push(`Skip reason: ${reason}`);
+  return parts.join(" ");
 }
 
 function lastTargetKey(rows: readonly RenderedRow[]): string | undefined {
@@ -1824,29 +2148,36 @@ function diffColor(line: DiffLine): Parameters<ReviewUiTheme["fg"]>[0] {
     case "removed":
       return "toolDiffRemoved";
     case "context":
-    case "no-newline-marker":
       return "toolDiffContext";
   }
+}
+
+/** Restores the unified diff prefix that the frozen model stores separately. */
+function diffLineText(line: DiffLine): string {
+  const prefix =
+    line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " ";
+  return `${prefix}${line.text}`;
 }
 
 function anchorFromTarget(target: ReviewCommentTarget): ReviewCommentAnchor {
   return {
     reviewUnitId: target.reviewUnitId,
-    hunkId: target.hunkId,
-    diffLineIndex: target.diffLineIndex,
+    fileChangeId: target.fileChangeId,
+    side: target.side,
+    line: target.line,
   };
 }
 
 function targetKey(anchor: ReviewCommentAnchor): string {
-  return JSON.stringify([
-    anchor.reviewUnitId,
-    anchor.hunkId,
-    anchor.diffLineIndex,
-  ]);
+  return `${anchor.reviewUnitId}\u0000${changedLineKey(anchor)}`;
 }
 
-function hunkLineKey(hunkId: HunkId, diffLineIndex: number): string {
-  return JSON.stringify([hunkId, diffLineIndex]);
+function fileLineKey(
+  fileChangeId: FileChange["id"],
+  side: ChangeSide,
+  line: number,
+): string {
+  return `${fileChangeId}\u0000${side}\u0000${line}`;
 }
 
 function submissionLabel(status: SubmissionStatus): string {

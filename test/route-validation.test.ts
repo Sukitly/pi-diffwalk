@@ -1,370 +1,429 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Check } from "typebox/value";
-import { ReviewDeltaError } from "../src/review-delta.ts";
+import { Value } from "typebox/value";
+import { computeReviewDelta } from "../src/review-delta.ts";
 import {
   ReviewRouteValidationError,
-  type ReviewRouteValidationIssueCode,
   validateReviewRoute,
 } from "../src/route-validation.ts";
 import {
-  type ReviewDelta,
   type ReviewRouteCandidate,
   ReviewRouteCandidateSchema,
+  type ReviewSnapshot,
+  type ReviewSpan,
 } from "../src/types.ts";
-import { hunkId, makeSnapshot, roundId } from "./domain-fixtures.ts";
+import { makeRound, makeSnapshot, span } from "./domain-fixtures.ts";
 
-type CandidateUnit = ReviewRouteCandidate["units"][number];
+function fixture(): ReviewSnapshot {
+  return makeSnapshot("snapshot-route", [
+    {
+      path: "src/entry.ts",
+      lines: [
+        " export function entry() {",
+        "-  return legacy()",
+        "+  return validate(legacy())",
+        " }",
+      ],
+    },
+    {
+      path: "src/contract.ts",
+      lines: [" export interface Contract {", "+  value: string", " }"],
+    },
+  ]);
+}
 
-function makeUnit(
-  hunkIds: readonly string[],
-  overrides: Partial<CandidateUnit> = {},
-): CandidateUnit {
+function unit(
+  spans: readonly ReviewSpan[],
+  overrides: Partial<ReviewRouteCandidate["units"][number]> = {},
+): ReviewRouteCandidate["units"][number] {
   return {
-    title: "Core behavior",
-    whyHere: "This establishes the behavior used by later units.",
-    context: "entryPoint -> calculate -> result",
-    changeSummary: "The calculation now preserves review provenance.",
-    reviewFocus: ["Does the calculation preserve the required invariant?"],
-    hunkIds: [...hunkIds],
+    title: "Entry point",
+    whyHere: "Behavior starts here.",
+    context: "entry -> validate",
+    changeSummary: "Validates the legacy result.",
+    reviewFocus: ["Is the legacy path still reachable?"],
+    spans: [...spans],
     ...overrides,
+  } as ReviewRouteCandidate["units"][number];
+}
+
+function route(
+  snapshot: ReviewSnapshot,
+  units: readonly ReviewRouteCandidate["units"][number][],
+  skippedSpans: ReviewRouteCandidate["skippedSpans"] = [],
+): ReviewRouteCandidate {
+  return { snapshotId: snapshot.id, units: [...units], skippedSpans };
+}
+
+function codesOf(error: unknown): readonly string[] {
+  assert.ok(error instanceof ReviewRouteValidationError);
+  return error.issues.map((issue) => issue.code);
+}
+
+test("exports an agent schema that accepts spans and rejects patch content", () => {
+  const valid = {
+    snapshotId: "snapshot-route",
+    units: [
+      {
+        title: "Entry",
+        whyHere: "Start here.",
+        context: "entry -> validate",
+        changeSummary: "Adds validation.",
+        reviewFocus: ["Is it correct?"],
+        spans: [{ path: "src/entry.ts", newStart: 2, newEnd: 3 }],
+      },
+    ],
+    skippedSpans: [],
   };
-}
+  assert.equal(Value.Check(ReviewRouteCandidateSchema, valid), true);
 
-function makeNeedsReviewDelta(
-  snapshotId: ReviewDelta["currentSnapshotId"],
-  hunkIds: readonly string[],
-): ReviewDelta {
-  return {
-    currentSnapshotId: snapshotId,
-    hunks: hunkIds.map((id) => ({
-      type: "needs-review",
-      hunkId: hunkId(id),
-      reason: "new",
-    })),
-    removedHunkFingerprints: [],
-  };
-}
-
-function captureRouteError(
-  operation: () => unknown,
-): ReviewRouteValidationError {
-  let caught: unknown;
-  try {
-    operation();
-  } catch (error) {
-    caught = error;
-  }
-  assert.ok(caught instanceof ReviewRouteValidationError);
-  return caught;
-}
-
-function assertIssueCodes(
-  error: ReviewRouteValidationError,
-  expected: readonly ReviewRouteValidationIssueCode[],
-): void {
-  assert.deepEqual(
-    error.issues.map((issue) => issue.code),
-    expected,
-  );
-}
-
-test("exports an agent schema that accepts explanatory routes and rejects patch content", () => {
-  const candidate = {
-    snapshotId: "snapshot-1",
-    units: [makeUnit(["h1"])],
-    skippedHunks: [],
-  };
-  assert.equal(Check(ReviewRouteCandidateSchema, candidate), true);
   assert.equal(
-    Check(ReviewRouteCandidateSchema, {
-      ...candidate,
-      units: [{ ...candidate.units[0], diff: "+ model-generated patch" }],
+    Value.Check(ReviewRouteCandidateSchema, {
+      ...valid,
+      units: [{ ...valid.units[0], diff: "+const value = 1" }],
+    }),
+    false,
+  );
+  assert.equal(
+    Value.Check(ReviewRouteCandidateSchema, {
+      ...valid,
+      units: [{ ...valid.units[0], spans: [] }],
+    }),
+    false,
+  );
+  assert.equal(
+    Value.Check(ReviewRouteCandidateSchema, {
+      ...valid,
+      units: [
+        { ...valid.units[0], spans: [{ path: "src/entry.ts", newStart: 0 }] },
+      ],
     }),
     false,
   );
 });
 
-test("validates ordered units and assigns deterministic unit IDs", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-    { id: "h3", fingerprint: "f3", path: "src/three.ts" },
+test("accepts a route whose units cover every changed line once", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  const validated = validateReviewRoute(
+    snapshot,
+    delta,
+    route(snapshot, [
+      unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+      unit([span("src/contract.ts", { new: [2, 2] })], {
+        title: "Public contract",
+      }),
+    ]),
+  );
+
+  assert.equal(validated.units.length, 2);
+  assert.equal(validated.units[0]?.spans[0]?.path, "src/entry.ts");
+  assert.notEqual(validated.units[0]?.id, validated.units[1]?.id);
+});
+
+test("assigns deterministic unit identifiers", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+  const candidate = route(snapshot, [
+    unit([
+      span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+      span("src/contract.ts", { new: [2, 2] }),
+    ]),
   ]);
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      { type: "needs-review", hunkId: hunkId("h1"), reason: "changed" },
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h2"),
-        reviewedInRoundId: roundId("round-1"),
-      },
-      { type: "needs-review", hunkId: hunkId("h3"), reason: "new" },
-    ],
-    removedHunkFingerprints: [],
-  };
-  const candidate: ReviewRouteCandidate = {
-    snapshotId: snapshot.id,
-    units: [
-      makeUnit(["h3"], { title: "Tests" }),
-      makeUnit(["h1"], { title: "Implementation" }),
-    ],
-    skippedHunks: [],
-  };
-  const snapshotBefore = structuredClone(snapshot);
-  const deltaBefore = structuredClone(delta);
-  const candidateBefore = structuredClone(candidate);
 
-  const first = validateReviewRoute(snapshot, delta, candidate);
-  const second = validateReviewRoute(snapshot, delta, candidate);
-  const commentaryChanged = validateReviewRoute(snapshot, delta, {
-    ...candidate,
-    units: candidate.units.map((unit) => ({
-      ...unit,
-      changeSummary: `Updated: ${unit.changeSummary}`,
-    })),
-  });
-
-  assert.deepEqual(second, first);
   assert.deepEqual(
-    first.units.map((unit) => unit.hunkIds),
-    [[hunkId("h3")], [hunkId("h1")]],
+    validateReviewRoute(snapshot, delta, candidate).units.map((u) => u.id),
+    validateReviewRoute(snapshot, delta, candidate).units.map((u) => u.id),
   );
-  assert.match(first.units[0]?.id ?? "", /^review-unit:[0-9a-f]{64}$/);
-  assert.notEqual(first.units[0]?.id, first.units[1]?.id);
+});
+
+test("lets one unit span several files", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  const validated = validateReviewRoute(
+    snapshot,
+    delta,
+    route(snapshot, [
+      unit([
+        span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+        span("src/contract.ts", { new: [2, 2] }),
+      ]),
+    ]),
+  );
+
+  assert.equal(validated.units.length, 1);
   assert.deepEqual(
-    commentaryChanged.units.map((unit) => unit.id),
-    first.units.map((unit) => unit.id),
-  );
-  assert.deepEqual(snapshot, snapshotBefore);
-  assert.deepEqual(delta, deltaBefore);
-  assert.deepEqual(candidate, candidateBefore);
-});
-
-test("accepts an explicit skip while preserving route and skip order", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-    { id: "h3", fingerprint: "f3", path: "src/three.ts" },
-  ]);
-  const delta = makeNeedsReviewDelta(snapshot.id, ["h1", "h2", "h3"]);
-  const route = validateReviewRoute(snapshot, delta, {
-    snapshotId: snapshot.id,
-    units: [makeUnit(["h2", "h1"])],
-    skippedHunks: [{ hunkId: "h3", reason: "Generated fixture" }],
-  });
-
-  assert.deepEqual(route.units[0]?.hunkIds, [hunkId("h2"), hunkId("h1")]);
-  assert.deepEqual(route.skippedHunks, [
-    { hunkId: hunkId("h3"), reason: "Generated fixture" },
-  ]);
-});
-
-test("accepts an empty planned route when no hunk requires review", () => {
-  const emptySnapshot = makeSnapshot("snapshot-empty", []);
-  assert.deepEqual(
-    validateReviewRoute(
-      emptySnapshot,
-      makeNeedsReviewDelta(emptySnapshot.id, []),
-      { snapshotId: emptySnapshot.id, units: [], skippedHunks: [] },
-    ),
-    {
-      snapshotId: emptySnapshot.id,
-      units: [],
-      skippedHunks: [],
-    },
-  );
-
-  const carriedSnapshot = makeSnapshot("snapshot-carried", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const carriedDelta: ReviewDelta = {
-    currentSnapshotId: carriedSnapshot.id,
-    hunks: [
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h1"),
-        reviewedInRoundId: roundId("round-1"),
-      },
-    ],
-    removedHunkFingerprints: [],
-  };
-  assert.deepEqual(
-    validateReviewRoute(carriedSnapshot, carriedDelta, {
-      snapshotId: carriedSnapshot.id,
-      units: [],
-      skippedHunks: [],
-    }),
-    { snapshotId: carriedSnapshot.id, units: [], skippedHunks: [] },
+    validated.units[0]?.spans.map((s) => s.path),
+    ["src/entry.ts", "src/contract.ts"],
   );
 });
 
-test("rejects unknown and carried-forward hunk references", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-  ]);
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      { type: "needs-review", hunkId: hunkId("h1"), reason: "new" },
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h2"),
-        reviewedInRoundId: roundId("round-1"),
-      },
-    ],
-    removedHunkFingerprints: [],
-  };
-  const error = captureRouteError(() =>
-    validateReviewRoute(snapshot, delta, {
-      snapshotId: snapshot.id,
-      units: [makeUnit(["h1", "h2"])],
-      skippedHunks: [{ hunkId: "unknown", reason: "Not relevant" }],
-    }),
-  );
-
-  assertIssueCodes(error, ["carried-forward-reference", "unknown-hunk"]);
-  assert.match(error.message, /carried-forward hunk h2/);
-  assert.match(error.message, /unknown hunk unknown/);
-});
-
-test("rejects duplicate, conflicting, and missing hunk coverage", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-    { id: "h3", fingerprint: "f3", path: "src/three.ts" },
-  ]);
-  const delta = makeNeedsReviewDelta(snapshot.id, ["h1", "h2", "h3"]);
-  const error = captureRouteError(() =>
-    validateReviewRoute(snapshot, delta, {
-      snapshotId: snapshot.id,
-      units: [makeUnit(["h1", "h1"]), makeUnit(["h3"])],
-      skippedHunks: [{ hunkId: "h1", reason: "Conflict" }],
-    }),
-  );
-
-  assertIssueCodes(error, ["duplicate-hunk", "duplicate-hunk", "missing-hunk"]);
-  assert.match(error.message, /does not cover required hunk h2/);
-});
-
-test("rejects routes that skip every hunk requiring review", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const delta = makeNeedsReviewDelta(snapshot.id, ["h1"]);
-  const error = captureRouteError(() =>
-    validateReviewRoute(snapshot, delta, {
-      snapshotId: snapshot.id,
-      units: [],
-      skippedHunks: [{ hunkId: "h1", reason: "Generated" }],
-    }),
-  );
-
-  assertIssueCodes(error, ["missing-review-unit"]);
-});
-
-test("aggregates blank metadata, empty unit, and empty skip reason issues", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-  ]);
-  const delta = makeNeedsReviewDelta(snapshot.id, ["h1", "h2"]);
-  const error = captureRouteError(() =>
-    validateReviewRoute(snapshot, delta, {
-      snapshotId: "wrong-snapshot",
-      units: [
-        makeUnit([], {
-          title: " ",
-          whyHere: "",
-          context: "\t",
-          changeSummary: " ",
-          reviewFocus: [],
-        }),
-        makeUnit(["h1"], { reviewFocus: [" "] }),
-      ],
-      skippedHunks: [{ hunkId: "h2", reason: " " }],
-    }),
-  );
-
-  assertIssueCodes(error, [
-    "snapshot-mismatch",
-    "empty-field",
-    "empty-field",
-    "empty-field",
-    "empty-field",
-    "empty-field",
-    "empty-unit",
-    "empty-field",
-    "empty-skip-reason",
-  ]);
-});
-
-test("rejects skipping a hunk with an unresolved comment", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-  ]);
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      {
-        type: "needs-review",
-        hunkId: hunkId("h1"),
-        reason: "unresolved-comment",
-      },
-      { type: "needs-review", hunkId: hunkId("h2"), reason: "new" },
-    ],
-    removedHunkFingerprints: [],
-  };
-  const error = captureRouteError(() =>
-    validateReviewRoute(snapshot, delta, {
-      snapshotId: snapshot.id,
-      units: [makeUnit(["h2"])],
-      skippedHunks: [{ hunkId: "h1", reason: "Agent skip" }],
-    }),
-  );
-
-  assertIssueCodes(error, ["unresolved-comment-skip"]);
-});
-
-test("does not add missing-review-unit when a submitted unit has an invalid hunk", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const delta = makeNeedsReviewDelta(snapshot.id, ["h1"]);
-  const error = captureRouteError(() =>
-    validateReviewRoute(snapshot, delta, {
-      snapshotId: snapshot.id,
-      units: [makeUnit(["unknown"])],
-      skippedHunks: [{ hunkId: "h1", reason: "Generated" }],
-    }),
-  );
-
-  assertIssueCodes(error, ["unknown-hunk"]);
-});
-
-test("propagates ReviewDeltaError before validating the candidate route", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const delta = {
-    ...makeNeedsReviewDelta(snapshot.id, ["h1"]),
-    currentSnapshotId: makeSnapshot("other", []).id,
-  };
+test("rejects a route that leaves changed lines uncovered", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
 
   assert.throws(
     () =>
-      validateReviewRoute(snapshot, delta, {
-        snapshotId: snapshot.id,
-        units: [makeUnit(["h1"])],
-        skippedHunks: [],
-      }),
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [
+          unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+        ]),
+      ),
     (error: unknown) => {
-      assert.ok(error instanceof ReviewDeltaError);
-      assert.match(error.message, /Review delta references snapshot/);
+      assert.ok(codesOf(error).includes("missing-coverage"));
+      assert.ok(
+        error instanceof ReviewRouteValidationError &&
+          error.message.includes("src/contract.ts new 2-2"),
+      );
       return true;
     },
+  );
+});
+
+test("rejects a changed line claimed by two units", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [
+          unit([span("src/entry.ts", { old: [1, 3], new: [1, 3] })]),
+          unit([span("src/entry.ts", { new: [2, 2] })]),
+          unit([span("src/contract.ts", { new: [2, 2] })]),
+        ]),
+      ),
+    (error: unknown) => codesOf(error).includes("duplicate-coverage"),
+  );
+});
+
+test("accepts an explicit skip and rejects one without a reason", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  const validated = validateReviewRoute(
+    snapshot,
+    delta,
+    route(
+      snapshot,
+      [unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })])],
+      [
+        {
+          span: span("src/contract.ts", { new: [2, 2] }),
+          reason: "Generated type surface reviewed at its source.",
+        },
+      ],
+    ),
+  );
+  assert.equal(validated.skippedSpans.length, 1);
+  assert.equal(validated.skippedSpans[0]?.span.path, "src/contract.ts");
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(
+          snapshot,
+          [unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })])],
+          [{ span: span("src/contract.ts", { new: [2, 2] }), reason: "  " }],
+        ),
+      ),
+    (error: unknown) => codesOf(error).includes("empty-skip-reason"),
+  );
+});
+
+test("rejects a line that is both covered and skipped", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(
+          snapshot,
+          [
+            unit([
+              span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+              span("src/contract.ts", { new: [2, 2] }),
+            ]),
+          ],
+          [
+            {
+              span: span("src/contract.ts", { new: [2, 2] }),
+              reason: "Also skipped.",
+            },
+          ],
+        ),
+      ),
+    (error: unknown) => codesOf(error).includes("skip-coverage-conflict"),
+  );
+});
+
+test("rejects unknown paths, empty ranges, and regions without changed lines", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [unit([span("src/missing.ts", { new: [1, 2] })])]),
+      ),
+    (error: unknown) => codesOf(error).includes("invalid-span"),
+  );
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [unit([span("src/entry.ts", { new: [4, 4] })])]),
+      ),
+    (error: unknown) => codesOf(error).includes("invalid-span"),
+  );
+});
+
+test("rejects blank metadata and reports every issue at once", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [
+          unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })], {
+            title: "  ",
+            whyHere: "",
+            reviewFocus: ["  "],
+          }),
+        ]),
+      ),
+    (error: unknown) => {
+      const codes = codesOf(error);
+      assert.ok(codes.filter((code) => code === "empty-field").length >= 3);
+      assert.ok(codes.includes("missing-coverage"));
+      return true;
+    },
+  );
+});
+
+test("rejects a route that skips every line requiring review", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(
+          snapshot,
+          [],
+          [
+            {
+              span: span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+              reason: "Skipped.",
+            },
+            {
+              span: span("src/contract.ts", { new: [2, 2] }),
+              reason: "Skipped.",
+            },
+          ],
+        ),
+      ),
+    (error: unknown) => codesOf(error).includes("missing-review-unit"),
+  );
+});
+
+test("accepts an empty route when no line requires review", () => {
+  const snapshot = makeSnapshot("snapshot-empty", []);
+  const delta = computeReviewDelta(snapshot);
+
+  const validated = validateReviewRoute(snapshot, delta, {
+    snapshotId: snapshot.id,
+    units: [],
+    skippedSpans: [],
+  });
+
+  assert.deepEqual(validated.units, []);
+  assert.deepEqual(validated.skippedSpans, []);
+});
+
+test("rejects routing or skipping a carried-forward line", () => {
+  const snapshot = fixture();
+  const baseline = makeRound({ id: "round-1", snapshot });
+  const delta = computeReviewDelta(snapshot, baseline);
+  assert.ok(delta.lines.every((line) => line.type === "carried-forward"));
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [
+          unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+        ]),
+      ),
+    (error: unknown) => codesOf(error).includes("carried-forward-reference"),
+  );
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(
+          snapshot,
+          [],
+          [
+            {
+              span: span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+              reason: "Already reviewed.",
+            },
+          ],
+        ),
+      ),
+    (error: unknown) => codesOf(error).includes("carried-forward-reference"),
+  );
+});
+
+test("rejects skipping a line whose earlier comment is unresolved", () => {
+  const snapshot = fixture();
+  const baseline = makeRound({
+    id: "round-1",
+    snapshot,
+    dispositions: { "src/contract.ts:new:2": "commented" },
+  });
+  const delta = computeReviewDelta(snapshot, baseline);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(
+          snapshot,
+          [],
+          [
+            {
+              span: span("src/contract.ts", { new: [2, 2] }),
+              reason: "Not worth re-reading.",
+            },
+          ],
+        ),
+      ),
+    (error: unknown) => codesOf(error).includes("unresolved-comment-skip"),
   );
 });

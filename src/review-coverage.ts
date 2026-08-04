@@ -1,33 +1,36 @@
 import {
   assertReviewDeltaMatchesSnapshot,
   isNeedsReviewReasonSkippable,
-  listSnapshotHunks,
 } from "./review-delta.ts";
+import {
+  type ChangedLine,
+  changedLineKey,
+  describeChangedLines,
+  listFileChangedLines,
+  resolvedSpanChangedLines,
+} from "./review-span.ts";
 import type {
-  HunkId,
-  HunkReviewRecord,
-  HunkReviewRequirement,
+  ChangedLineRecord,
+  ChangedLineRef,
+  ChangedLineRequirement,
+  FileCoverage,
   ReviewCoverage,
   ReviewDelta,
   ReviewRoundId,
+  ReviewRouteSkip,
   ReviewSnapshot,
 } from "./types.ts";
-
-export interface SkippedHunkOutcome {
-  readonly hunkId: HunkId;
-  readonly reason: string;
-}
-
-export interface ReviewCoverageInput {
-  readonly commentedHunkIds: readonly HunkId[];
-  readonly skippedHunks: readonly SkippedHunkOutcome[];
-}
 
 export class ReviewCoverageError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ReviewCoverageError";
   }
+}
+
+export interface ReviewCoverageInput {
+  readonly commentedLines: readonly ChangedLineRef[];
+  readonly skippedSpans: readonly ReviewRouteSkip[];
 }
 
 export function computeReviewCoverage(
@@ -37,115 +40,159 @@ export function computeReviewCoverage(
   input: ReviewCoverageInput,
 ): ReviewCoverage {
   assertReviewDeltaMatchesSnapshot(snapshot, delta);
-  const hunks = listSnapshotHunks(snapshot);
-  const hunksById = new Map(hunks.map((hunk) => [hunk.id, hunk]));
   const requirements = new Map(
-    delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
+    delta.lines.map((requirement) => [
+      changedLineKey(requirement),
+      requirement,
+    ]),
   );
-  const commentedHunkIds = validateCommentedHunks(
-    input.commentedHunkIds,
-    hunksById,
+  const commented = collectCommentedLines(input.commentedLines, requirements);
+  const skipped = collectSkippedLines(
+    snapshot,
+    input.skippedSpans,
+    requirements,
   );
-  const skippedHunks = validateSkippedHunks(input.skippedHunks, requirements);
 
-  for (const hunkId of commentedHunkIds) {
-    if (skippedHunks.has(hunkId)) {
+  for (const key of commented) {
+    if (skipped.has(key)) {
+      const line = skipped.get(key);
       throw new ReviewCoverageError(
-        `Hunk ${hunkId} cannot be both commented and skipped.`,
+        `${line === undefined ? key : describeLine(snapshot, line.line)} cannot be both commented and skipped.`,
       );
     }
   }
 
-  const records = hunks.map((hunk): HunkReviewRecord => {
-    if (commentedHunkIds.has(hunk.id)) {
-      return {
-        hunkId: hunk.id,
-        fingerprint: hunk.fingerprint,
-        disposition: "commented",
-        commentedInRoundId: roundId,
-      };
-    }
+  const files: FileCoverage[] = [];
+  for (const change of snapshot.changes) {
+    const changedLines = listFileChangedLines(change);
+    if (changedLines.length === 0) continue;
+    files.push({
+      oldPath: change.oldPath,
+      newPath: change.newPath,
+      lines: changedLines.map((line) =>
+        buildRecord(roundId, line, requirements, commented, skipped),
+      ),
+    });
+  }
 
-    const skipReason = skippedHunks.get(hunk.id);
-    if (skipReason !== undefined) {
-      return {
-        hunkId: hunk.id,
-        fingerprint: hunk.fingerprint,
-        disposition: "skipped",
-        skippedInRoundId: roundId,
-        skipReason,
-      };
-    }
+  return { snapshotId: snapshot.id, files };
+}
 
-    const requirement = requirements.get(hunk.id);
-    if (requirement === undefined) {
-      throw new ReviewCoverageError(
-        `No review requirement exists for hunk ${hunk.id}.`,
-      );
-    }
+function buildRecord(
+  roundId: ReviewRoundId,
+  line: ChangedLine,
+  requirements: ReadonlyMap<string, ChangedLineRequirement>,
+  commented: ReadonlySet<string>,
+  skipped: ReadonlyMap<
+    string,
+    { readonly line: ChangedLine; readonly reason: string }
+  >,
+): ChangedLineRecord {
+  const key = changedLineKey(line);
+  if (commented.has(key)) {
     return {
-      hunkId: hunk.id,
-      fingerprint: hunk.fingerprint,
-      disposition: "reviewed-without-comment",
-      reviewedInRoundId:
-        requirement.type === "carried-forward"
-          ? requirement.reviewedInRoundId
-          : roundId,
+      side: line.side,
+      line: line.line,
+      text: line.text,
+      disposition: "commented",
+      commentedInRoundId: roundId,
     };
-  });
+  }
 
-  return { snapshotId: snapshot.id, records };
+  const skip = skipped.get(key);
+  if (skip !== undefined) {
+    return {
+      side: line.side,
+      line: line.line,
+      text: line.text,
+      disposition: "skipped",
+      skippedInRoundId: roundId,
+      skipReason: skip.reason,
+    };
+  }
+
+  const requirement = requirements.get(key);
+  if (requirement === undefined) {
+    throw new ReviewCoverageError(
+      `No review requirement exists for ${line.side} line ${line.line} of file change ${line.fileChangeId}.`,
+    );
+  }
+  return {
+    side: line.side,
+    line: line.line,
+    text: line.text,
+    disposition: "reviewed-without-comment",
+    reviewedInRoundId:
+      requirement.type === "carried-forward"
+        ? requirement.reviewedInRoundId
+        : roundId,
+  };
 }
 
-function validateCommentedHunks(
-  commentedHunks: readonly HunkId[],
-  hunksById: ReadonlyMap<HunkId, { readonly id: HunkId }>,
-): ReadonlySet<HunkId> {
-  const result = new Set<HunkId>();
-  for (const hunkId of commentedHunks) {
-    if (!hunksById.has(hunkId)) {
+function collectCommentedLines(
+  commentedLines: readonly ChangedLineRef[],
+  requirements: ReadonlyMap<string, ChangedLineRequirement>,
+): ReadonlySet<string> {
+  const result = new Set<string>();
+  for (const ref of commentedLines) {
+    const key = changedLineKey(ref);
+    if (!requirements.has(key)) {
       throw new ReviewCoverageError(
-        `Comment references unknown hunk ${hunkId}.`,
+        `Comment references ${ref.side} line ${ref.line} of file change ${ref.fileChangeId}, which is not a changed line in this snapshot.`,
       );
     }
-    result.add(hunkId);
+    result.add(key);
   }
   return result;
 }
 
-function validateSkippedHunks(
-  skippedHunks: readonly SkippedHunkOutcome[],
-  requirements: ReadonlyMap<HunkId, HunkReviewRequirement>,
-): ReadonlyMap<HunkId, string> {
-  const result = new Map<HunkId, string>();
-  for (const skipped of skippedHunks) {
-    const requirement = requirements.get(skipped.hunkId);
-    if (requirement === undefined) {
+function collectSkippedLines(
+  snapshot: ReviewSnapshot,
+  skippedSpans: readonly ReviewRouteSkip[],
+  requirements: ReadonlyMap<string, ChangedLineRequirement>,
+): ReadonlyMap<
+  string,
+  { readonly line: ChangedLine; readonly reason: string }
+> {
+  const result = new Map<
+    string,
+    { readonly line: ChangedLine; readonly reason: string }
+  >();
+  for (const skip of skippedSpans) {
+    if (skip.reason.trim().length === 0) {
       throw new ReviewCoverageError(
-        `Skip references unknown hunk ${skipped.hunkId}.`,
+        `Skipped span ${skip.span.path} requires a non-empty reason.`,
       );
     }
-    if (requirement.type === "carried-forward") {
-      throw new ReviewCoverageError(
-        `Carried-forward hunk ${skipped.hunkId} cannot be skipped.`,
-      );
+    for (const line of resolvedSpanChangedLines(snapshot, skip.span)) {
+      const key = changedLineKey(line);
+      const requirement = requirements.get(key);
+      if (requirement === undefined) {
+        throw new ReviewCoverageError(
+          `Skip references ${describeLine(snapshot, line)}, which has no review requirement.`,
+        );
+      }
+      if (requirement.type === "carried-forward") {
+        throw new ReviewCoverageError(
+          `${describeLine(snapshot, line)} was carried forward and cannot be skipped.`,
+        );
+      }
+      if (!isNeedsReviewReasonSkippable(requirement.reason)) {
+        throw new ReviewCoverageError(
+          `${describeLine(snapshot, line)} has an unresolved comment and cannot be skipped.`,
+        );
+      }
+      if (result.has(key)) {
+        throw new ReviewCoverageError(
+          `${describeLine(snapshot, line)} is skipped more than once.`,
+        );
+      }
+      result.set(key, { line, reason: skip.reason });
     }
-    if (!isNeedsReviewReasonSkippable(requirement.reason)) {
-      throw new ReviewCoverageError(
-        `Hunk ${skipped.hunkId} has an unresolved comment and cannot be skipped.`,
-      );
-    }
-    if (skipped.reason.trim().length === 0) {
-      throw new ReviewCoverageError(
-        `Skipped hunk ${skipped.hunkId} requires a non-empty reason.`,
-      );
-    }
-    if (result.has(skipped.hunkId)) {
-      throw new ReviewCoverageError(
-        `Hunk ${skipped.hunkId} is skipped more than once.`,
-      );
-    }
-    result.set(skipped.hunkId, skipped.reason);
   }
   return result;
+}
+
+function describeLine(snapshot: ReviewSnapshot, line: ChangedLine): string {
+  return describeChangedLines(snapshot, [line])[0] ?? "A changed line";
 }

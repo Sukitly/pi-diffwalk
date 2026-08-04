@@ -1,11 +1,16 @@
+import {
+  type ChangedLine,
+  changedLineKey,
+  listChangedLines,
+  listFileChangedLines,
+} from "./review-span.ts";
 import type {
-  DiffHunk,
+  ChangedLineRecord,
+  ChangedLineRequirement,
+  ChangeSide,
   FileChange,
-  HunkFingerprint,
-  HunkId,
-  HunkReviewRecord,
-  HunkReviewRequirement,
-  NeedsReviewHunk,
+  FileCoverage,
+  NeedsReviewReason,
   ReviewDelta,
   ReviewRound,
   ReviewSnapshot,
@@ -18,70 +23,256 @@ export class ReviewDeltaError extends Error {
   }
 }
 
-interface HunkEntry {
-  readonly hunk: DiffHunk;
-  readonly fileKey: string;
-}
-
-interface BaselineHunkEntry extends HunkEntry {
-  readonly record: HunkReviewRecord;
-}
+/**
+ * Beyond this many cells the quadratic alignment is replaced by occurrence
+ * matching. Alignment quality only affects which unchanged lines are carried
+ * forward, never coverage correctness.
+ */
+const MAX_ALIGNMENT_CELLS = 1_000_000;
 
 export function computeReviewDelta(
   snapshot: ReviewSnapshot,
   baseline?: ReviewRound,
 ): ReviewDelta {
-  const currentEntries = collectHunkEntries(snapshot);
+  assertUniqueFileChanges(snapshot);
+  const current = listChangedLines(snapshot);
+
   if (baseline === undefined) {
     return {
       currentSnapshotId: snapshot.id,
-      hunks: currentEntries.map(({ hunk }) => ({
+      lines: current.map((line) => ({
         type: "needs-review",
-        hunkId: hunk.id,
+        fileChangeId: line.fileChangeId,
+        side: line.side,
+        line: line.line,
         reason: "new",
       })),
-      removedHunkFingerprints: [],
+      removedLineCount: 0,
     };
   }
 
-  const baselineEntries = collectBaselineEntries(baseline);
-  const requirements = new Map<HunkId, HunkReviewRequirement>();
-  const consumedBaselineIds = new Set<HunkId>();
-  matchExactFingerprints(
-    currentEntries,
-    baselineEntries,
-    requirements,
-    consumedBaselineIds,
-  );
-  matchChangedHunks(
-    currentEntries,
-    baselineEntries,
-    requirements,
-    consumedBaselineIds,
-  );
+  assertBaselineRound(baseline);
+  const baselineByPath = new Map<string, FileCoverage>();
+  for (const file of baseline.coverage.files) {
+    baselineByPath.set(fileKey(file.oldPath, file.newPath), file);
+  }
+
+  const requirements = new Map<string, ChangedLineRequirement>();
+  const consumedFiles = new Set<string>();
+  let removedLineCount = 0;
+
+  for (const change of snapshot.changes) {
+    const changedLines = listFileChangedLines(change);
+    if (changedLines.length === 0) continue;
+    const key = coverageFileKey(change);
+    const previous = baselineByPath.get(key);
+    if (previous === undefined) {
+      for (const line of changedLines) {
+        requirements.set(changedLineKey(line), needsReview(line, "new"));
+      }
+      continue;
+    }
+    consumedFiles.add(key);
+    removedLineCount += alignFile(changedLines, previous.lines, requirements);
+  }
+
+  for (const [key, file] of baselineByPath) {
+    if (!consumedFiles.has(key)) removedLineCount += file.lines.length;
+  }
 
   return {
     currentSnapshotId: snapshot.id,
     baselineRoundId: baseline.id,
-    hunks: currentEntries.map(({ hunk }) => {
-      const requirement = requirements.get(hunk.id);
+    lines: current.map((line) => {
+      const requirement = requirements.get(changedLineKey(line));
       if (requirement === undefined) {
         throw new ReviewDeltaError(
-          `No review requirement was calculated for hunk ${hunk.id}.`,
+          `No review requirement was calculated for ${line.side} line ${line.line} of file change ${line.fileChangeId}.`,
         );
       }
       return requirement;
     }),
-    removedHunkFingerprints: baselineEntries
-      .filter(({ hunk }) => !consumedBaselineIds.has(hunk.id))
-      .map(({ hunk }) => hunk.fingerprint),
+    removedLineCount,
   };
 }
 
-export function listSnapshotHunks(
-  snapshot: ReviewSnapshot,
-): readonly DiffHunk[] {
-  return collectHunkEntries(snapshot).map(({ hunk }) => hunk);
+/** Returns the number of baseline lines that no longer exist in this file. */
+function alignFile(
+  current: readonly ChangedLine[],
+  previous: readonly ChangedLineRecord[],
+  requirements: Map<string, ChangedLineRequirement>,
+): number {
+  const pairs = alignSequences(
+    current.map((line) => lineKey(line.side, line.text)),
+    previous.map((record) => lineKey(record.side, record.text)),
+  );
+  const matchedPrevious = new Set<number>();
+
+  for (const [currentIndex, previousIndex] of pairs) {
+    const line = current[currentIndex];
+    const record = previous[previousIndex];
+    if (line === undefined || record === undefined) continue;
+    matchedPrevious.add(previousIndex);
+    requirements.set(changedLineKey(line), fromRecord(line, record));
+  }
+
+  for (const line of current) {
+    const key = changedLineKey(line);
+    if (!requirements.has(key)) {
+      requirements.set(key, needsReview(line, "new"));
+    }
+  }
+
+  return previous.length - matchedPrevious.size;
+}
+
+function fromRecord(
+  line: ChangedLine,
+  record: ChangedLineRecord,
+): ChangedLineRequirement {
+  switch (record.disposition) {
+    case "reviewed-without-comment":
+      return {
+        type: "carried-forward",
+        fileChangeId: line.fileChangeId,
+        side: line.side,
+        line: line.line,
+        reviewedInRoundId: record.reviewedInRoundId,
+      };
+    case "commented":
+      return needsReview(line, "unresolved-comment");
+    case "skipped":
+      return needsReview(line, "previously-skipped");
+  }
+}
+
+function needsReview(
+  line: ChangedLine,
+  reason: NeedsReviewReason,
+): ChangedLineRequirement {
+  return {
+    type: "needs-review",
+    fileChangeId: line.fileChangeId,
+    side: line.side,
+    line: line.line,
+    reason,
+  };
+}
+
+/**
+ * Longest common subsequence over changed-line keys, after stripping the common
+ * prefix and suffix. Returns index pairs of aligned entries.
+ */
+export function alignSequences(
+  left: readonly string[],
+  right: readonly string[],
+): readonly (readonly [number, number])[] {
+  const pairs: [number, number][] = [];
+  let start = 0;
+  while (
+    start < left.length &&
+    start < right.length &&
+    left[start] === right[start]
+  ) {
+    pairs.push([start, start]);
+    start += 1;
+  }
+
+  let leftEnd = left.length - 1;
+  let rightEnd = right.length - 1;
+  const tail: [number, number][] = [];
+  while (
+    leftEnd >= start &&
+    rightEnd >= start &&
+    left[leftEnd] === right[rightEnd]
+  ) {
+    tail.push([leftEnd, rightEnd]);
+    leftEnd -= 1;
+    rightEnd -= 1;
+  }
+
+  const leftMiddle = left.slice(start, leftEnd + 1);
+  const rightMiddle = right.slice(start, rightEnd + 1);
+  const middle =
+    leftMiddle.length * rightMiddle.length > MAX_ALIGNMENT_CELLS
+      ? matchByOccurrence(leftMiddle, rightMiddle)
+      : longestCommonSubsequence(leftMiddle, rightMiddle);
+  for (const [leftIndex, rightIndex] of middle) {
+    pairs.push([leftIndex + start, rightIndex + start]);
+  }
+
+  pairs.push(...tail.reverse());
+  return pairs;
+}
+
+function longestCommonSubsequence(
+  left: readonly string[],
+  right: readonly string[],
+): readonly (readonly [number, number])[] {
+  if (left.length === 0 || right.length === 0) return [];
+  const width = right.length + 1;
+  const table = new Int32Array((left.length + 1) * width);
+  for (let i = left.length - 1; i >= 0; i -= 1) {
+    for (let j = right.length - 1; j >= 0; j -= 1) {
+      table[i * width + j] =
+        left[i] === right[j]
+          ? (table[(i + 1) * width + j + 1] ?? 0) + 1
+          : Math.max(
+              table[(i + 1) * width + j] ?? 0,
+              table[i * width + j + 1] ?? 0,
+            );
+    }
+  }
+
+  const pairs: [number, number][] = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length && j < right.length) {
+    if (left[i] === right[j]) {
+      pairs.push([i, j]);
+      i += 1;
+      j += 1;
+    } else if (
+      (table[(i + 1) * width + j] ?? 0) >= (table[i * width + j + 1] ?? 0)
+    ) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return pairs;
+}
+
+function matchByOccurrence(
+  left: readonly string[],
+  right: readonly string[],
+): readonly (readonly [number, number])[] {
+  const rightIndexes = new Map<string, number[]>();
+  for (const [index, key] of right.entries()) {
+    const list = rightIndexes.get(key) ?? [];
+    list.push(index);
+    rightIndexes.set(key, list);
+  }
+  const cursors = new Map<string, number>();
+  const pairs: [number, number][] = [];
+  let lastRight = -1;
+  for (const [leftIndex, key] of left.entries()) {
+    const candidates = rightIndexes.get(key);
+    if (candidates === undefined) continue;
+    let cursor = cursors.get(key) ?? 0;
+    while (
+      cursor < candidates.length &&
+      (candidates[cursor] ?? -1) <= lastRight
+    ) {
+      cursor += 1;
+    }
+    const rightIndex = candidates[cursor];
+    if (rightIndex === undefined) continue;
+    cursors.set(key, cursor + 1);
+    lastRight = rightIndex;
+    pairs.push([leftIndex, rightIndex]);
+  }
+  return pairs;
 }
 
 export function assertReviewDeltaMatchesSnapshot(
@@ -94,81 +285,56 @@ export function assertReviewDeltaMatchesSnapshot(
     );
   }
 
-  const snapshotHunkIds = new Set(
-    listSnapshotHunks(snapshot).map((hunk) => hunk.id),
+  const expected = new Set(
+    listChangedLines(snapshot).map((line) => changedLineKey(line)),
   );
-  const requirementHunkIds = new Set<HunkId>();
-  for (const requirement of delta.hunks) {
-    if (!snapshotHunkIds.has(requirement.hunkId)) {
+  const seen = new Set<string>();
+  for (const requirement of delta.lines) {
+    const key = changedLineKey(requirement);
+    if (!expected.has(key)) {
       throw new ReviewDeltaError(
-        `Review delta contains unknown hunk ${requirement.hunkId}.`,
+        `Review delta contains ${requirement.side} line ${requirement.line} of file change ${requirement.fileChangeId}, which is not a changed line in this snapshot.`,
       );
     }
-    if (requirementHunkIds.has(requirement.hunkId)) {
+    if (seen.has(key)) {
       throw new ReviewDeltaError(
-        `Review delta contains duplicate hunk ${requirement.hunkId}.`,
+        `Review delta contains duplicate ${requirement.side} line ${requirement.line} of file change ${requirement.fileChangeId}.`,
       );
     }
-    requirementHunkIds.add(requirement.hunkId);
+    seen.add(key);
   }
-  for (const hunkId of snapshotHunkIds) {
-    if (!requirementHunkIds.has(hunkId)) {
-      throw new ReviewDeltaError(
-        `Review delta does not cover snapshot hunk ${hunkId}.`,
-      );
-    }
+  if (seen.size !== expected.size) {
+    throw new ReviewDeltaError(
+      `Review delta covers ${seen.size} changed lines, but snapshot ${snapshot.id} has ${expected.size}.`,
+    );
   }
 }
 
 export function isNeedsReviewReasonSkippable(
-  reason: NeedsReviewHunk["reason"],
+  reason: NeedsReviewReason,
 ): boolean {
   switch (reason) {
     case "unresolved-comment":
       return false;
     case "new":
-    case "changed":
     case "previously-skipped":
-    case "ambiguous-match":
       return true;
   }
 }
 
-function collectHunkEntries(snapshot: ReviewSnapshot): readonly HunkEntry[] {
-  const entries: HunkEntry[] = [];
-  const seenHunkIds = new Set<HunkId>();
-  const seenFileChangeIds = new Set<string>();
-
+function assertUniqueFileChanges(snapshot: ReviewSnapshot): void {
+  const seen = new Set<string>();
   for (const change of snapshot.changes) {
-    if (seenFileChangeIds.has(change.id)) {
+    if (seen.has(change.id)) {
       throw new ReviewDeltaError(
         `Snapshot ${snapshot.id} contains duplicate file change ID ${change.id}.`,
       );
     }
-    seenFileChangeIds.add(change.id);
-    if (change.content.kind !== "text") continue;
-    for (const hunk of change.content.hunks) {
-      if (hunk.fileChangeId !== change.id) {
-        throw new ReviewDeltaError(
-          `Hunk ${hunk.id} references file change ${hunk.fileChangeId}, but its parent is ${change.id}.`,
-        );
-      }
-      if (seenHunkIds.has(hunk.id)) {
-        throw new ReviewDeltaError(
-          `Snapshot ${snapshot.id} contains duplicate hunk ID ${hunk.id}.`,
-        );
-      }
-      seenHunkIds.add(hunk.id);
-      entries.push({ hunk, fileKey: fileKey(change) });
-    }
+    seen.add(change.id);
   }
-
-  return entries;
 }
 
-function collectBaselineEntries(
-  baseline: ReviewRound,
-): readonly BaselineHunkEntry[] {
+function assertBaselineRound(baseline: ReviewRound): void {
   if (baseline.delta.currentSnapshotId !== baseline.snapshot.id) {
     throw new ReviewDeltaError(
       `Baseline round ${baseline.id} delta references snapshot ${baseline.delta.currentSnapshotId}, not ${baseline.snapshot.id}.`,
@@ -179,236 +345,29 @@ function collectBaselineEntries(
       `Baseline round ${baseline.id} coverage references snapshot ${baseline.coverage.snapshotId}, not ${baseline.snapshot.id}.`,
     );
   }
-
-  const hunkEntries = collectHunkEntries(baseline.snapshot);
-  const records = new Map<HunkId, HunkReviewRecord>();
-  for (const record of baseline.coverage.records) {
-    if (records.has(record.hunkId)) {
+  const seen = new Set<string>();
+  for (const file of baseline.coverage.files) {
+    const key = fileKey(file.oldPath, file.newPath);
+    if (seen.has(key)) {
       throw new ReviewDeltaError(
-        `Baseline round ${baseline.id} contains duplicate coverage for hunk ${record.hunkId}.`,
+        `Baseline round ${baseline.id} contains duplicate coverage for ${key}.`,
       );
     }
-    records.set(record.hunkId, record);
-  }
-
-  const baselineHunkIds = new Set(hunkEntries.map(({ hunk }) => hunk.id));
-  for (const record of baseline.coverage.records) {
-    if (!baselineHunkIds.has(record.hunkId)) {
-      throw new ReviewDeltaError(
-        `Baseline round ${baseline.id} contains coverage for unknown hunk ${record.hunkId}.`,
-      );
-    }
-  }
-
-  return hunkEntries.map((entry) => {
-    const record = records.get(entry.hunk.id);
-    if (record === undefined) {
-      throw new ReviewDeltaError(
-        `Baseline round ${baseline.id} has no coverage for hunk ${entry.hunk.id}.`,
-      );
-    }
-    if (record.fingerprint !== entry.hunk.fingerprint) {
-      throw new ReviewDeltaError(
-        `Baseline coverage fingerprint ${record.fingerprint} does not match hunk ${entry.hunk.id} fingerprint ${entry.hunk.fingerprint}.`,
-      );
-    }
-    return { ...entry, record };
-  });
-}
-
-function matchExactFingerprints(
-  currentEntries: readonly HunkEntry[],
-  baselineEntries: readonly BaselineHunkEntry[],
-  requirements: Map<HunkId, HunkReviewRequirement>,
-  consumedBaselineIds: Set<HunkId>,
-): void {
-  const currentGroups = groupByFingerprint(currentEntries);
-  const baselineGroups = groupByFingerprint(baselineEntries);
-
-  for (const [fingerprint, currentGroup] of currentGroups) {
-    const baselineGroup = baselineGroups.get(fingerprint);
-    if (baselineGroup === undefined) continue;
-
-    if (currentGroup.length === 1 && baselineGroup.length === 1) {
-      const current = requiredAt(currentGroup, 0, "current exact hunk");
-      const previous = requiredAt(baselineGroup, 0, "baseline exact hunk");
-      requirements.set(
-        current.hunk.id,
-        requirementFromExactMatch(current.hunk, previous.record),
-      );
-      consumedBaselineIds.add(previous.hunk.id);
-      continue;
-    }
-
-    for (const current of currentGroup) {
-      requirements.set(current.hunk.id, {
-        type: "needs-review",
-        hunkId: current.hunk.id,
-        reason: "ambiguous-match",
-        previousFingerprint: fingerprint,
-      });
-    }
-    for (
-      let index = 0;
-      index < Math.min(currentGroup.length, baselineGroup.length);
-      index += 1
-    ) {
-      consumedBaselineIds.add(
-        requiredAt(baselineGroup, index, "ambiguous baseline hunk").hunk.id,
-      );
-    }
+    seen.add(key);
   }
 }
 
-function matchChangedHunks(
-  currentEntries: readonly HunkEntry[],
-  baselineEntries: readonly BaselineHunkEntry[],
-  requirements: Map<HunkId, HunkReviewRequirement>,
-  consumedBaselineIds: Set<HunkId>,
-): void {
-  const currentUnmatched = currentEntries.filter(
-    ({ hunk }) => !requirements.has(hunk.id),
-  );
-  const baselineUnmatched = baselineEntries.filter(
-    ({ hunk }) => !consumedBaselineIds.has(hunk.id),
-  );
-  const candidatesByCurrent = new Map<HunkId, readonly BaselineHunkEntry[]>();
-  const currentIdsByBaseline = new Map<HunkId, HunkId[]>();
-
-  for (const current of currentUnmatched) {
-    const candidates = baselineUnmatched.filter(
-      (previous) =>
-        previous.fileKey === current.fileKey &&
-        rangesOverlap(previous.hunk, current.hunk),
-    );
-    candidatesByCurrent.set(current.hunk.id, candidates);
-    for (const candidate of candidates) {
-      const currentIds = currentIdsByBaseline.get(candidate.hunk.id) ?? [];
-      currentIds.push(current.hunk.id);
-      currentIdsByBaseline.set(candidate.hunk.id, currentIds);
-    }
-  }
-
-  for (const current of currentUnmatched) {
-    const candidates = candidatesByCurrent.get(current.hunk.id) ?? [];
-    if (candidates.length === 0) {
-      requirements.set(current.hunk.id, {
-        type: "needs-review",
-        hunkId: current.hunk.id,
-        reason: "new",
-      });
-      continue;
-    }
-
-    const candidate =
-      candidates.length === 1
-        ? requiredAt(candidates, 0, "changed hunk candidate")
-        : undefined;
-    const reverseCandidates =
-      candidate === undefined
-        ? []
-        : (currentIdsByBaseline.get(candidate.hunk.id) ?? []);
-    if (candidate !== undefined && reverseCandidates.length === 1) {
-      requirements.set(
-        current.hunk.id,
-        requirementFromChangedMatch(current.hunk, candidate.record),
-      );
-      consumedBaselineIds.add(candidate.hunk.id);
-      continue;
-    }
-
-    requirements.set(current.hunk.id, {
-      type: "needs-review",
-      hunkId: current.hunk.id,
-      reason: "ambiguous-match",
-    });
-    for (const ambiguousCandidate of candidates) {
-      consumedBaselineIds.add(ambiguousCandidate.hunk.id);
-    }
-  }
+export function fileKey(
+  oldPath: string | undefined,
+  newPath: string | undefined,
+): string {
+  return JSON.stringify([oldPath ?? null, newPath ?? null]);
 }
 
-function requirementFromExactMatch(
-  current: DiffHunk,
-  record: HunkReviewRecord,
-): HunkReviewRequirement {
-  switch (record.disposition) {
-    case "reviewed-without-comment":
-      return {
-        type: "carried-forward",
-        hunkId: current.id,
-        reviewedInRoundId: record.reviewedInRoundId,
-      };
-    case "commented":
-      return needsReviewFromRecord(current, record, "unresolved-comment");
-    case "skipped":
-      return needsReviewFromRecord(current, record, "previously-skipped");
-  }
+export function coverageFileKey(change: FileChange): string {
+  return fileKey(change.oldPath, change.newPath);
 }
 
-function requirementFromChangedMatch(
-  current: DiffHunk,
-  record: HunkReviewRecord,
-): NeedsReviewHunk {
-  switch (record.disposition) {
-    case "commented":
-      return needsReviewFromRecord(current, record, "unresolved-comment");
-    case "skipped":
-      return needsReviewFromRecord(current, record, "previously-skipped");
-    case "reviewed-without-comment":
-      return needsReviewFromRecord(current, record, "changed");
-  }
-}
-
-function needsReviewFromRecord(
-  current: DiffHunk,
-  record: HunkReviewRecord,
-  reason: NeedsReviewHunk["reason"],
-): NeedsReviewHunk {
-  return {
-    type: "needs-review",
-    hunkId: current.id,
-    reason,
-    previousFingerprint: record.fingerprint,
-  };
-}
-
-function groupByFingerprint<Entry extends HunkEntry>(
-  entries: readonly Entry[],
-): Map<HunkFingerprint, Entry[]> {
-  const groups = new Map<HunkFingerprint, Entry[]>();
-  for (const entry of entries) {
-    const group = groups.get(entry.hunk.fingerprint) ?? [];
-    group.push(entry);
-    groups.set(entry.hunk.fingerprint, group);
-  }
-  return groups;
-}
-
-function rangesOverlap(left: DiffHunk, right: DiffHunk): boolean {
-  const leftStart = left.header.newStart;
-  const leftEnd = leftStart + Math.max(left.header.newCount, 1);
-  const rightStart = right.header.newStart;
-  const rightEnd = rightStart + Math.max(right.header.newCount, 1);
-  return leftStart < rightEnd && rightStart < leftEnd;
-}
-
-function fileKey(change: FileChange): string {
-  return JSON.stringify({
-    status: change.status,
-    oldPath: change.oldPath,
-    newPath: change.newPath,
-  });
-}
-
-function requiredAt<Value>(
-  values: readonly Value[],
-  index: number,
-  label: string,
-): Value {
-  const value = values[index];
-  if (value === undefined) {
-    throw new ReviewDeltaError(`Missing ${label} at index ${index}.`);
-  }
-  return value;
+function lineKey(side: ChangeSide, text: string): string {
+  return `${side}\u0000${text}`;
 }

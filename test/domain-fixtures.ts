@@ -1,70 +1,49 @@
 import type {
-  DiffHunk,
+  ChangedLineRecord,
+  DiffLine,
   FileChange,
   FileChangeId,
+  FileChangeSource,
   FileChangeStatus,
+  FileCoverage,
   GitObjectId,
-  HunkFingerprint,
-  HunkId,
-  HunkReviewRecord,
   ReviewRound,
   ReviewRoundId,
   ReviewSeriesId,
   ReviewSnapshot,
+  ReviewSpan,
   SnapshotId,
   StateFingerprint,
 } from "../src/types.ts";
 
-export interface HunkFixture {
-  readonly id: string;
-  readonly fingerprint: string;
+/**
+ * One changed file, written as a unified line spec.
+ *
+ * Each entry starts with a diff marker: a space for context, `+` for an added
+ * line, `-` for a removed line. The spec covers the whole file, which is what
+ * the snapshot model stores.
+ */
+export interface FileFixture {
   readonly path?: string;
-  readonly start?: number;
-  readonly count?: number;
+  readonly oldPath?: string;
   readonly status?: FileChangeStatus;
+  readonly source?: FileChangeSource;
+  readonly lines: readonly string[];
 }
 
 export interface SnapshotFixtureOptions {
   readonly repositoryRoot?: string;
   readonly targetRef?: string;
+  readonly changes?: readonly FileChange[];
+  readonly notices?: ReviewSnapshot["notices"];
 }
 
 export function makeSnapshot(
   id: string,
-  hunkFixtures: readonly HunkFixture[],
+  files: readonly FileFixture[],
   options: SnapshotFixtureOptions = {},
 ): ReviewSnapshot {
-  const grouped = new Map<string, HunkFixture[]>();
-  for (const fixture of hunkFixtures) {
-    const path = fixture.path ?? "src/file.ts";
-    const status = fixture.status ?? "modified";
-    const key = JSON.stringify({ path, status });
-    const group = grouped.get(key) ?? [];
-    group.push(fixture);
-    grouped.set(key, group);
-  }
-
-  const changes: FileChange[] = [...grouped.values()].map((fixtures) => {
-    const first = requiredAt(fixtures, 0);
-    const path = first.path ?? "src/file.ts";
-    const status = first.status ?? "modified";
-    const fileChangeId = brand<FileChangeId>(`file:${status}:${path}`);
-    return {
-      id: fileChangeId,
-      source: "tracked",
-      status,
-      oldPath: status === "added" ? undefined : path,
-      newPath: status === "deleted" ? undefined : path,
-      oldMode: status === "added" ? undefined : "100644",
-      newMode: status === "deleted" ? undefined : "100644",
-      gitHeaderLines: [],
-      content: {
-        kind: "text",
-        hunks: fixtures.map((fixture) => makeHunk(fileChangeId, fixture)),
-      },
-    };
-  });
-
+  const changes = files.map((file) => makeFileChange(file));
   return {
     id: brand<SnapshotId>(id),
     repositoryRoot: options.repositoryRoot ?? "/repo",
@@ -80,53 +59,218 @@ export function makeSnapshot(
       unstagedFingerprint: brand<StateFingerprint>(`unstaged:${id}`),
       untrackedFingerprint: brand<StateFingerprint>(`untracked:${id}`),
     },
-    changes,
-    notices: [],
+    changes: [...changes, ...(options.changes ?? [])],
+    notices: options.notices ?? [],
   };
 }
 
-export function makeRound(input: {
+export function makeFileChange(file: FileFixture): FileChange {
+  const status = file.status ?? "modified";
+  const path = file.path ?? "src/file.ts";
+  const oldPath = status === "added" ? undefined : (file.oldPath ?? path);
+  const newPath = status === "deleted" ? undefined : path;
+  const lines = buildLines(file.lines);
+  return {
+    id: fileChangeId(status, path),
+    source: file.source ?? "tracked",
+    status,
+    oldPath,
+    newPath,
+    oldMode: status === "added" ? undefined : "100644",
+    newMode: status === "deleted" ? undefined : "100644",
+    gitHeaderLines: [],
+    content: {
+      kind: "text",
+      lines,
+      oldLineCount: lines.filter((line) => line.oldLine !== undefined).length,
+      newLineCount: lines.filter((line) => line.newLine !== undefined).length,
+      oldNoTrailingNewline: false,
+      newNoTrailingNewline: false,
+      suggestedSpans: buildSuggestedSpans(newPath ?? oldPath ?? path, lines),
+    },
+  };
+}
+
+function buildLines(spec: readonly string[]): readonly DiffLine[] {
+  const lines: DiffLine[] = [];
+  let oldLine = 1;
+  let newLine = 1;
+  for (const raw of spec) {
+    const marker = raw.slice(0, 1);
+    const text = raw.slice(1);
+    if (marker === "+") {
+      lines.push({ kind: "added", newLine, text });
+      newLine += 1;
+    } else if (marker === "-") {
+      lines.push({ kind: "removed", oldLine, text });
+      oldLine += 1;
+    } else {
+      lines.push({ kind: "context", oldLine, newLine, text });
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return lines;
+}
+
+/** One span per contiguous changed run, covering exactly the changed lines. */
+function buildSuggestedSpans(
+  path: string,
+  lines: readonly DiffLine[],
+): readonly ReviewSpan[] {
+  const spans: ReviewSpan[] = [];
+  let current: {
+    oldStart?: number;
+    oldEnd?: number;
+    newStart?: number;
+    newEnd?: number;
+  } | null = null;
+
+  const flush = (): void => {
+    if (current === null) return;
+    spans.push({ path, ...current });
+    current = null;
+  };
+
+  for (const line of lines) {
+    if (line.kind === "context") {
+      flush();
+      continue;
+    }
+    current ??= {};
+    if (line.oldLine !== undefined) {
+      current.oldStart ??= line.oldLine;
+      current.oldEnd = line.oldLine;
+    }
+    if (line.newLine !== undefined) {
+      current.newStart ??= line.newLine;
+      current.newEnd = line.newLine;
+    }
+  }
+  flush();
+  return spans;
+}
+
+export interface RoundFixtureInput {
   readonly id: string;
   readonly snapshot: ReviewSnapshot;
-  readonly records: readonly HunkReviewRecord[];
   readonly seriesId?: string;
   readonly sequence?: number;
   readonly baselineRoundId?: ReviewRoundId;
-}): ReviewRound {
+  /**
+   * Overrides keyed by `path:side:line`. Anything unlisted is recorded as
+   * reviewed without comment in this round.
+   */
+  readonly dispositions?: Readonly<
+    Record<string, "commented" | "skipped" | "reviewed-without-comment">
+  >;
+  readonly skipReason?: string;
+}
+
+export function makeRound(input: RoundFixtureInput): ReviewRound {
+  const roundIdValue = brand<ReviewRoundId>(input.id);
+  const dispositions = input.dispositions ?? {};
+  const skipReason = input.skipReason ?? "Fixture skip.";
+
+  const files: FileCoverage[] = [];
+  for (const change of input.snapshot.changes) {
+    if (change.content.kind !== "text") continue;
+    const path = change.newPath ?? change.oldPath ?? "";
+    const records: ChangedLineRecord[] = [];
+    for (const line of change.content.lines) {
+      if (line.kind === "context") continue;
+      const side = line.kind === "added" ? "new" : "old";
+      const number = line.kind === "added" ? line.newLine : line.oldLine;
+      if (number === undefined) continue;
+      const disposition =
+        dispositions[`${path}:${side}:${number}`] ?? "reviewed-without-comment";
+      records.push(
+        disposition === "commented"
+          ? {
+              side,
+              line: number,
+              text: line.text,
+              disposition,
+              commentedInRoundId: roundIdValue,
+            }
+          : disposition === "skipped"
+            ? {
+                side,
+                line: number,
+                text: line.text,
+                disposition,
+                skippedInRoundId: roundIdValue,
+                skipReason,
+              }
+            : {
+                side,
+                line: number,
+                text: line.text,
+                disposition,
+                reviewedInRoundId: roundIdValue,
+              },
+      );
+    }
+    if (records.length === 0) continue;
+    files.push({
+      oldPath: change.oldPath,
+      newPath: change.newPath,
+      lines: records,
+    });
+  }
+
   return {
-    id: brand<ReviewRoundId>(input.id),
+    id: roundIdValue,
     seriesId: brand<ReviewSeriesId>(input.seriesId ?? "series"),
     sequence: input.sequence ?? 1,
     snapshot: input.snapshot,
     delta: {
       currentSnapshotId: input.snapshot.id,
       baselineRoundId: input.baselineRoundId,
-      hunks: listHunks(input.snapshot).map((hunk) => ({
-        type: "needs-review",
-        hunkId: hunk.id,
-        reason: "new",
-      })),
-      removedHunkFingerprints: [],
+      lines: files.flatMap((file) => {
+        const change = input.snapshot.changes.find(
+          (candidate) =>
+            candidate.oldPath === file.oldPath &&
+            candidate.newPath === file.newPath,
+        );
+        if (change === undefined) return [];
+        return file.lines.map((record) => ({
+          type: "needs-review" as const,
+          fileChangeId: change.id,
+          side: record.side,
+          line: record.line,
+          reason: "new" as const,
+        }));
+      }),
+      removedLineCount: 0,
     },
-    coverage: {
-      snapshotId: input.snapshot.id,
-      records: input.records,
-    },
+    coverage: { snapshotId: input.snapshot.id, files },
   };
 }
 
-export function listHunks(snapshot: ReviewSnapshot): readonly DiffHunk[] {
-  return snapshot.changes.flatMap((change) =>
-    change.content.kind === "text" ? change.content.hunks : [],
-  );
+export function span(
+  path: string,
+  ranges: {
+    readonly old?: readonly [number, number];
+    readonly new?: readonly [number, number];
+  },
+): ReviewSpan {
+  return {
+    path,
+    ...(ranges.old === undefined
+      ? {}
+      : { oldStart: ranges.old[0], oldEnd: ranges.old[1] }),
+    ...(ranges.new === undefined
+      ? {}
+      : { newStart: ranges.new[0], newEnd: ranges.new[1] }),
+  };
 }
 
-export function hunkId(value: string): HunkId {
-  return brand<HunkId>(value);
-}
-
-export function fingerprint(value: string): HunkFingerprint {
-  return brand<HunkFingerprint>(value);
+export function fileChangeId(
+  status: FileChangeStatus,
+  path: string,
+): FileChangeId {
+  return brand<FileChangeId>(`file:${status}:${path}`);
 }
 
 export function roundId(value: string): ReviewRoundId {
@@ -137,31 +281,6 @@ export function seriesId(value: string): ReviewSeriesId {
   return brand<ReviewSeriesId>(value);
 }
 
-function makeHunk(fileChangeId: FileChangeId, fixture: HunkFixture): DiffHunk {
-  const start = fixture.start ?? 1;
-  const count = fixture.count ?? 1;
-  return {
-    id: hunkId(fixture.id),
-    fingerprint: fingerprint(fixture.fingerprint),
-    fileChangeId,
-    header: {
-      raw: `@@ -${start},${count} +${start},${count} @@`,
-      oldStart: start,
-      oldCount: count,
-      newStart: start,
-      newCount: count,
-    },
-    lines: [],
-  };
-}
-
 function brand<Value extends string>(value: string): Value {
   return value as Value;
-}
-
-function requiredAt<Value>(values: readonly Value[], index: number): Value {
-  const value = values[index];
-  if (value === undefined)
-    throw new Error(`Missing fixture value at index ${index}.`);
-  return value;
 }

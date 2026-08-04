@@ -24,7 +24,7 @@ It is not intended to:
 - approve code on behalf of the human
 - replace tests, static analysis, security review, or production safeguards
 - treat an agent summary as proof that an implementation is correct
-- let the agent omit inconvenient hunks without an explicit reason
+- let the agent omit inconvenient changes without an explicit reason
 - modify code while the guided review is in progress
 
 ## Workflow
@@ -32,25 +32,31 @@ It is not intended to:
 Run:
 
 ```text
-/review [base]
+/diffwalk [base]
+/diffwalk --discard
 ```
 
 Examples:
 
 ```text
-/review
-/review origin/main
+/diffwalk
+/diffwalk origin/main
+/diffwalk --discard
 ```
 
-With no base argument, DiffWalk will review the current worktree against `HEAD`, including tracked and untracked changes. With a base argument, it will review the current working state against that Git revision.
+With no base argument, DiffWalk will review the current worktree against `HEAD`, including tracked and untracked changes. With a base argument, it will review the current working state against that Git revision. A Git revision cannot start with `-`, so an option never shadows a base.
+
+When the comparison contains no line that needs review, DiffWalk reports that and starts nothing. No snapshot is left pending, and the agent receives no route request. The report still names carried-forward lines from the previous round, changes that cannot be reviewed line by line, and snapshot notices.
+
+`/diffwalk --discard` drops a pending review without opening the walkthrough.
 
 The review flow is:
 
 1. DiffWalk captures a frozen snapshot of the current Git changes.
-2. Each file and hunk receives a stable identifier.
+2. Each changed line receives a stable address: a file, a side, and a line number.
 3. The current agent reads the task, the affected code, and the diff.
-4. The agent constructs a review route using the stable hunk identifiers.
-5. DiffWalk validates that every hunk requiring review is covered once or explicitly skipped with a reason.
+4. The agent constructs a review route by drawing spans over the regions a reviewer must understand together.
+5. DiffWalk validates that every changed line requiring review is covered once or explicitly skipped with a reason.
 6. The TUI walks the reviewer through the route one review unit at a time.
 7. The reviewer adds comments to specific lines as needed.
 8. A final page shows every comment before submission.
@@ -75,9 +81,15 @@ This is a default reasoning pattern, not a fixed file order. The agent may choos
 
 ## Review Units
 
-A review unit is one conceptual stop in the walkthrough. It may contain one hunk or several tightly related hunks.
+A review unit is one conceptual stop in the walkthrough. The agent defines it by drawing spans: a path with an old line range, a new line range, or both.
 
-In an incremental review, the planned route will contain only hunks marked `needs-review`. Unchanged hunks already reviewed without comment will be carried forward outside the planned route. They will remain visible in the review inventory and coverage summary, and the human will be able to inspect them explicitly without requiring the agent to route or skip them again.
+A unit is a semantic region, not a diff artifact. It may span several files, so an implementation and the test that proves it can be read together. It may cover part of a Git hunk, so two unrelated changes that happen to sit four lines apart do not have to be reviewed as one thing. It may include unchanged lines for context, and two units may share that context, because only changed lines count toward coverage.
+
+DiffWalk offers the Git hunk boundaries as suggested spans. They are a starting point, not the unit of review. A hunk is produced by the diff algorithm's context radius and has no relationship to what a reviewer must understand together.
+
+DiffWalk also detects exact relocations: a block of removed lines that reappears, byte-exact after indentation normalization, as a block of added lines elsewhere in the change. The inventory lists each detected move as coordinates so the agent can keep both sides of a relocation in one review unit and the human reads a move as a move, not as an unrelated deletion and addition. Detection is conservative and deterministic: it requires a globally unique anchor line, a constant indentation offset, and a minimum amount of relocated code, and it discards ambiguous candidates instead of guessing. The walkthrough screen does not yet mark moved regions.
+
+In an incremental review, the planned route will contain only lines marked `needs-review`. Lines already reviewed without comment will be carried forward outside the planned route. They will remain visible in the review inventory and coverage summary, and the human will be able to inspect them explicitly without requiring the agent to route or skip them again.
 
 Each unit should include:
 
@@ -85,40 +97,54 @@ Each unit should include:
 - **Context:** The call path, contract, or invariant needed to understand the code.
 - **What changed:** A direct description of the behavioral or structural change.
 - **Review focus:** Concrete questions the reviewer should answer.
-- **Diff:** The exact hunk content from the frozen snapshot.
+- **Diff:** The exact content of the region from the frozen snapshot.
 - **Next:** Why the following unit comes next.
 
 The agent provides the route and explanation. DiffWalk provides the diff content. The model must never generate or rewrite the displayed patch.
 
+## Route Quality Signals
+
+Route validation answers whether a route is complete. It cannot answer whether a route is thoughtful. After a route passes validation, DiffWalk checks three mechanical signals of a route that was copied from Git hunks instead of planned semantically:
+
+- every unit copies exactly one suggested span, so the route mirrors hunk boundaries (only for routes with at least three units)
+- single-file units walk files in alphabetical path order (only for routes touching at least three files)
+- both sides of a detected relocation are covered, but never by the same unit
+
+When a signal fires, DiffWalk returns it to the agent once instead of opening the walkthrough, so the agent can redraw the route before the human starts reading. The signals are advisory, not a quota: the agent may resubmit the same route and the walkthrough opens. A review is nudged at most once.
+
 ## TUI
 
-A review screen will contain the explanation and the selected diff unit:
+The walkthrough keeps the default screen focused on the review task and frozen diff. Press `e` when the full call path and agent explanation are needed.
 
 ```text
-[3 / 12] Authentication request validation
-src/auth/handler.ts  @@ -42,8 +48,19 @@
+DiffWalk • unit 3/12 • reviewed 2/12 • comments 1
+Authentication request validation • skipped 1 • unsupported 0 • snapshot check-on-submit
 
-Why here
-This is the external entry point for the authentication flow. The token
-parser depends on the invariant established here.
+Review this change
+The handler now validates issuer and audience.
 
-Context
-handler -> validateRequest -> parseToken -> createSession
+Focus
+• Is the trusted issuer read from configuration?
+• Do existing tokens remain compatible?
 
-What changed
-The handler now validates issuer and audience instead of checking only that
-an authorization header exists.
+Git snapshot diff
+"src/auth/handler.ts"  old 46-52  new 46-53
+     46    46   const request = await parse(raw)
+     47    47   const token = request.headers.authorization
+     48        - if (!token) return unauthorized()
+>          48 + const claims = await validateToken(token)
+           49 + if (claims.issuer !== config.issuer) return unauthorized()
+     49    50   return createSession(claims)
 
-Review focus
-- Is the trusted issuer read from configuration?
-- Do existing tokens remain compatible?
-- Does the failure response expose internal information?
+"test/auth/handler.test.ts"  new 88-94
+           88 + test("rejects a foreign issuer", async () => {
 
-  48   const token = request.headers.authorization
-- 49   if (!token) return unauthorized()
-+ 49   const claims = await validateToken(token)
-> 50   if (claims.issuer !== config.issuer) return unauthorized()
+j/k select line • c comment • n complete section • e details • s summary • Esc pause
 ```
+
+One unit can cover several files, so the implementation and the test that proves it are read together. The header shows the span each region belongs to.
+
+The normal flow is to select changed lines with `j` or `k`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `s` to inspect review progress and comments at any time.
 
 Controls:
 
@@ -126,17 +152,20 @@ Controls:
 |---|---|
 | `j`, `k`, `Up`, `Down` | Move through diff lines or scroll the current page |
 | `PageUp`, `PageDown` | Move by a viewport |
-| `n`, `p`, `Left`, `Right` | Move between review units |
+| `n` | Mark the current review unit as explicitly reviewed and continue; the last unit opens the submission page |
+| `p`, `Left`, `Right` | Move between review units without marking anything reviewed |
 | `c` | Add or edit a comment on the selected line |
 | `d` | Delete the comment on the selected line |
 | `e` | Open the complete agent explanation |
 | `i` | Open the frozen snapshot inventory |
 | `s` | Open the comment summary and submission page |
-| `Esc` | Return from a secondary page or open explicit cancellation confirmation |
+| `Esc` | Return from a secondary page or open the pause and discard screen |
 
-The inventory distinguishes planned, skipped, carried-forward, metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Text hunks outside the planned route remain available for explicit read-only inspection.
+The walkthrough footer shows only the most common keys. The table above is the complete set.
 
-A comment will retain its selected file path, old and new paths for renames, old and new line numbers, hunk identifier, review unit, and nearby diff text.
+The inventory lists one entry per changed file with its planned, skipped, and carried-forward line counts, plus metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Any changed region can be opened for explicit read-only inspection, including regions outside the planned route.
+
+A comment will retain its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context.
 
 ## Comment Submission
 
@@ -145,7 +174,7 @@ The final page will support two submission modes:
 - **Discuss first:** The agent investigates and responds to every comment without editing code.
 - **Apply change requests:** The agent applies direct change requests and explains questions or disagreements.
 
-The comments are returned only after the reviewer visits every planned review unit and submits the batch. This keeps the review uninterrupted and prevents the agent from changing later hunks while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
+The comments are returned only after the reviewer explicitly completes every planned review unit and submits the batch. An incomplete summary sends Enter back to the first pending unit. This keeps the review uninterrupted and prevents the agent from changing later regions while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
 
 ## Grounding and Coverage
 
@@ -155,11 +184,12 @@ DiffWalk will enforce the following rules:
 
 - Git output is the source of truth for all displayed changes.
 - The snapshot is immutable for the duration of a review.
-- Every hunk marked `needs-review` must appear exactly once in the route or be explicitly skipped.
-- A hunk marked `unresolved-comment` cannot be skipped.
-- Carried-forward hunks remain visible outside the planned route.
-- A skipped hunk must include a visible reason.
-- Unknown or duplicate hunk identifiers cause route validation to fail.
+- Every changed line marked `needs-review` must be covered by exactly one review unit or explicitly skipped.
+- A line marked `unresolved-comment` cannot be skipped.
+- Carried-forward lines remain visible outside the planned route.
+- A skipped region must include a visible reason.
+- A span naming an unknown file, an out-of-range line, or no changed line causes route validation to fail.
+- A changed line covered twice, or both covered and skipped, causes route validation to fail.
 - A changed worktree is detected before comment submission.
 - Comments retain stable snapshot locations even if the live worktree later changes.
 - Binary files, generated files, renames, deletions, and untracked files must be represented or explicitly reported as unsupported.
@@ -169,9 +199,9 @@ These rules do not make the agent's explanation correct. They prevent the explan
 ## Architecture
 
 ```text
-/review command
+/diffwalk command
     -> Git snapshot collector
-    -> diff parser and stable hunk IDs
+    -> whole-file reconstruction and changed-line addressing
     -> agent review-route prompt
     -> guided_review tool call
     -> route coverage validation
@@ -186,9 +216,13 @@ The source layout is:
 src/
   index.ts              Command and tool registration
   git-diff.ts           Snapshot collection and diff parsing
-  review-delta.ts       Incremental hunk classification and delta validation
+  review-span.ts        Changed-line atom, span resolution, and coverage arithmetic
+  review-delta.ts       Incremental changed-line classification and delta validation
+  review-moves.ts       Exact relocation detection over the frozen snapshot
+  in-progress-review.ts Resumable review lifecycle and submission eligibility
   route-validation.ts   Route coverage, ordering, and skip validation
-  review-coverage.ts    Submitted hunk outcome calculation
+  route-advisory.ts     Advisory route-quality signals and the one-shot nudge
+  review-coverage.ts    Submitted changed-line outcome calculation
   review-series.ts      Completed review round lifecycle
   review-comments.ts    Comment anchors, drafts, and submission results
   review-ui.ts           Interactive TUI
@@ -198,11 +232,17 @@ test/
   index.test.ts
   git-diff.test.ts
   review-delta.test.ts
+  review-moves.test.ts
+  in-progress-review.test.ts
   route-validation.test.ts
+  route-advisory.test.ts
   review-coverage.test.ts
   review-series.test.ts
   review-comments.test.ts
+  prompt-surface.test.ts
 ```
+
+Every standing string the model can see, including the kickoff prompt, the tool description, result instructions, and the advisory nudge, is rendered over fixed fixtures and pinned by a golden file in `test/prompt-surface.test.ts`. Changing the model-visible surface is an explicit, reviewable act. Validation error text is deliberately outside the pinned surface: it is conflict feedback and free to improve.
 
 ## Development Usage
 
@@ -213,7 +253,19 @@ npm ci --ignore-scripts
 pi -e ./src/index.ts
 ```
 
-Run `/review` from a Git worktree in interactive TUI mode. The current implementation keeps one pending review snapshot in memory. Starting another `/review` replaces the pending snapshot. Completed review rounds are not yet persisted across sessions.
+Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pause the current review without returning draft comments to the agent. Running `/diffwalk` again in the same extension process resumes the frozen route, explicit unit progress, draft comments, and submission mode when the worktree still matches the snapshot.
+
+If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
+
+Completed review rounds are kept in extension memory. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed lines as carried-forward instead of routing them again. Review state and completed rounds are not persisted across extension reloads or processes.
+
+## Review Lifecycle Domain
+
+The domain layer represents an in-progress review independently from a TUI, tool call, or agent conversation. An in-progress review owns its frozen snapshot, validated route, explicit per-unit progress, draft comments, submission mode, and optimistic version. Repository drift is derived by comparing the current repository state with the frozen snapshot rather than stored as a lifecycle state.
+
+The atom of the domain is the changed line, addressed by file, side, and line number. Review rounds record an outcome for every changed line, and the next round matches the two rounds by aligning each file's changed-line sequence. A line therefore stays carried forward when unrelated edits shift it or rewrite its neighbours.
+
+The lifecycle currently supports route preparation, readiness, submission into an immutable review round, and explicit discard. Submission is rejected until every planned unit is explicitly reviewed and the repository state captured at submission time still matches the snapshot. The extension resumes this domain object within one extension process and keeps completed rounds in memory as the delta baseline for the next round. Persistence across extension reloads or processes is not implemented.
 
 ## Design Principles
 
@@ -227,7 +279,7 @@ Review order should follow behavior, contracts, and data flow. Alphabetical file
 
 ### The patch is not model output
 
-The agent may explain a hunk, but the extension must render the hunk captured from Git.
+The agent may explain a region, but the extension must render the content captured from Git. The kickoff inventory tells the agent which lines changed, not what they contain; the agent reads the code with its own tools.
 
 ### Coverage is visible
 
@@ -247,20 +299,22 @@ The current version includes:
 
 - worktree and explicit-base snapshots
 - tracked and untracked file support
-- stable file and hunk identifiers
-- agent-planned review routes
-- complete route coverage validation
+- changed-line addressing with whole-file reconstruction
+- agent-planned review routes with semantic, possibly cross-file, review units
+- an inventory-only agent prompt that carries no file content
+- complete changed-line coverage validation
 - line-oriented diff navigation
 - inline comment editing
 - comment summary and batch submission
 - worktree drift detection
+- explicit pause and in-process resume of an interrupted review
+- in-memory incremental review rounds with carried-forward classification
 - parser, route, workflow, comment, and TUI tests
 
 Possible later work includes:
 
-- persisted incremental review rounds across sessions
+- persisted review state and rounds across extension reloads and processes
 - pausing a walkthrough to ask the agent a live question
-- resuming an interrupted review
 - GitHub pull request sources
 - posting comments back to a pull request
 - an independent critic agent in addition to the guiding agent

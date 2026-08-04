@@ -17,9 +17,12 @@ import {
 } from "@earendil-works/pi-tui";
 import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
 import {
-  ReviewSession,
-  type ReviewSnapshotVerifier,
-} from "../src/review-comments.ts";
+  attachReviewRoute,
+  createInProgressReview,
+  InProgressReviewError,
+} from "../src/in-progress-review.ts";
+import { computeReviewDelta } from "../src/review-delta.ts";
+import { createReviewSeries } from "../src/review-series.ts";
 import {
   GuidedReviewComponent,
   GuidedReviewUiUnavailableError,
@@ -30,11 +33,10 @@ import {
   validateReviewRoute,
 } from "../src/route-validation.ts";
 import type {
-  DiffLine,
   FileChange,
   FileChangeId,
   GuidedReviewResult,
-  HunkId,
+  InProgressReview,
   NoticeId,
   ReviewDelta,
   ReviewRoundId,
@@ -42,9 +44,10 @@ import type {
   ReviewRouteCandidate,
   ReviewSnapshot,
   ReviewSubmissionMode,
+  ReviewUnitId,
   SubmittedGuidedReviewResult,
 } from "../src/types.ts";
-import { hunkId, makeSnapshot } from "./domain-fixtures.ts";
+import { fileChangeId, makeSnapshot, span } from "./domain-fixtures.ts";
 
 interface UiFixture {
   readonly snapshot: ReviewSnapshot;
@@ -53,15 +56,20 @@ interface UiFixture {
   readonly route: ReviewRoute;
 }
 
+type SubmissionVerifier = (
+  snapshot: ReviewSnapshot,
+  signal: AbortSignal,
+) => Promise<void>;
+
 interface HarnessOptions {
   readonly theme?: Pick<Theme, "fg" | "bg" | "bold">;
-  readonly verifier?: ReviewSnapshotVerifier;
+  readonly verifier?: SubmissionVerifier;
 }
 
 interface ComponentHarness {
   readonly component: GuidedReviewComponent;
-  readonly session: ReviewSession;
   readonly terminal: FakeTerminal;
+  readonly state: { review: InProgressReview };
   readonly submittedModes: ReviewSubmissionMode[];
   readonly completedResults: SubmittedGuidedReviewResult[];
   readonly cancellations: { count: number };
@@ -103,155 +111,124 @@ const ansiTheme = {
   bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
 } satisfies Pick<Theme, "fg" | "bg" | "bold">;
 
+const metadataOnly: FileChange = {
+  id: "file:metadata:script.sh" as FileChangeId,
+  source: "tracked",
+  status: "mode-changed",
+  oldPath: "script.sh",
+  newPath: "script.sh",
+  oldMode: "100644",
+  newMode: "100755",
+  gitHeaderLines: ["old mode 100644", "new mode 100755"],
+  content: {
+    kind: "metadata-only",
+    gitBodyLines: [],
+    unsupportedReason: "This file change has no textual diff hunks.",
+  },
+};
+
+const addedBinary: FileChange = {
+  id: "file:binary:asset.bin" as FileChangeId,
+  source: "tracked",
+  status: "added",
+  newPath: "asset.bin",
+  newMode: "100644",
+  gitHeaderLines: [],
+  content: {
+    kind: "binary",
+    gitBodyLines: ["Binary files differ"],
+    unsupportedReason: "Binary content cannot be reviewed line by line.",
+  },
+};
+
+const deletedBinary: FileChange = {
+  id: "file:binary:removed.bin" as FileChangeId,
+  source: "tracked",
+  status: "deleted",
+  oldPath: "removed.bin",
+  oldMode: "100644",
+  gitHeaderLines: [],
+  content: {
+    kind: "binary",
+    gitBodyLines: ["Binary files differ"],
+    unsupportedReason: "Binary content cannot be reviewed line by line.",
+  },
+};
+
+const ENTRY_PATH = "src/entry \u6587\nfile.ts";
+const CONTRACT_PATH = "src/contract\u202egnp.ts";
+const CARRIED_PATH = "src/carried.ts";
+const SKIPPED_PATH = "src/generated.ts";
+
+/** Long added line used to exercise wrapping and horizontal truncation. */
+const LONG_ADDED = `+const value = validate(request.value) \u4e2d\u6587 ${"segment ".repeat(12)}TAIL_END`;
+
 function makeUiFixture(): UiFixture {
-  const base = makeSnapshot("snapshot-ui", [
-    {
-      id: "h-entry",
-      fingerprint: "fp-entry",
-      path: "src/entry 文\nfile.ts",
-      start: 10,
-      count: 10,
-    },
-    {
-      id: "h-contract",
-      fingerprint: "fp-contract",
-      path: "src/contract\u202egnp.ts",
-      start: 30,
-    },
-    {
-      id: "h-carried",
-      fingerprint: "fp-carried",
-      path: "src/carried.ts",
-      start: 40,
-    },
-    {
-      id: "h-skipped",
-      fingerprint: "fp-skipped",
-      path: "src/generated.ts",
-      start: 50,
-    },
-  ]);
-  const snapshotWithLines = replaceHunkLines(
-    base,
-    new Map([
-      [hunkId("h-entry"), makeEntryLines()],
-      [
-        hunkId("h-contract"),
-        [
-          {
-            index: 0,
-            kind: "added",
-            raw: "+export interface Contract { value: string }",
-            newLine: 30,
-          },
+  const snapshot = makeSnapshot(
+    "snapshot-ui",
+    [
+      {
+        path: ENTRY_PATH,
+        lines: [
+          " context line 0\u001b[31m",
+          " context line 1",
+          " context line 2",
+          " context line 3",
+          "-const value = request.value",
+          LONG_ADDED,
+          " context line 6",
+          " context line 7",
+          " context line 8",
         ],
-      ],
-      [
-        hunkId("h-carried"),
-        [
-          {
-            index: 0,
-            kind: "context",
-            raw: " export const carried = true",
-            oldLine: 40,
-            newLine: 40,
-          },
+      },
+      {
+        path: CONTRACT_PATH,
+        lines: [
+          " export interface Contract {",
+          "+export interface Contract { value: string }",
+          " }",
         ],
+      },
+      {
+        path: CARRIED_PATH,
+        lines: [" head", "+export const carried = true", " tail"],
+      },
+      {
+        path: SKIPPED_PATH,
+        lines: [" head", "+generated output", " tail"],
+      },
+    ],
+    {
+      changes: [metadataOnly, addedBinary, deletedBinary],
+      notices: [
+        {
+          id: brand<NoticeId>("notice:cancelled-layer"),
+          kind: "cancelled-layer-change",
+          filePath: "src/cancelled.ts",
+          message:
+            "Staged and unstaged changes cancel in the effective worktree.",
+        },
       ],
-      [
-        hunkId("h-skipped"),
-        [
-          {
-            index: 0,
-            kind: "added",
-            raw: "+generated output",
-            newLine: 50,
-          },
-        ],
-      ],
-    ]),
+    },
   );
-  const metadataOnly: FileChange = {
-    id: brand<FileChangeId>("file:metadata:script.sh"),
-    source: "tracked",
-    status: "mode-changed",
-    oldPath: "script.sh",
-    newPath: "script.sh",
-    oldMode: "100644",
-    newMode: "100755",
-    gitHeaderLines: ["old mode 100644", "new mode 100755"],
-    content: {
-      kind: "metadata-only",
-      gitBodyLines: [],
-      unsupportedReason: "This file change has no textual diff hunks.",
-    },
-  };
-  const addedBinary: FileChange = {
-    id: brand<FileChangeId>("file:binary:asset.bin"),
-    source: "tracked",
-    status: "added",
-    newPath: "asset.bin",
-    newMode: "100644",
-    gitHeaderLines: [],
-    content: {
-      kind: "binary",
-      gitBodyLines: ["Binary files differ"],
-      unsupportedReason: "Binary content cannot be reviewed line by line.",
-    },
-  };
-  const deletedBinary: FileChange = {
-    id: brand<FileChangeId>("file:binary:removed.bin"),
-    source: "tracked",
-    status: "deleted",
-    oldPath: "removed.bin",
-    oldMode: "100644",
-    gitHeaderLines: [],
-    content: {
-      kind: "binary",
-      gitBodyLines: ["Binary files differ"],
-      unsupportedReason: "Binary content cannot be reviewed line by line.",
-    },
-  };
-  const snapshot: ReviewSnapshot = {
-    ...snapshotWithLines,
-    changes: [
-      ...snapshotWithLines.changes,
-      metadataOnly,
-      addedBinary,
-      deletedBinary,
-    ],
-    notices: [
-      {
-        id: brand<NoticeId>("notice:cancelled-layer"),
-        kind: "cancelled-layer-change",
-        filePath: "src/cancelled.ts",
-        message:
-          "Staged and unstaged changes cancel in the effective worktree.",
-      },
-    ],
-  };
+
+  const baseDelta = computeReviewDelta(snapshot);
+  const carriedId = fileChangeId("modified", CARRIED_PATH);
   const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      { type: "needs-review", hunkId: hunkId("h-entry"), reason: "new" },
-      {
-        type: "needs-review",
-        hunkId: hunkId("h-contract"),
-        reason: "changed",
-      },
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h-carried"),
-        reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
-      },
-      {
-        type: "needs-review",
-        hunkId: hunkId("h-skipped"),
-        reason: "new",
-      },
-    ],
-    removedHunkFingerprints: [],
+    ...baseDelta,
+    lines: baseDelta.lines.map((line) =>
+      line.fileChangeId === carriedId
+        ? {
+            type: "carried-forward",
+            fileChangeId: line.fileChangeId,
+            side: line.side,
+            line: line.line,
+            reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
+          }
+        : line,
+    ),
   };
+
   const routeCandidate: ReviewRouteCandidate = {
     snapshotId: snapshot.id,
     units: [
@@ -266,7 +243,7 @@ function makeUiFixture(): UiFixture {
           "Does validation preserve compatibility?",
           "Does the failure path remain explicit?",
         ],
-        hunkIds: [hunkId("h-entry")],
+        spans: [span(ENTRY_PATH, { old: [1, 8], new: [1, 8] })],
       },
       {
         title: "Public contract",
@@ -274,12 +251,12 @@ function makeUiFixture(): UiFixture {
         context: "entry -> Contract",
         changeSummary: "The public contract now exposes the validated value.",
         reviewFocus: ["Is the type narrow enough?"],
-        hunkIds: [hunkId("h-contract")],
+        spans: [span(CONTRACT_PATH, { new: [1, 3] })],
       },
     ],
-    skippedHunks: [
+    skippedSpans: [
       {
-        hunkId: hunkId("h-skipped"),
+        span: span(SKIPPED_PATH, { new: [2, 2] }),
         reason: "Generated output is represented but reviewed at its source.",
       },
     ],
@@ -304,63 +281,61 @@ function makeLongExplanationFixture(): UiFixture {
   };
 }
 
-function makeEntryLines(): readonly DiffLine[] {
-  const lines: DiffLine[] = [];
-  for (let index = 0; index < 10; index += 1) {
-    if (index === 4) {
-      lines.push({
-        index,
-        kind: "removed",
-        raw: "-const value = request.value",
-        oldLine: 14,
-      });
-    } else if (index === 5) {
-      lines.push({
-        index,
-        kind: "added",
-        raw: `+const value = validate(request.value) 中文 ${"segment ".repeat(12)}TAIL_END`,
-        newLine: 14,
-      });
-    } else if (index === 9) {
-      lines.push({
-        index,
-        kind: "no-newline-marker",
-        raw: "\\ No newline at end of file",
-      });
-    } else {
-      lines.push({
-        index,
-        kind: "context",
-        raw: ` context line ${index}\u001b[31m`,
-        oldLine: 10 + index,
-        newLine: 10 + index,
-      });
-    }
-  }
-  return lines;
+function makeReview(fixture: UiFixture): InProgressReview {
+  return makeReviewWithRoute(fixture, fixture.route);
 }
 
-function replaceHunkLines(
-  snapshot: ReviewSnapshot,
-  linesByHunkId: ReadonlyMap<HunkId, readonly DiffLine[]>,
-): ReviewSnapshot {
+function makeReviewWithRoute(
+  fixture: UiFixture,
+  route: ReviewRoute,
+): InProgressReview {
+  const series = createReviewSeries({
+    repositoryRoot: fixture.snapshot.repositoryRoot,
+    sourceBranch: "feature",
+    targetRef: fixture.snapshot.comparison.targetRef,
+  });
+  const created = createInProgressReview({
+    series,
+    snapshot: fixture.snapshot,
+    delta: fixture.delta,
+    timestamp: "2026-01-01T00:00:00.000Z",
+  });
+  return attachReviewRoute(created, route, {
+    expectedVersion: created.version,
+    timestamp: "2026-01-01T00:01:00.000Z",
+  });
+}
+
+function forgeRoute(
+  fixture: UiFixture,
+  candidate: ReviewRouteCandidate,
+): ReviewRoute {
   return {
-    ...snapshot,
-    changes: snapshot.changes.map((change) =>
-      change.content.kind === "text"
-        ? {
-            ...change,
-            content: {
-              kind: "text",
-              hunks: change.content.hunks.map((hunk) => ({
-                ...hunk,
-                lines: linesByHunkId.get(hunk.id) ?? hunk.lines,
-              })),
-            },
-          }
-        : change,
-    ),
-  };
+    snapshotId: fixture.snapshot.id,
+    units: candidate.units.map((unit, index) => ({
+      id: brand<ReviewUnitId>(`review-unit:forged-${index}`),
+      title: unit.title,
+      whyHere: unit.whyHere,
+      context: unit.context,
+      changeSummary: unit.changeSummary,
+      reviewFocus: [...unit.reviewFocus],
+      spans: unit.spans.map((s) => ({
+        ...s,
+        fileChangeId: fileChangeId("modified", s.path),
+      })),
+    })),
+    skippedSpans: candidate.skippedSpans.map((skip) => ({
+      span: {
+        ...skip.span,
+        fileChangeId: fileChangeId("modified", skip.span.path),
+      },
+      reason: skip.reason,
+    })),
+  } as unknown as ReviewRoute;
+}
+
+function unusedSubmit(): Promise<SubmittedGuidedReviewResult> {
+  throw new Error("Submission must not run in this test.");
 }
 
 function createHarness(
@@ -371,7 +346,7 @@ function createHarness(
 ): ComponentHarness {
   const terminal = new FakeTerminal(columns, rows);
   const tui = new TUI(terminal, false);
-  const session = new ReviewSession(fixture.snapshot, fixture.route);
+  const state = { review: makeReview(fixture) };
   const submittedModes: ReviewSubmissionMode[] = [];
   const completedResults: SubmittedGuidedReviewResult[] = [];
   const cancellations = { count: 0 };
@@ -380,16 +355,27 @@ function createHarness(
     tui,
     theme: options.theme ?? plainTheme,
     keybindings: createKeybindings(),
-    snapshot: fixture.snapshot,
-    delta: fixture.delta,
+    review: state.review,
     route: fixture.route,
-    session,
-    onSubmit: (mode, signal) => {
-      submittedModes.push(mode);
-      return session.submit(mode, verifier, signal);
+    onReviewChange: (review) => {
+      state.review = review;
+    },
+    onSubmit: async (review, signal) => {
+      submittedModes.push(review.submissionMode);
+      await verifier(review.snapshot, signal);
+      signal.throwIfAborted();
+      return {
+        status: "submitted",
+        snapshotId: review.snapshot.id,
+        submissionMode: review.submissionMode,
+        comments: review.comments,
+      };
     },
     onComplete: (result) => completedResults.push(result),
-    onCancel: () => {
+    onPause: () => {
+      cancellations.count += 1;
+    },
+    onDiscard: () => {
       cancellations.count += 1;
     },
   });
@@ -397,8 +383,8 @@ function createHarness(
   tui.setFocus(component);
   return {
     component,
-    session,
     terminal,
+    state,
     submittedModes,
     completedResults,
     cancellations,
@@ -418,15 +404,23 @@ function press(component: GuidedReviewComponent, ...keys: string[]): void {
 }
 
 function visitEveryUnit(component: GuidedReviewComponent): void {
-  press(component, "n");
+  press(component, "n", "n");
 }
 
-test("renders agent commentary separately from the frozen Git diff", () => {
-  const output = renderText(createHarness(100, 30));
+test("keeps the walkthrough summary concise and full commentary separate", () => {
+  const harness = createHarness(100, 30);
+  const walkthrough = renderText(harness);
 
-  assert.match(output, /Agent explanation/);
-  assert.match(output, /Git snapshot diff/);
-  assert.match(output, /Request entry point/);
+  assert.match(walkthrough, /Review this change/);
+  assert.match(walkthrough, /Git snapshot diff/);
+  assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
+  assert.doesNotMatch(walkthrough, /Why here/);
+
+  press(harness.component, "e");
+  const explanation = renderText(harness);
+  assert.match(explanation, /Agent explanation/);
+  assert.match(explanation, /Why here/);
+  assert.doesNotMatch(explanation, /Git snapshot diff/);
 });
 
 test("renders every component row as one terminal line", () => {
@@ -449,11 +443,14 @@ test("escapes newline and bidi control characters in paths", () => {
 });
 
 test("escapes terminal control sequences in agent and Git text", () => {
-  const output = renderText(createHarness(100, 30));
+  const harness = createHarness(100, 30);
+  const walkthrough = renderText(harness);
+  assert.match(walkthrough, /context line 0\\x1b\[31m/);
 
-  assert.match(output, /\\x1b\[2J/);
-  assert.match(output, /context line 0\\x1b\[31m/);
-  assert.equal(output.includes(`${String.fromCharCode(27)}[2J`), false);
+  press(harness.component, "e");
+  const explanation = renderText(harness);
+  assert.match(explanation, /\\x1b\[2J/);
+  assert.equal(explanation.includes(`${String.fromCharCode(27)}[2J`), false);
 });
 
 test("never renders beyond terminal width or height with ANSI styling", () => {
@@ -486,17 +483,17 @@ test("never renders beyond terminal width or height with ANSI styling", () => {
 test("keeps every wrapped row of the selected diff line visible", () => {
   const harness = createHarness(54, 12);
 
-  press(harness.component, "j", "j", "j", "j", "j");
+  press(harness.component, "j");
   const output = renderText(harness);
 
-  assert.match(output, />\s+\d*\s+14\s+\+const value = validate/);
+  assert.match(output, />\s+\d*\s+5\s+\+const value = validate/);
   assert.match(output, /TAIL_END/);
   assert.match(output, /Git snapshot diff/);
 });
 
 test("pages through a selected line taller than the diff viewport", () => {
   const harness = createHarness(30, 8);
-  press(harness.component, "j", "j", "j", "j", "j");
+  press(harness.component, "j");
 
   const firstPage = renderText(harness);
   press(harness.component, "\u001b[6~", "\u001b[6~");
@@ -518,7 +515,123 @@ test("moves between semantic units and preserves each unit cursor", () => {
   press(harness.component, "p");
   assert.match(renderText(harness), /unit 1\/2/);
   press(harness.component, "c");
-  assert.match(renderText(harness), /context line 2/);
+  assert.match(renderText(harness), /const value = validate\(request\.value\)/);
+});
+
+test("pads a narrow span with unchanged context without making it reviewable", () => {
+  const snapshot = makeSnapshot("snapshot-pad", [
+    {
+      path: "src/pad.ts",
+      lines: [
+        " head 1",
+        " head 2",
+        " head 3",
+        " head 4",
+        "+changed",
+        " tail 1",
+        " tail 2",
+        " tail 3",
+        " tail 4",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Narrow span",
+        whyHere: "The agent framed only the changed line.",
+        context: "pad",
+        changeSummary: "Adds one line.",
+        reviewFocus: ["Is the surrounding code still correct?"],
+        spans: [span("src/pad.ts", { new: [5, 5] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  const harness = createHarness(80, 24, {
+    snapshot,
+    delta,
+    routeCandidate,
+    route,
+  });
+
+  const output = renderText(harness);
+  assert.match(output, /head 2/);
+  assert.match(output, /tail 3/);
+  assert.doesNotMatch(output, /head 1/);
+  assert.doesNotMatch(output, /tail 4/);
+  assert.match(output, />\s+5\s+\+changed/);
+
+  // Padding is display only: the unit still owns exactly one commentable line.
+  press(harness.component, "j", "j", "c", "O", "k", "\r");
+  assert.deepEqual(
+    harness.state.review.comments.map((comment) => [
+      comment.side,
+      comment.line,
+    ]),
+    [["new", 5]],
+  );
+});
+
+test("stops padding at a changed line owned by another unit", () => {
+  const snapshot = makeSnapshot("snapshot-neighbour", [
+    {
+      path: "src/pad.ts",
+      lines: [" head", "+first", " middle", "+second", " tail"],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Second change",
+        whyHere: "Reviewed on its own.",
+        context: "pad",
+        changeSummary: "Adds the second line.",
+        reviewFocus: ["Is it correct?"],
+        spans: [span("src/pad.ts", { new: [4, 4] })],
+      },
+      {
+        title: "First change",
+        whyHere: "Reviewed separately.",
+        context: "pad",
+        changeSummary: "Adds the first line.",
+        reviewFocus: ["Is it correct?"],
+        spans: [span("src/pad.ts", { new: [2, 2] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  const harness = createHarness(80, 24, {
+    snapshot,
+    delta,
+    routeCandidate,
+    route,
+  });
+
+  const output = renderText(harness);
+  assert.match(output, /middle/);
+  assert.match(output, /tail/);
+  assert.doesNotMatch(output, /\+first/);
+});
+
+test("moves between units with arrow keys without marking them reviewed", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "\u001b[C");
+  assert.match(renderText(harness), /unit 2\/2/);
+  assert.match(renderText(harness), /reviewed 0\/2/);
+
+  press(harness.component, "\u001b[D");
+  assert.match(renderText(harness), /unit 1\/2/);
+
+  press(harness.component, "n");
+  assert.match(renderText(harness), /reviewed 1\/2/);
 });
 
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
@@ -541,9 +654,10 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
     "\r",
   );
 
-  const comment = harness.session.getComments()[0];
+  const comment = harness.state.review.comments[0];
   assert.equal(comment?.body, "请检查\n失败路径");
-  assert.equal(comment?.diffLineIndex, 0);
+  assert.equal(comment?.side, "old");
+  assert.equal(comment?.line, 5);
   assert.match(renderText(harness), /comments 1/);
 });
 
@@ -565,7 +679,7 @@ test("prefills an existing comment and discards an edit without changing it", ()
   assert.match(renderText(harness), /Original/);
   press(harness.component, "!", "\u001b");
 
-  assert.equal(harness.session.getComments()[0]?.body, "Original");
+  assert.equal(harness.state.review.comments[0]?.body, "Original");
   assert.match(renderText(harness), /Git snapshot diff/);
 });
 
@@ -574,7 +688,7 @@ test("keeps comment input errors local to the editor", () => {
 
   press(harness.component, "c", "\r");
   assert.match(renderText(harness), /Review comment body must not be blank/);
-  assert.deepEqual(harness.session.getComments(), []);
+  assert.deepEqual(harness.state.review.comments, []);
   assert.ok(renderText(harness).includes(CURSOR_MARKER));
 
   press(harness.component, "V");
@@ -589,7 +703,7 @@ test("deletes the selected comment idempotently with transient feedback", () => 
   press(harness.component, "c", "D", "e", "l", "e", "t", "e", "\r");
 
   press(harness.component, "d");
-  assert.deepEqual(harness.session.getComments(), []);
+  assert.deepEqual(harness.state.review.comments, []);
   assert.match(renderText(harness), /Deleted the comment/);
 
   press(harness.component, "d");
@@ -613,7 +727,7 @@ test("pages the complete explanation by its current viewport", () => {
 test("pages inventory diffs by the current viewport", () => {
   const harness = createHarness(60, 8);
   press(harness.component, "i", "\r");
-  assert.match(renderText(harness), /context line 0/);
+  assert.match(renderText(harness), /context line 1/);
 
   press(harness.component, "\u001b[6~");
   const secondPage = renderText(harness);
@@ -649,14 +763,17 @@ test("opens carried-forward frozen hunks for explicit inspection", () => {
   assert.match(renderText(harness), /Review inventory/);
 });
 
-test("blocks submission until every planned unit has been visited", async () => {
+test("continues the first pending section before submission", async () => {
   const harness = createHarness(100, 40);
-  press(harness.component, "s", "\r");
+  press(harness.component, "s");
+  assert.match(renderText(harness), /Review incomplete/);
 
+  press(harness.component, "\r");
   assert.deepEqual(harness.submittedModes, []);
-  assert.match(renderText(harness), /Remaining: Public contract/);
+  assert.match(renderText(harness), /Continue reviewing this section/);
+  assert.match(renderText(harness), /unit 1\/2/);
 
-  press(harness.component, "\u001b", "n", "s", "\r");
+  press(harness.component, "n", "n", "\r");
   assert.deepEqual(harness.submittedModes, ["discuss-first"]);
   await waitForImmediate();
   assert.equal(harness.completedResults.length, 1);
@@ -664,13 +781,13 @@ test("blocks submission until every planned unit has been visited", async () => 
 
 test("shows the complete batch and selected submission mode", async () => {
   const harness = createHarness(100, 40);
-  press(harness.component, "c", "C", "h", "e", "c", "k", "\r", "n", "s");
+  press(harness.component, "c", "C", "h", "e", "c", "k", "\r", "n", "n");
 
   let output = renderText(harness);
   assert.match(output, /Comment batch and submission mode/);
   assert.match(output, /> Discuss first/);
   assert.match(output, /Check/);
-  assert.match(output, /Explicitly skipped hunks/);
+  assert.match(output, /Explicitly skipped regions/);
   assert.match(output, /Non-text changes and notices/);
 
   press(harness.component, "\u001b[C");
@@ -705,27 +822,27 @@ test("aborts pending verification and ignores its late result", async () => {
       });
     },
   });
-  press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "n", "s", "\r");
+  press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "n", "n", "\r");
   assert.match(renderText(harness), /Checking the frozen snapshot/);
 
   press(harness.component, "\u001b");
   assert.equal(verifierSignal?.aborted, true);
-  assert.match(renderText(harness), /Cancel guided review/);
+  assert.match(renderText(harness), /Leave DiffWalk/);
   press(harness.component, "\u001b");
   assert.match(renderText(harness), /verification was cancelled/);
 
   resolveVerification?.();
   await waitForImmediate();
   assert.equal(harness.completedResults.length, 0);
-  assert.equal(harness.session.getComments()[0]?.body, "Draft");
+  assert.equal(harness.state.review.comments[0]?.body, "Draft");
 });
 
-test("requires explicit confirmation before cancelling without exposing drafts", () => {
+test("pauses explicitly without discarding drafts", () => {
   const harness = createHarness(80, 24);
   press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "\u001b");
 
-  assert.match(renderText(harness), /Cancel guided review/);
-  assert.match(renderText(harness), /will not be\s+returned to the agent/);
+  assert.match(renderText(harness), /Leave DiffWalk/);
+  assert.match(renderText(harness), /Pause to keep 1 draft comment/);
   press(harness.component, "\u001b");
   assert.equal(harness.cancellations.count, 0);
   assert.match(renderText(harness), /Git snapshot diff/);
@@ -738,13 +855,13 @@ test("supports an empty walkthrough when no hunk requires review", async () => {
   const snapshot = makeSnapshot("snapshot-empty-ui", []);
   const delta: ReviewDelta = {
     currentSnapshotId: snapshot.id,
-    hunks: [],
-    removedHunkFingerprints: [],
+    lines: [],
+    removedLineCount: 0,
   };
   const routeCandidate: ReviewRouteCandidate = {
     snapshotId: snapshot.id,
     units: [],
-    skippedHunks: [],
+    skippedSpans: [],
   };
   const route = validateReviewRoute(snapshot, delta, routeCandidate);
   const harness = createHarness(80, 12, {
@@ -763,8 +880,9 @@ test("supports an empty walkthrough when no hunk requires review", async () => {
 
 test("validates missing route coverage before opening custom UI", async () => {
   const fixture = makeUiFixture();
-  const route = structuredClone(fixture.routeCandidate);
-  route.units.splice(1, 1);
+  const candidate = structuredClone(fixture.routeCandidate);
+  candidate.units.splice(1, 1);
+  const review = makeReviewWithRoute(fixture, forgeRoute(fixture, candidate));
   let customCalls = 0;
   const custom: ExtensionContext["ui"]["custom"] = async () => {
     customCalls += 1;
@@ -774,16 +892,13 @@ test("validates missing route coverage before opening custom UI", async () => {
   await assert.rejects(
     openGuidedReview(
       { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
-      {
-        snapshot: fixture.snapshot,
-        delta: fixture.delta,
-        route,
-        verifySnapshot: async () => {},
-      },
+      { review, onReviewChange: () => {}, onSubmit: unusedSubmit },
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewRouteValidationError);
-      assert.ok(error.issues.some((issue) => issue.code === "missing-hunk"));
+      assert.ok(
+        error.issues.some((issue) => issue.code === "missing-coverage"),
+      );
       return true;
     },
   );
@@ -792,10 +907,11 @@ test("validates missing route coverage before opening custom UI", async () => {
 
 test("rejects carried-forward route references before opening custom UI", async () => {
   const fixture = makeUiFixture();
-  const route = structuredClone(fixture.routeCandidate);
-  const firstUnit = route.units[0];
+  const candidate = structuredClone(fixture.routeCandidate);
+  const firstUnit = candidate.units[0];
   assert.ok(firstUnit);
-  firstUnit.hunkIds.push(hunkId("h-carried"));
+  firstUnit.spans.push(span(CARRIED_PATH, { new: [2, 2] }));
+  const review = makeReviewWithRoute(fixture, forgeRoute(fixture, candidate));
   let customCalls = 0;
   const custom: ExtensionContext["ui"]["custom"] = async () => {
     customCalls += 1;
@@ -805,12 +921,7 @@ test("rejects carried-forward route references before opening custom UI", async 
   await assert.rejects(
     openGuidedReview(
       { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
-      {
-        snapshot: fixture.snapshot,
-        delta: fixture.delta,
-        route,
-        verifySnapshot: async () => {},
-      },
+      { review, onReviewChange: () => {}, onSubmit: unusedSubmit },
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewRouteValidationError);
@@ -825,12 +936,12 @@ test("rejects carried-forward route references before opening custom UI", async 
   assert.equal(customCalls, 0);
 });
 
-test("opens a full-screen overlay and verifies before submission", async () => {
+test("opens a full-screen overlay and submits through one domain pipeline", async () => {
   const fixture = makeUiFixture();
   const terminal = new FakeTerminal(80, 24);
   const tui = new TUI(terminal, false);
-  let verifiedSnapshotId: string | undefined;
-  let verifiedSignal: AbortSignal | undefined;
+  let submittedReview: InProgressReview | undefined;
+  let submittedSignal: AbortSignal | undefined;
   let customOptions: Parameters<ExtensionContext["ui"]["custom"]>[1];
   const custom: ExtensionContext["ui"]["custom"] = async <Result>(
     factory: Parameters<ExtensionContext["ui"]["custom"]>[0],
@@ -849,7 +960,7 @@ test("opens a full-screen overlay and verifies before submission", async () => {
         tui.addChild(component);
         tui.setFocus(component);
         component.handleInput?.("n");
-        component.handleInput?.("s");
+        component.handleInput?.("n");
         component.handleInput?.("\r");
       }, reject);
     });
@@ -858,18 +969,27 @@ test("opens a full-screen overlay and verifies before submission", async () => {
   const result = await openGuidedReview(
     { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
     {
-      snapshot: fixture.snapshot,
-      delta: fixture.delta,
-      route: fixture.routeCandidate,
-      verifySnapshot: async (snapshot, signal) => {
-        verifiedSnapshotId = snapshot.id;
-        verifiedSignal = signal;
+      review: makeReview(fixture),
+      onReviewChange: () => {},
+      onSubmit: async (review, signal) => {
+        submittedReview = review;
+        submittedSignal = signal;
+        return {
+          status: "submitted",
+          snapshotId: review.snapshot.id,
+          submissionMode: review.submissionMode,
+          comments: review.comments,
+        };
       },
     },
   );
 
-  assert.equal(verifiedSnapshotId, fixture.snapshot.id);
-  assert.equal(verifiedSignal?.aborted, false);
+  assert.equal(submittedReview?.snapshot.id, fixture.snapshot.id);
+  assert.deepEqual(
+    submittedReview?.unitProgress.map((progress) => progress.disposition),
+    ["reviewed", "reviewed"],
+  );
+  assert.equal(submittedSignal?.aborted, false);
   assert.deepEqual(customOptions, {
     overlay: true,
     overlayOptions: {
@@ -882,7 +1002,7 @@ test("opens a full-screen overlay and verifies before submission", async () => {
   assert.equal(result.status, "submitted");
 });
 
-async function openWithVerificationFailure(error: Error): Promise<{
+async function openWithSubmissionFailure(error: Error): Promise<{
   readonly output: string;
   readonly outputAfterModeChange: string;
   readonly result: GuidedReviewResult;
@@ -916,7 +1036,7 @@ async function openWithVerificationFailure(error: Error): Promise<{
           "t",
           "\r",
           "n",
-          "s",
+          "n",
           "\r",
         ]) {
           component.handleInput?.(key);
@@ -936,10 +1056,9 @@ async function openWithVerificationFailure(error: Error): Promise<{
   const review = openGuidedReview(
     { mode: "tui", ui: { custom } as ExtensionContext["ui"] },
     {
-      snapshot: fixture.snapshot,
-      delta: fixture.delta,
-      route: fixture.routeCandidate,
-      verifySnapshot: async () => {
+      review: makeReview(fixture),
+      onReviewChange: () => {},
+      onSubmit: async () => {
         throw error;
       },
     },
@@ -952,7 +1071,7 @@ async function openWithVerificationFailure(error: Error): Promise<{
 }
 
 test("keeps repository drift in the UI with drafts preserved", async () => {
-  const failure = await openWithVerificationFailure(
+  const failure = await openWithSubmissionFailure(
     new ReviewSnapshotDriftError("repository changed"),
   );
 
@@ -963,11 +1082,25 @@ test("keeps repository drift in the UI with drafts preserved", async () => {
     failure.outputAfterModeChange,
     /Repository drift blocks submission/,
   );
-  assert.equal(failure.result.status, "cancelled");
+  assert.equal(failure.result.status, "paused");
+});
+
+test("keeps domain drift rejections in the UI with drafts preserved", async () => {
+  const failure = await openWithSubmissionFailure(
+    new InProgressReviewError(
+      "repository-drifted",
+      "Repository state no longer matches review snapshot snapshot-ui.",
+    ),
+  );
+
+  assert.match(failure.output, /Repository drift blocks submission/);
+  assert.match(failure.output, /no longer matches review snapshot/);
+  assert.match(failure.output, /Draft/);
+  assert.equal(failure.result.status, "paused");
 });
 
 test("keeps generic verification failures distinct from drift", async () => {
-  const failure = await openWithVerificationFailure(
+  const failure = await openWithSubmissionFailure(
     new Error("git executable unavailable"),
   );
 
@@ -975,7 +1108,7 @@ test("keeps generic verification failures distinct from drift", async () => {
   assert.match(failure.output, /git executable unavailable/);
   assert.doesNotMatch(failure.output, /Repository drift blocks submission/);
   assert.match(failure.outputAfterModeChange, /Snapshot verification failed/);
-  assert.equal(failure.result.status, "cancelled");
+  assert.equal(failure.result.status, "paused");
 });
 
 test("fails clearly before opening custom UI outside TUI mode", async () => {
@@ -986,10 +1119,9 @@ test("fails clearly before opening custom UI outside TUI mode", async () => {
     openGuidedReview(
       { mode: "print", ui },
       {
-        snapshot: fixture.snapshot,
-        delta: fixture.delta,
-        route: fixture.routeCandidate,
-        verifySnapshot: async () => {},
+        review: makeReview(fixture),
+        onReviewChange: () => {},
+        onSubmit: unusedSubmit,
       },
     ),
     (error: unknown) => {

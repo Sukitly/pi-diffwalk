@@ -4,372 +4,295 @@ import {
   computeReviewCoverage,
   ReviewCoverageError,
 } from "../src/review-coverage.ts";
-import { ReviewDeltaError } from "../src/review-delta.ts";
-import type { ReviewDelta } from "../src/types.ts";
+import { computeReviewDelta } from "../src/review-delta.ts";
+import { validateReviewRoute } from "../src/route-validation.ts";
+import type {
+  ChangedLineRecord,
+  ReviewCoverage,
+  ReviewRoute,
+  ReviewSnapshot,
+} from "../src/types.ts";
 import {
-  fingerprint,
-  hunkId,
+  fileChangeId,
+  makeRound,
   makeSnapshot,
   roundId,
+  span,
 } from "./domain-fixtures.ts";
 
-function firstRoundDelta(snapshotId: string): ReviewDelta {
-  return {
-    currentSnapshotId: snapshotId as ReviewDelta["currentSnapshotId"],
-    hunks: [
-      { type: "needs-review", hunkId: hunkId("h1"), reason: "new" },
-      { type: "needs-review", hunkId: hunkId("h2"), reason: "new" },
-      { type: "needs-review", hunkId: hunkId("h3"), reason: "new" },
-    ],
-    removedHunkFingerprints: [],
-  };
+const ROUND = roundId("round-current");
+
+function fixture(): ReviewSnapshot {
+  return makeSnapshot("snapshot-coverage", [
+    { path: "src/entry.ts", lines: [" head", "-old", "+new", " tail"] },
+    { path: "src/contract.ts", lines: [" head", "+value", " tail"] },
+  ]);
 }
 
-test("returns empty coverage for an empty snapshot", () => {
-  const snapshot = makeSnapshot("snapshot-empty", []);
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [],
-    removedHunkFingerprints: [],
-  };
+function routeFor(
+  snapshot: ReviewSnapshot,
+  skipped: readonly { path: string; line: number; reason: string }[] = [],
+): ReviewRoute {
+  const delta = computeReviewDelta(snapshot);
+  const skippedPaths = new Set(skipped.map((entry) => entry.path));
+  const units = [
+    ...(skippedPaths.has("src/entry.ts")
+      ? []
+      : [
+          {
+            title: "Entry",
+            whyHere: "Behavior starts here.",
+            context: "entry",
+            changeSummary: "Replaces the legacy call.",
+            reviewFocus: ["Is it correct?"],
+            spans: [span("src/entry.ts", { old: [2, 2], new: [2, 2] })],
+          },
+        ]),
+    ...(skippedPaths.has("src/contract.ts")
+      ? []
+      : [
+          {
+            title: "Contract",
+            whyHere: "The entry depends on it.",
+            context: "contract",
+            changeSummary: "Adds a field.",
+            reviewFocus: ["Is it compatible?"],
+            spans: [span("src/contract.ts", { new: [2, 2] })],
+          },
+        ]),
+  ];
+  return validateReviewRoute(snapshot, delta, {
+    snapshotId: snapshot.id,
+    units,
+    skippedSpans: skipped.map((entry) => ({
+      span: span(entry.path, { new: [entry.line, entry.line] }),
+      reason: entry.reason,
+    })),
+  });
+}
 
+function recordsOf(
+  coverage: ReviewCoverage,
+  path: string,
+): readonly ChangedLineRecord[] {
+  return (
+    coverage.files.find((file) => (file.newPath ?? file.oldPath) === path)
+      ?.lines ?? []
+  );
+}
+
+test("records every changed line of every changed file", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  const coverage = computeReviewCoverage(ROUND, snapshot, delta, {
+    commentedLines: [],
+    skippedSpans: routeFor(snapshot).skippedSpans,
+  });
+
+  assert.equal(coverage.snapshotId, snapshot.id);
   assert.deepEqual(
-    computeReviewCoverage(roundId("round-1"), snapshot, delta, {
-      commentedHunkIds: [],
-      skippedHunks: [],
-    }),
-    { snapshotId: snapshot.id, records: [] },
+    coverage.files.map((file) => file.newPath),
+    ["src/entry.ts", "src/contract.ts"],
+  );
+  assert.deepEqual(
+    recordsOf(coverage, "src/entry.ts").map((record) => [
+      record.side,
+      record.line,
+      record.text,
+      record.disposition,
+    ]),
+    [
+      ["old", 2, "old", "reviewed-without-comment"],
+      ["new", 2, "new", "reviewed-without-comment"],
+    ],
   );
 });
 
-test("materializes a complete coverage ledger from one batch submission", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-    { id: "h3", fingerprint: "f3", path: "src/three.ts" },
-  ]);
-  const currentRoundId = roundId("round-1");
+test("marks commented lines and attributes them to the current round", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
 
-  const coverage = computeReviewCoverage(
-    currentRoundId,
-    snapshot,
-    firstRoundDelta("snapshot-1"),
-    {
-      commentedHunkIds: [hunkId("h2")],
-      skippedHunks: [{ hunkId: hunkId("h3"), reason: "Generated output" }],
-    },
+  const coverage = computeReviewCoverage(ROUND, snapshot, delta, {
+    commentedLines: [
+      {
+        fileChangeId: fileChangeId("modified", "src/entry.ts"),
+        side: "new",
+        line: 2,
+      },
+    ],
+    skippedSpans: [],
+  });
+
+  const record = recordsOf(coverage, "src/entry.ts")[1];
+  assert.equal(record?.disposition, "commented");
+  assert.equal(
+    record?.disposition === "commented" ? record.commentedInRoundId : undefined,
+    ROUND,
   );
-
-  assert.deepEqual(coverage.records, [
-    {
-      hunkId: hunkId("h1"),
-      fingerprint: fingerprint("f1"),
-      disposition: "reviewed-without-comment",
-      reviewedInRoundId: currentRoundId,
-    },
-    {
-      hunkId: hunkId("h2"),
-      fingerprint: fingerprint("f2"),
-      disposition: "commented",
-      commentedInRoundId: currentRoundId,
-    },
-    {
-      hunkId: hunkId("h3"),
-      fingerprint: fingerprint("f3"),
-      disposition: "skipped",
-      skippedInRoundId: currentRoundId,
-      skipReason: "Generated output",
-    },
-  ]);
 });
 
-test("preserves carried review provenance without requiring user interaction", () => {
-  const snapshot = makeSnapshot("snapshot-2", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const originalRoundId = roundId("round-1");
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    baselineRoundId: originalRoundId,
-    hunks: [
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h1"),
-        reviewedInRoundId: originalRoundId,
-      },
-    ],
-    removedHunkFingerprints: [],
-  };
-
-  const coverage = computeReviewCoverage(roundId("round-2"), snapshot, delta, {
-    commentedHunkIds: [],
-    skippedHunks: [],
-  });
-
-  assert.deepEqual(coverage.records, [
+test("marks skipped lines with their visible reason", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+  const route = routeFor(snapshot, [
     {
-      hunkId: hunkId("h1"),
-      fingerprint: fingerprint("f1"),
-      disposition: "reviewed-without-comment",
-      reviewedInRoundId: originalRoundId,
+      path: "src/contract.ts",
+      line: 2,
+      reason: "Generated surface reviewed at its source.",
     },
   ]);
-});
 
-test("allows a user comment to override carried-forward coverage", () => {
-  const snapshot = makeSnapshot("snapshot-2", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    baselineRoundId: roundId("round-1"),
-    hunks: [
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h1"),
-        reviewedInRoundId: roundId("round-1"),
-      },
-    ],
-    removedHunkFingerprints: [],
-  };
-  const currentRoundId = roundId("round-2");
-
-  const coverage = computeReviewCoverage(currentRoundId, snapshot, delta, {
-    commentedHunkIds: [hunkId("h1"), hunkId("h1")],
-    skippedHunks: [],
+  const coverage = computeReviewCoverage(ROUND, snapshot, delta, {
+    commentedLines: [],
+    skippedSpans: route.skippedSpans,
   });
 
-  assert.equal(coverage.records[0]?.disposition, "commented");
-  assert.deepEqual(coverage.records[0], {
-    hunkId: hunkId("h1"),
-    fingerprint: fingerprint("f1"),
-    disposition: "commented",
-    commentedInRoundId: currentRoundId,
-  });
+  const record = recordsOf(coverage, "src/contract.ts")[0];
+  assert.equal(record?.disposition, "skipped");
+  assert.equal(
+    record?.disposition === "skipped" ? record.skipReason : undefined,
+    "Generated surface reviewed at its source.",
+  );
 });
 
-test("rejects unknown, duplicate, empty, and conflicting skip outcomes", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-    { id: "h3", fingerprint: "f3", path: "src/three.ts" },
-  ]);
-  const delta = firstRoundDelta("snapshot-1");
-  const currentRoundId = roundId("round-1");
+test("attributes a carried-forward line to the round that reviewed it", () => {
+  const snapshot = fixture();
+  const baseline = makeRound({ id: "round-1", snapshot });
+  const delta = computeReviewDelta(snapshot, baseline);
+
+  const coverage = computeReviewCoverage(ROUND, snapshot, delta, {
+    commentedLines: [],
+    skippedSpans: [],
+  });
+
+  const record = recordsOf(coverage, "src/entry.ts")[0];
+  assert.equal(record?.disposition, "reviewed-without-comment");
+  assert.equal(
+    record?.disposition === "reviewed-without-comment"
+      ? record.reviewedInRoundId
+      : undefined,
+    "round-1",
+  );
+});
+
+test("rejects a comment on a line that is not a changed line", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
 
   assert.throws(
     () =>
-      computeReviewCoverage(currentRoundId, snapshot, delta, {
-        commentedHunkIds: [hunkId("unknown")],
-        skippedHunks: [],
-      }),
-    /Comment references unknown hunk/,
-  );
-  assert.throws(
-    () =>
-      computeReviewCoverage(currentRoundId, snapshot, delta, {
-        commentedHunkIds: [],
-        skippedHunks: [
-          { hunkId: hunkId("h3"), reason: "one" },
-          { hunkId: hunkId("h3"), reason: "two" },
+      computeReviewCoverage(ROUND, snapshot, delta, {
+        commentedLines: [
+          {
+            fileChangeId: fileChangeId("modified", "src/entry.ts"),
+            side: "new",
+            line: 1,
+          },
         ],
+        skippedSpans: [],
       }),
-    /is skipped more than once/,
-  );
-  assert.throws(
-    () =>
-      computeReviewCoverage(currentRoundId, snapshot, delta, {
-        commentedHunkIds: [],
-        skippedHunks: [{ hunkId: hunkId("h3"), reason: "   " }],
-      }),
-    /requires a non-empty reason/,
-  );
-  assert.throws(
-    () =>
-      computeReviewCoverage(currentRoundId, snapshot, delta, {
-        commentedHunkIds: [hunkId("h3")],
-        skippedHunks: [{ hunkId: hunkId("h3"), reason: "Generated" }],
-      }),
-    /cannot be both commented and skipped/,
+    ReviewCoverageError,
   );
 });
 
-test("rejects mismatched snapshots, unknown skips, and carried-forward skips", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const currentRoundId = roundId("round-1");
-  const wrongSnapshotDelta: ReviewDelta = {
-    currentSnapshotId: makeSnapshot("other-snapshot", []).id,
-    hunks: [{ type: "needs-review", hunkId: hunkId("h1"), reason: "new" }],
-    removedHunkFingerprints: [],
-  };
-  assert.throws(
-    () =>
-      computeReviewCoverage(currentRoundId, snapshot, wrongSnapshotDelta, {
-        commentedHunkIds: [],
-        skippedHunks: [],
-      }),
-    /Review delta references snapshot/,
-  );
-
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [{ type: "needs-review", hunkId: hunkId("h1"), reason: "new" }],
-    removedHunkFingerprints: [],
-  };
-  assert.throws(
-    () =>
-      computeReviewCoverage(
-        currentRoundId,
-        snapshot,
-        {
-          ...delta,
-          hunks: [
-            { type: "needs-review", hunkId: hunkId("unknown"), reason: "new" },
-          ],
-        },
-        { commentedHunkIds: [], skippedHunks: [] },
-      ),
-    /Review delta contains unknown hunk/,
-  );
-  assert.throws(
-    () =>
-      computeReviewCoverage(currentRoundId, snapshot, delta, {
-        commentedHunkIds: [],
-        skippedHunks: [{ hunkId: hunkId("unknown"), reason: "Unknown" }],
-      }),
-    /Skip references unknown hunk/,
-  );
-
-  const carriedDelta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    baselineRoundId: roundId("round-0"),
-    hunks: [
-      {
-        type: "carried-forward",
-        hunkId: hunkId("h1"),
-        reviewedInRoundId: roundId("round-0"),
-      },
-    ],
-    removedHunkFingerprints: [],
-  };
-  assert.throws(
-    () =>
-      computeReviewCoverage(currentRoundId, snapshot, carriedDelta, {
-        commentedHunkIds: [],
-        skippedHunks: [{ hunkId: hunkId("h1"), reason: "Skip" }],
-      }),
-    /Carried-forward hunk h1 cannot be skipped/,
-  );
-});
-
-test("rejects skipping a hunk with an unresolved comment", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const delta: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      {
-        type: "needs-review",
-        hunkId: hunkId("h1"),
-        reason: "unresolved-comment",
-        previousFingerprint: fingerprint("previous-f1"),
-      },
-    ],
-    removedHunkFingerprints: [],
-  };
+test("rejects skipping a carried-forward line", () => {
+  const snapshot = fixture();
+  const baseline = makeRound({ id: "round-1", snapshot });
+  const delta = computeReviewDelta(snapshot, baseline);
+  const skippedSpans = routeFor(snapshot, [
+    { path: "src/contract.ts", line: 2, reason: "Skip." },
+  ]).skippedSpans;
 
   assert.throws(
     () =>
-      computeReviewCoverage(roundId("round-2"), snapshot, delta, {
-        commentedHunkIds: [],
-        skippedHunks: [{ hunkId: hunkId("h1"), reason: "Agent skip" }],
+      computeReviewCoverage(ROUND, snapshot, delta, {
+        commentedLines: [],
+        skippedSpans,
       }),
     (error: unknown) => {
       assert.ok(error instanceof ReviewCoverageError);
-      assert.match(error.message, /unresolved comment and cannot be skipped/);
+      assert.match(error.message, /carried forward and cannot be skipped/);
       return true;
     },
   );
 });
 
-test("is deterministic and does not mutate its inputs", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
-    { id: "h3", fingerprint: "f3", path: "src/three.ts" },
-  ]);
-  const delta = firstRoundDelta("snapshot-1");
-  const input = {
-    commentedHunkIds: [hunkId("h2")],
-    skippedHunks: [{ hunkId: hunkId("h3"), reason: "Generated" }],
-  };
-  const snapshotBefore = structuredClone(snapshot);
-  const deltaBefore = structuredClone(delta);
-  const inputBefore = structuredClone(input);
-
-  const first = computeReviewCoverage(
-    roundId("round-1"),
+test("rejects skipping a line whose earlier comment is unresolved", () => {
+  const snapshot = fixture();
+  const baseline = makeRound({
+    id: "round-1",
     snapshot,
-    delta,
-    input,
-  );
-  const second = computeReviewCoverage(
-    roundId("round-1"),
-    snapshot,
-    delta,
-    input,
-  );
+    dispositions: { "src/contract.ts:new:2": "commented" },
+  });
+  const delta = computeReviewDelta(snapshot, baseline);
+  const skippedSpans = routeFor(snapshot, [
+    { path: "src/contract.ts", line: 2, reason: "Skip." },
+  ]).skippedSpans;
 
-  assert.deepEqual(second, first);
-  assert.deepEqual(snapshot, snapshotBefore);
-  assert.deepEqual(delta, deltaBefore);
-  assert.deepEqual(input, inputBefore);
+  assert.throws(
+    () =>
+      computeReviewCoverage(ROUND, snapshot, delta, {
+        commentedLines: [],
+        skippedSpans,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewCoverageError);
+      assert.match(error.message, /unresolved comment/);
+      return true;
+    },
+  );
 });
 
-test("propagates ReviewDeltaError for malformed delta coverage", () => {
-  const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-  ]);
-  const currentRoundId = roundId("round-1");
-  const missing: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [],
-    removedHunkFingerprints: [],
-  };
-  const duplicate: ReviewDelta = {
-    currentSnapshotId: snapshot.id,
-    hunks: [
-      { type: "needs-review", hunkId: hunkId("h1"), reason: "new" },
-      { type: "needs-review", hunkId: hunkId("h1"), reason: "new" },
-    ],
-    removedHunkFingerprints: [],
-  };
+test("rejects a blank skip reason and a line that is both commented and skipped", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+  const skippedSpans = routeFor(snapshot, [
+    { path: "src/contract.ts", line: 2, reason: "Skip." },
+  ]).skippedSpans;
+  const blank = skippedSpans.map((skip) => ({ ...skip, reason: "  " }));
 
   assert.throws(
     () =>
-      computeReviewCoverage(currentRoundId, snapshot, missing, {
-        commentedHunkIds: [],
-        skippedHunks: [],
+      computeReviewCoverage(ROUND, snapshot, delta, {
+        commentedLines: [],
+        skippedSpans: blank,
+      }),
+    ReviewCoverageError,
+  );
+
+  assert.throws(
+    () =>
+      computeReviewCoverage(ROUND, snapshot, delta, {
+        commentedLines: [
+          {
+            fileChangeId: fileChangeId("modified", "src/contract.ts"),
+            side: "new",
+            line: 2,
+          },
+        ],
+        skippedSpans,
       }),
     (error: unknown) => {
-      assert.ok(error instanceof ReviewDeltaError);
-      assert.match(error.message, /does not cover snapshot hunk/);
+      assert.ok(error instanceof ReviewCoverageError);
+      assert.match(error.message, /both commented and skipped/);
       return true;
     },
   );
+});
+
+test("rejects a delta that does not match the snapshot", () => {
+  const snapshot = fixture();
+  const other = makeSnapshot("snapshot-other", [
+    { path: "src/entry.ts", lines: [" head", "+different", " tail"] },
+  ]);
+
   assert.throws(
     () =>
-      computeReviewCoverage(currentRoundId, snapshot, duplicate, {
-        commentedHunkIds: [],
-        skippedHunks: [],
+      computeReviewCoverage(ROUND, snapshot, computeReviewDelta(other), {
+        commentedLines: [],
+        skippedSpans: [],
       }),
-    (error: unknown) => {
-      assert.ok(error instanceof ReviewDeltaError);
-      assert.match(error.message, /contains duplicate hunk/);
-      return true;
-    },
+    Error,
   );
 });

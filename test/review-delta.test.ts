@@ -1,562 +1,294 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  alignSequences,
   assertReviewDeltaMatchesSnapshot,
   computeReviewDelta,
   isNeedsReviewReasonSkippable,
   ReviewDeltaError,
 } from "../src/review-delta.ts";
-import type { DiffHunk, HunkReviewRecord, ReviewDelta } from "../src/types.ts";
-import {
-  fingerprint,
-  hunkId,
-  listHunks,
-  makeRound,
-  makeSnapshot,
-  roundId,
-} from "./domain-fixtures.ts";
+import { changedLineKey } from "../src/review-span.ts";
+import type { ChangedLineRequirement, ReviewSnapshot } from "../src/types.ts";
+import { makeRound, makeSnapshot } from "./domain-fixtures.ts";
 
-function reviewed(hunk: DiffHunk, reviewedIn: string): HunkReviewRecord {
-  return {
-    hunkId: hunk.id,
-    fingerprint: hunk.fingerprint,
-    disposition: "reviewed-without-comment",
-    reviewedInRoundId: roundId(reviewedIn),
-  };
+function requirementFor(
+  delta: { readonly lines: readonly ChangedLineRequirement[] },
+  snapshot: ReviewSnapshot,
+  path: string,
+  side: "old" | "new",
+  line: number,
+): ChangedLineRequirement | undefined {
+  const change = snapshot.changes.find(
+    (candidate) => (candidate.newPath ?? candidate.oldPath) === path,
+  );
+  if (change === undefined) return undefined;
+  const key = changedLineKey({ fileChangeId: change.id, side, line });
+  return delta.lines.find((requirement) => changedLineKey(requirement) === key);
 }
 
-function commented(hunk: DiffHunk, commentedIn: string): HunkReviewRecord {
-  return {
-    hunkId: hunk.id,
-    fingerprint: hunk.fingerprint,
-    disposition: "commented",
-    commentedInRoundId: roundId(commentedIn),
-  };
+function summarize(delta: {
+  readonly lines: readonly ChangedLineRequirement[];
+}): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const line of delta.lines) {
+    const label =
+      line.type === "carried-forward" ? "carried-forward" : line.reason;
+    counts[label] = (counts[label] ?? 0) + 1;
+  }
+  return counts;
 }
 
-function skipped(hunk: DiffHunk, skippedIn: string): HunkReviewRecord {
-  return {
-    hunkId: hunk.id,
-    fingerprint: hunk.fingerprint,
-    disposition: "skipped",
-    skippedInRoundId: roundId(skippedIn),
-    skipReason: "Generated file",
-  };
-}
-
-test("returns an empty first-round delta for an empty snapshot", () => {
-  const snapshot = makeSnapshot("snapshot-empty", []);
-
-  assert.deepEqual(computeReviewDelta(snapshot), {
-    currentSnapshotId: snapshot.id,
-    hunks: [],
-    removedHunkFingerprints: [],
-  });
-});
-
-test("marks every first-round hunk as new", () => {
+test("treats every changed line as new when there is no baseline", () => {
   const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/other.ts" },
+    { path: "src/a.ts", lines: [" keep", "-old", "+new", " tail"] },
   ]);
 
   const delta = computeReviewDelta(snapshot);
 
   assert.equal(delta.baselineRoundId, undefined);
-  assert.deepEqual(delta.hunks, [
-    { type: "needs-review", hunkId: hunkId("h1"), reason: "new" },
-    { type: "needs-review", hunkId: hunkId("h2"), reason: "new" },
-  ]);
-  assert.deepEqual(delta.removedHunkFingerprints, []);
+  assert.deepEqual(summarize(delta), { new: 2 });
+  assert.equal(delta.removedLineCount, 0);
 });
 
-test("asserts that a review delta covers its snapshot exactly once", () => {
+test("carries forward every line when the snapshot did not change", () => {
   const snapshot = makeSnapshot("snapshot-1", [
-    { id: "h1", fingerprint: "f1" },
-    { id: "h2", fingerprint: "f2", path: "src/two.ts" },
+    { path: "src/a.ts", lines: [" keep", "-old", "+new", " tail"] },
   ]);
-  const valid = computeReviewDelta(snapshot);
-  const snapshotBefore = structuredClone(snapshot);
-  const validBefore = structuredClone(valid);
-  const firstRequirement = valid.hunks[0];
-  assert.ok(firstRequirement);
-  assert.doesNotThrow(() => assertReviewDeltaMatchesSnapshot(snapshot, valid));
-  assert.deepEqual(snapshot, snapshotBefore);
-  assert.deepEqual(valid, validBefore);
+  const baseline = makeRound({ id: "round-1", snapshot });
 
-  const invalidDeltas: readonly {
-    readonly delta: ReviewDelta;
-    readonly message: RegExp;
-  }[] = [
-    {
-      delta: {
-        ...valid,
-        currentSnapshotId: makeSnapshot("other-snapshot", []).id,
-      },
-      message: /references snapshot/,
-    },
-    {
-      delta: {
-        ...valid,
-        hunks: [
-          { type: "needs-review", hunkId: hunkId("unknown"), reason: "new" },
-        ],
-      },
-      message: /contains unknown hunk/,
-    },
-    {
-      delta: { ...valid, hunks: [firstRequirement, firstRequirement] },
-      message: /contains duplicate hunk/,
-    },
-    {
-      delta: { ...valid, hunks: [firstRequirement] },
-      message: /does not cover snapshot hunk h2/,
-    },
-  ];
-  for (const invalid of invalidDeltas) {
-    assert.throws(
-      () => assertReviewDeltaMatchesSnapshot(snapshot, invalid.delta),
-      (error: unknown) => {
-        assert.ok(error instanceof ReviewDeltaError);
-        assert.match(error.message, invalid.message);
-        return true;
-      },
-    );
-  }
+  const delta = computeReviewDelta(snapshot, baseline);
+
+  assert.equal(delta.baselineRoundId, "round-1");
+  assert.deepEqual(summarize(delta), { "carried-forward": 2 });
+  assert.equal(delta.removedLineCount, 0);
 });
 
-test("defines skip eligibility for every needs-review reason", () => {
-  assert.equal(isNeedsReviewReasonSkippable("unresolved-comment"), false);
-  assert.equal(isNeedsReviewReasonSkippable("new"), true);
-  assert.equal(isNeedsReviewReasonSkippable("changed"), true);
-  assert.equal(isNeedsReviewReasonSkippable("previously-skipped"), true);
-  assert.equal(isNeedsReviewReasonSkippable("ambiguous-match"), true);
-});
-
-test("carries an unchanged reviewed hunk with its original review provenance", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "same", start: 10 },
+test("keeps a reviewed line carried forward after unrelated lines shift it", () => {
+  const before = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+reviewed", " tail"] },
   ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const baseline = makeRound({
-    id: "round-2",
-    snapshot: baselineSnapshot,
-    records: [reviewed(baselineHunk, "round-1")],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "current-hunk", fingerprint: "same", start: 50 },
-  ]);
-
-  const delta = computeReviewDelta(current, baseline);
-
-  assert.deepEqual(delta.hunks, [
+  const baseline = makeRound({ id: "round-1", snapshot: before });
+  const after = makeSnapshot("snapshot-2", [
     {
-      type: "carried-forward",
-      hunkId: hunkId("current-hunk"),
-      reviewedInRoundId: roundId("round-1"),
-    },
-  ]);
-  assert.deepEqual(delta.removedHunkFingerprints, []);
-});
-
-test("requires unchanged commented and skipped hunks to be reviewed again", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "commented-old", fingerprint: "commented-fp" },
-    { id: "skipped-old", fingerprint: "skipped-fp", path: "src/skipped.ts" },
-  ]);
-  const [commentedHunk, skippedHunk] = listHunks(baselineSnapshot);
-  assert.ok(commentedHunk);
-  assert.ok(skippedHunk);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [
-      commented(commentedHunk, "round-1"),
-      skipped(skippedHunk, "round-1"),
-    ],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "commented-current", fingerprint: "commented-fp" },
-    {
-      id: "skipped-current",
-      fingerprint: "skipped-fp",
-      path: "src/skipped.ts",
+      path: "src/a.ts",
+      lines: [" keep", "+inserted above", "+reviewed", " tail"],
     },
   ]);
 
-  const delta = computeReviewDelta(current, baseline);
+  const delta = computeReviewDelta(after, baseline);
 
-  assert.deepEqual(delta.hunks, [
-    {
-      type: "needs-review",
-      hunkId: hunkId("commented-current"),
-      reason: "unresolved-comment",
-      previousFingerprint: fingerprint("commented-fp"),
-    },
-    {
-      type: "needs-review",
-      hunkId: hunkId("skipped-current"),
-      reason: "previously-skipped",
-      previousFingerprint: fingerprint("skipped-fp"),
-    },
-  ]);
-});
-
-test("links a uniquely overlapping changed hunk to its previous fingerprint", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "old-fp", start: 10, count: 5 },
-  ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [reviewed(baselineHunk, "round-1")],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "changed-hunk", fingerprint: "new-fp", start: 12, count: 2 },
-  ]);
-
-  const delta = computeReviewDelta(current, baseline);
-
-  assert.deepEqual(delta.hunks, [
-    {
-      type: "needs-review",
-      hunkId: hunkId("changed-hunk"),
-      reason: "changed",
-      previousFingerprint: fingerprint("old-fp"),
-    },
-  ]);
-  assert.deepEqual(delta.removedHunkFingerprints, []);
-});
-
-test("preserves unresolved-comment priority when a commented hunk changes", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "old-fp", start: 10, count: 5 },
-  ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [commented(baselineHunk, "round-1")],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "changed-hunk", fingerprint: "new-fp", start: 11, count: 2 },
-  ]);
-
-  const delta = computeReviewDelta(current, baseline);
-
-  assert.equal(delta.hunks[0]?.type, "needs-review");
-  assert.deepEqual(delta.hunks[0], {
-    type: "needs-review",
-    hunkId: hunkId("changed-hunk"),
-    reason: "unresolved-comment",
-    previousFingerprint: fingerprint("old-fp"),
-  });
-});
-
-test("preserves previously-skipped priority when a skipped hunk changes", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "old-fp", start: 10, count: 5 },
-  ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [skipped(baselineHunk, "round-1")],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "changed-hunk", fingerprint: "new-fp", start: 11, count: 2 },
-  ]);
-
-  assert.deepEqual(computeReviewDelta(current, baseline).hunks, [
-    {
-      type: "needs-review",
-      hunkId: hunkId("changed-hunk"),
-      reason: "previously-skipped",
-      previousFingerprint: fingerprint("old-fp"),
-    },
-  ]);
-});
-
-test("classifies unrelated current hunks as new and old hunks as removed", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "removed-hunk", fingerprint: "removed-fp", path: "src/old.ts" },
-  ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [reviewed(baselineHunk, "round-1")],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "new-hunk", fingerprint: "new-fp", path: "src/new.ts" },
-  ]);
-
-  const delta = computeReviewDelta(current, baseline);
-
-  assert.deepEqual(delta.hunks, [
-    { type: "needs-review", hunkId: hunkId("new-hunk"), reason: "new" },
-  ]);
-  assert.deepEqual(delta.removedHunkFingerprints, [fingerprint("removed-fp")]);
-});
-
-test("marks every baseline hunk as removed when the current snapshot is empty", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-1", fingerprint: "old-fp-1" },
-    { id: "old-2", fingerprint: "old-fp-2", path: "src/other.ts" },
-  ]);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: listHunks(baselineSnapshot).map((hunk) =>
-      reviewed(hunk, "round-1"),
-    ),
-  });
-  const current = makeSnapshot("snapshot-2", []);
-
-  const delta = computeReviewDelta(current, baseline);
-
-  assert.deepEqual(delta.hunks, []);
-  assert.deepEqual(delta.removedHunkFingerprints, [
-    fingerprint("old-fp-1"),
-    fingerprint("old-fp-2"),
-  ]);
-});
-
-test("treats changed hunk splits and merges as ambiguous without reporting removals", () => {
-  const splitBaselineSnapshot = makeSnapshot("split-baseline", [
-    { id: "old", fingerprint: "old", start: 10, count: 10 },
-  ]);
-  const splitBaselineHunk = listHunks(splitBaselineSnapshot)[0];
-  assert.ok(splitBaselineHunk);
-  const splitBaseline = makeRound({
-    id: "split-round",
-    snapshot: splitBaselineSnapshot,
-    records: [reviewed(splitBaselineHunk, "split-round")],
-  });
-  const splitCurrent = makeSnapshot("split-current", [
-    { id: "split-1", fingerprint: "split-fp-1", start: 10, count: 4 },
-    { id: "split-2", fingerprint: "split-fp-2", start: 15, count: 4 },
-  ]);
-
-  const splitDelta = computeReviewDelta(splitCurrent, splitBaseline);
-  assert.deepEqual(
-    splitDelta.hunks.map(
-      (requirement) =>
-        requirement.type === "needs-review" && requirement.reason,
-    ),
-    ["ambiguous-match", "ambiguous-match"],
-  );
-  assert.deepEqual(splitDelta.removedHunkFingerprints, []);
-
-  const mergeBaselineSnapshot = makeSnapshot("merge-baseline", [
-    { id: "old-1", fingerprint: "old-fp-1", start: 10, count: 4 },
-    { id: "old-2", fingerprint: "old-fp-2", start: 15, count: 4 },
-  ]);
-  const mergeBaseline = makeRound({
-    id: "merge-round",
-    snapshot: mergeBaselineSnapshot,
-    records: listHunks(mergeBaselineSnapshot).map((hunk) =>
-      reviewed(hunk, "merge-round"),
-    ),
-  });
-  const mergeCurrent = makeSnapshot("merge-current", [
-    { id: "merged", fingerprint: "merged-fp", start: 10, count: 10 },
-  ]);
-
-  const mergeDelta = computeReviewDelta(mergeCurrent, mergeBaseline);
-  assert.equal(mergeDelta.hunks[0]?.type, "needs-review");
   assert.equal(
-    mergeDelta.hunks[0]?.type === "needs-review"
-      ? mergeDelta.hunks[0].reason
-      : undefined,
-    "ambiguous-match",
+    requirementFor(delta, after, "src/a.ts", "new", 3)?.type,
+    "carried-forward",
   );
-  assert.deepEqual(mergeDelta.removedHunkFingerprints, []);
+  const inserted = requirementFor(delta, after, "src/a.ts", "new", 2);
+  assert.equal(inserted?.type, "needs-review");
+  assert.equal(
+    inserted?.type === "needs-review" ? inserted.reason : undefined,
+    "new",
+  );
 });
 
-test("requires duplicate exact fingerprints to be reviewed as ambiguous", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-1", fingerprint: "duplicate", start: 1 },
-    { id: "old-2", fingerprint: "duplicate", start: 20 },
+test("keeps a reviewed line carried forward when a neighbour changes", () => {
+  const before = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+reviewed", "+neighbour", " tail"] },
   ]);
-  const baselineHunks = listHunks(baselineSnapshot);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: baselineHunks.map((hunk) => reviewed(hunk, "round-1")),
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "current-1", fingerprint: "duplicate", start: 1 },
-    { id: "current-2", fingerprint: "duplicate", start: 20 },
+  const baseline = makeRound({ id: "round-1", snapshot: before });
+  const after = makeSnapshot("snapshot-2", [
+    { path: "src/a.ts", lines: [" keep", "+reviewed", "+rewritten", " tail"] },
   ]);
 
-  const delta = computeReviewDelta(current, baseline);
+  const delta = computeReviewDelta(after, baseline);
 
-  assert.deepEqual(
-    delta.hunks.map(({ type, ...requirement }) => ({ type, ...requirement })),
-    [
-      {
-        type: "needs-review",
-        hunkId: hunkId("current-1"),
-        reason: "ambiguous-match",
-        previousFingerprint: fingerprint("duplicate"),
-      },
-      {
-        type: "needs-review",
-        hunkId: hunkId("current-2"),
-        reason: "ambiguous-match",
-        previousFingerprint: fingerprint("duplicate"),
-      },
-    ],
+  assert.deepEqual(summarize(delta), { "carried-forward": 1, new: 1 });
+  assert.equal(
+    requirementFor(delta, after, "src/a.ts", "new", 2)?.type,
+    "carried-forward",
   );
-  assert.deepEqual(delta.removedHunkFingerprints, []);
 });
 
-test("preserves duplicate fingerprint multiplicity when copies are removed", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-1", fingerprint: "duplicate", start: 1 },
-    { id: "old-2", fingerprint: "duplicate", start: 20 },
-    { id: "old-3", fingerprint: "duplicate", start: 40 },
+test("reopens a line whose earlier comment is unresolved", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+commented", "+clean", " tail"] },
   ]);
   const baseline = makeRound({
     id: "round-1",
-    snapshot: baselineSnapshot,
-    records: listHunks(baselineSnapshot).map((hunk) =>
-      reviewed(hunk, "round-1"),
-    ),
+    snapshot,
+    dispositions: { "src/a.ts:new:2": "commented" },
   });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "current-1", fingerprint: "duplicate", start: 1 },
-    { id: "current-2", fingerprint: "duplicate", start: 20 },
-  ]);
 
-  const delta = computeReviewDelta(current, baseline);
+  const delta = computeReviewDelta(snapshot, baseline);
 
-  assert.deepEqual(
-    delta.hunks.map(
-      (requirement) =>
-        requirement.type === "needs-review" && requirement.reason,
-    ),
-    ["ambiguous-match", "ambiguous-match"],
+  const reopened = requirementFor(delta, snapshot, "src/a.ts", "new", 2);
+  assert.equal(
+    reopened?.type === "needs-review" ? reopened.reason : undefined,
+    "unresolved-comment",
   );
-  assert.deepEqual(delta.removedHunkFingerprints, [fingerprint("duplicate")]);
-});
-
-test("rejects corrupt baseline delta and coverage records", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "old-fp" },
-  ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const validRecord = reviewed(baselineHunk, "round-1");
-  const current = makeSnapshot("snapshot-2", [
-    { id: "current-hunk", fingerprint: "old-fp" },
-  ]);
-
-  const validBaseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [validRecord],
-  });
-  const wrongDeltaSnapshot = {
-    ...validBaseline,
-    delta: { ...validBaseline.delta, currentSnapshotId: current.id },
-  };
-  assert.throws(
-    () => computeReviewDelta(current, wrongDeltaSnapshot),
-    /delta references snapshot/,
-  );
-
-  const wrongCoverageSnapshot = {
-    ...validBaseline,
-    coverage: { ...validBaseline.coverage, snapshotId: current.id },
-  };
-  assert.throws(
-    () => computeReviewDelta(current, wrongCoverageSnapshot),
-    /coverage references snapshot/,
-  );
-
-  const duplicateCoverage = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [validRecord, validRecord],
-  });
-  assert.throws(
-    () => computeReviewDelta(current, duplicateCoverage),
-    /duplicate coverage/,
-  );
-
-  const unknownCoverage = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [validRecord, { ...validRecord, hunkId: hunkId("unknown") }],
-  });
-  assert.throws(
-    () => computeReviewDelta(current, unknownCoverage),
-    /unknown hunk/,
-  );
-
-  const wrongFingerprint = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [{ ...validRecord, fingerprint: fingerprint("wrong") }],
-  });
-  assert.throws(
-    () => computeReviewDelta(current, wrongFingerprint),
-    /does not match hunk/,
+  assert.equal(
+    requirementFor(delta, snapshot, "src/a.ts", "new", 3)?.type,
+    "carried-forward",
   );
 });
 
-test("is deterministic and does not mutate snapshots or baseline rounds", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "old-fp", start: 10, count: 3 },
-  ]);
-  const baselineHunk = listHunks(baselineSnapshot)[0];
-  assert.ok(baselineHunk);
-  const baseline = makeRound({
-    id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [reviewed(baselineHunk, "round-1")],
-  });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "current-hunk", fingerprint: "new-fp", start: 11, count: 2 },
-  ]);
-  const baselineBefore = structuredClone(baseline);
-  const currentBefore = structuredClone(current);
-
-  const first = computeReviewDelta(current, baseline);
-  const second = computeReviewDelta(current, baseline);
-
-  assert.deepEqual(second, first);
-  assert.deepEqual(baseline, baselineBefore);
-  assert.deepEqual(current, currentBefore);
-});
-
-test("rejects incomplete baseline coverage", () => {
-  const baselineSnapshot = makeSnapshot("snapshot-1", [
-    { id: "old-hunk", fingerprint: "old-fp" },
+test("reopens a previously skipped line", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+skipped", " tail"] },
   ]);
   const baseline = makeRound({
     id: "round-1",
-    snapshot: baselineSnapshot,
-    records: [],
+    snapshot,
+    dispositions: { "src/a.ts:new:2": "skipped" },
   });
-  const current = makeSnapshot("snapshot-2", [
-    { id: "current-hunk", fingerprint: "old-fp" },
+
+  const delta = computeReviewDelta(snapshot, baseline);
+
+  const reopened = requirementFor(delta, snapshot, "src/a.ts", "new", 2);
+  assert.equal(
+    reopened?.type === "needs-review" ? reopened.reason : undefined,
+    "previously-skipped",
+  );
+});
+
+test("counts baseline lines that no longer exist", () => {
+  const before = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+first", "+second", " tail"] },
+  ]);
+  const baseline = makeRound({ id: "round-1", snapshot: before });
+  const after = makeSnapshot("snapshot-2", [
+    { path: "src/a.ts", lines: [" keep", "+first", " tail"] },
   ]);
 
-  assert.throws(
-    () => computeReviewDelta(current, baseline),
-    (error: unknown) => {
-      assert.ok(error instanceof ReviewDeltaError);
-      assert.match(error.message, /has no coverage/);
-      return true;
-    },
+  const delta = computeReviewDelta(after, baseline);
+
+  assert.deepEqual(summarize(delta), { "carried-forward": 1 });
+  assert.equal(delta.removedLineCount, 1);
+});
+
+test("counts every line of a file that stopped changing", () => {
+  const before = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+a", " tail"] },
+    { path: "src/b.ts", lines: [" keep", "+b", " tail"] },
+  ]);
+  const baseline = makeRound({ id: "round-1", snapshot: before });
+  const after = makeSnapshot("snapshot-2", [
+    { path: "src/a.ts", lines: [" keep", "+a", " tail"] },
+  ]);
+
+  const delta = computeReviewDelta(after, baseline);
+
+  assert.deepEqual(summarize(delta), { "carried-forward": 1 });
+  assert.equal(delta.removedLineCount, 1);
+});
+
+test("treats a file that changed path as entirely new", () => {
+  const before = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+value", " tail"] },
+  ]);
+  const baseline = makeRound({ id: "round-1", snapshot: before });
+  const after = makeSnapshot("snapshot-2", [
+    { path: "src/renamed.ts", lines: [" keep", "+value", " tail"] },
+  ]);
+
+  const delta = computeReviewDelta(after, baseline);
+
+  assert.deepEqual(summarize(delta), { new: 1 });
+  assert.equal(delta.removedLineCount, 1);
+});
+
+test("distinguishes identical text on the old and new side", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: ["-same", "+same"] },
+  ]);
+  const baseline = makeRound({
+    id: "round-1",
+    snapshot,
+    dispositions: { "src/a.ts:old:1": "commented" },
+  });
+
+  const delta = computeReviewDelta(snapshot, baseline);
+
+  const removed = requirementFor(delta, snapshot, "src/a.ts", "old", 1);
+  assert.equal(
+    removed?.type === "needs-review" ? removed.reason : undefined,
+    "unresolved-comment",
   );
+  assert.equal(
+    requirementFor(delta, snapshot, "src/a.ts", "new", 1)?.type,
+    "carried-forward",
+  );
+});
+
+test("aligns sequences by longest common subsequence", () => {
+  assert.deepEqual(alignSequences(["a", "b", "c"], ["a", "b", "c"]), [
+    [0, 0],
+    [1, 1],
+    [2, 2],
+  ]);
+  assert.deepEqual(alignSequences(["a", "x", "c"], ["a", "c"]), [
+    [0, 0],
+    [2, 1],
+  ]);
+  assert.deepEqual(alignSequences([], ["a"]), []);
+  assert.deepEqual(alignSequences(["a"], []), []);
+});
+
+test("validates that a delta covers exactly the snapshot changed lines", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+one", "+two", " tail"] },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+
+  assert.doesNotThrow(() => assertReviewDeltaMatchesSnapshot(snapshot, delta));
+
+  assert.throws(
+    () =>
+      assertReviewDeltaMatchesSnapshot(snapshot, {
+        ...delta,
+        currentSnapshotId: snapshot.id,
+        lines: delta.lines.slice(0, 1),
+      }),
+    ReviewDeltaError,
+  );
+
+  const first = delta.lines[0];
+  assert.ok(first);
+  assert.throws(
+    () =>
+      assertReviewDeltaMatchesSnapshot(snapshot, {
+        ...delta,
+        lines: [first, first],
+      }),
+    ReviewDeltaError,
+  );
+
+  assert.throws(
+    () =>
+      assertReviewDeltaMatchesSnapshot(snapshot, {
+        ...delta,
+        lines: [{ ...first, line: 99 }],
+      }),
+    ReviewDeltaError,
+  );
+});
+
+test("rejects a baseline round whose coverage does not match its snapshot", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+one", " tail"] },
+  ]);
+  const baseline = makeRound({ id: "round-1", snapshot });
+
+  assert.throws(
+    () =>
+      computeReviewDelta(snapshot, {
+        ...baseline,
+        coverage: { ...baseline.coverage, snapshotId: "other" as never },
+      }),
+    ReviewDeltaError,
+  );
+});
+
+test("only an unresolved comment blocks skipping", () => {
+  assert.equal(isNeedsReviewReasonSkippable("new"), true);
+  assert.equal(isNeedsReviewReasonSkippable("previously-skipped"), true);
+  assert.equal(isNeedsReviewReasonSkippable("unresolved-comment"), false);
 });

@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   assertReviewDeltaMatchesSnapshot,
-  listSnapshotHunks,
+  coverageFileKey,
+  fileKey,
 } from "./review-delta.ts";
+import { changedLineKey, listFileChangedLines } from "./review-span.ts";
 import type {
-  HunkId,
-  HunkReviewRecord,
-  HunkReviewRequirement,
+  ChangedLineRecord,
+  ChangedLineRequirement,
+  FileCoverage,
   ReviewCoverage,
   ReviewDelta,
   ReviewRound,
@@ -145,79 +147,89 @@ function validateRoundData(
     );
   }
 
-  const hunks = listSnapshotHunks(snapshot);
-  const hunksById = new Map(hunks.map((hunk) => [hunk.id, hunk]));
   const requirements = new Map(
-    delta.hunks.map((requirement) => [requirement.hunkId, requirement]),
+    delta.lines.map((requirement) => [
+      changedLineKey(requirement),
+      requirement,
+    ]),
   );
-  const records = validateCoverageRecords(coverage.records, hunksById);
-  for (const hunk of hunks) {
-    const requirement = requirements.get(hunk.id);
-    const record = records.get(hunk.id);
-    if (requirement === undefined || record === undefined) {
+  const coverageByFile = new Map<string, FileCoverage>();
+  for (const file of coverage.files) {
+    const key = fileKey(file.oldPath, file.newPath);
+    if (coverageByFile.has(key)) {
       throw new ReviewSeriesError(
-        `Round data is incomplete for hunk ${hunk.id}.`,
+        `Review coverage contains duplicate entries for ${key}.`,
       );
     }
-    validateRecordProvenance(identity.id, priorRoundIds, requirement, record);
+    coverageByFile.set(key, file);
   }
-}
 
-function validateCoverageRecords(
-  coverageRecords: readonly HunkReviewRecord[],
-  hunksById: ReadonlyMap<
-    HunkId,
-    { readonly id: HunkId; readonly fingerprint: string }
-  >,
-): Map<HunkId, HunkReviewRecord> {
-  const records = new Map<HunkId, HunkReviewRecord>();
-  for (const record of coverageRecords) {
-    const hunk = hunksById.get(record.hunkId);
-    if (hunk === undefined) {
+  const seenFiles = new Set<string>();
+  for (const change of snapshot.changes) {
+    const changedLines = listFileChangedLines(change);
+    if (changedLines.length === 0) continue;
+    const key = coverageFileKey(change);
+    const path = change.newPath ?? change.oldPath ?? change.id;
+    const file = coverageByFile.get(key);
+    if (file === undefined) {
       throw new ReviewSeriesError(
-        `Review coverage contains unknown hunk ${record.hunkId}.`,
+        `Review coverage does not cover changed file ${path}.`,
       );
     }
-    if (records.has(record.hunkId)) {
+    seenFiles.add(key);
+    if (file.lines.length !== changedLines.length) {
       throw new ReviewSeriesError(
-        `Review coverage contains duplicate hunk ${record.hunkId}.`,
+        `Review coverage for ${path} has ${file.lines.length} records, but the snapshot has ${changedLines.length} changed lines.`,
       );
     }
-    if (record.fingerprint !== hunk.fingerprint) {
-      throw new ReviewSeriesError(
-        `Review coverage fingerprint ${record.fingerprint} does not match hunk ${record.hunkId} fingerprint ${hunk.fingerprint}.`,
+    for (const [index, line] of changedLines.entries()) {
+      const record = file.lines[index];
+      if (
+        record === undefined ||
+        record.side !== line.side ||
+        record.line !== line.line ||
+        record.text !== line.text
+      ) {
+        throw new ReviewSeriesError(
+          `Review coverage for ${path} does not match snapshot ${line.side} line ${line.line}.`,
+        );
+      }
+      const requirement = requirements.get(changedLineKey(line));
+      if (requirement === undefined) {
+        throw new ReviewSeriesError(
+          `Round data is incomplete for ${path} ${line.side} line ${line.line}.`,
+        );
+      }
+      validateRecordProvenance(
+        identity.id,
+        priorRoundIds,
+        requirement,
+        record,
+        `${path} ${line.side} line ${line.line}`,
       );
     }
-    if (
-      record.disposition === "skipped" &&
-      record.skipReason.trim().length === 0
-    ) {
-      throw new ReviewSeriesError(
-        `Skipped hunk ${record.hunkId} requires a non-empty reason.`,
-      );
-    }
-    records.set(record.hunkId, record);
   }
-  for (const hunkId of hunksById.keys()) {
-    if (!records.has(hunkId)) {
+
+  for (const key of coverageByFile.keys()) {
+    if (!seenFiles.has(key)) {
       throw new ReviewSeriesError(
-        `Review coverage does not cover hunk ${hunkId}.`,
+        `Review coverage contains an entry for ${key}, which has no changed lines in the snapshot.`,
       );
     }
   }
-  return records;
 }
 
 function validateRecordProvenance(
   currentRoundId: ReviewRoundId,
   priorRoundIds: ReadonlySet<ReviewRoundId>,
-  requirement: HunkReviewRequirement,
-  record: HunkReviewRecord,
+  requirement: ChangedLineRequirement,
+  record: ChangedLineRecord,
+  label: string,
 ): void {
   if (record.disposition === "commented") {
     if (record.commentedInRoundId !== currentRoundId) {
       throw new ReviewSeriesError(
-        `Commented hunk ${record.hunkId} must reference current round ${currentRoundId}.`,
+        `Commented ${label} must reference current round ${currentRoundId}.`,
       );
     }
     return;
@@ -225,12 +237,17 @@ function validateRecordProvenance(
   if (record.disposition === "skipped") {
     if (requirement.type === "carried-forward") {
       throw new ReviewSeriesError(
-        `Carried-forward hunk ${record.hunkId} cannot be skipped.`,
+        `Carried-forward ${label} cannot be skipped.`,
+      );
+    }
+    if (record.skipReason.trim().length === 0) {
+      throw new ReviewSeriesError(
+        `Skipped ${label} requires a non-empty reason.`,
       );
     }
     if (record.skippedInRoundId !== currentRoundId) {
       throw new ReviewSeriesError(
-        `Skipped hunk ${record.hunkId} must reference current round ${currentRoundId}.`,
+        `Skipped ${label} must reference current round ${currentRoundId}.`,
       );
     }
     return;
@@ -241,7 +258,7 @@ function validateRecordProvenance(
     !priorRoundIds.has(requirement.reviewedInRoundId)
   ) {
     throw new ReviewSeriesError(
-      `Carried-forward hunk ${record.hunkId} references unknown prior round ${requirement.reviewedInRoundId}.`,
+      `Carried-forward ${label} references unknown prior round ${requirement.reviewedInRoundId}.`,
     );
   }
   const expectedRoundId =
@@ -250,7 +267,7 @@ function validateRecordProvenance(
       : currentRoundId;
   if (record.reviewedInRoundId !== expectedRoundId) {
     throw new ReviewSeriesError(
-      `Reviewed hunk ${record.hunkId} references round ${record.reviewedInRoundId}, expected ${expectedRoundId}.`,
+      `Reviewed ${label} references round ${record.reviewedInRoundId}, expected ${expectedRoundId}.`,
     );
   }
 }
