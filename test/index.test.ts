@@ -4,17 +4,25 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  Theme,
+  ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
 import { markReviewUnitReviewed } from "../src/in-progress-review.ts";
 import {
   createPiGitRunner,
+  DIFFWALK_KICKOFF_MESSAGE_TYPE,
+  DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
   type DiffWalkDependencies,
   formatGuidedReviewResult,
+  type KickoffMessageDetails,
   parseDiffWalkCommand,
   parseReviewTarget,
   registerDiffWalk,
+  renderKickoffMessage,
+  renderSubmittedReviewMessage,
+  type SubmittedReviewMessageDetails,
 } from "../src/index.ts";
 import type {
   FileChange,
@@ -41,6 +49,12 @@ interface HarnessBehavior {
   snapshot: ReviewSnapshot;
 }
 
+interface SentMessageMeta {
+  readonly customType: string;
+  readonly display: boolean;
+  readonly triggerTurn: boolean;
+}
+
 interface Harness {
   readonly command: (
     args: string,
@@ -48,6 +62,8 @@ interface Harness {
   ) => Promise<void>;
   readonly tool: GuidedToolDefinition;
   readonly sentMessages: readonly string[];
+  readonly sentMessageMeta: readonly SentMessageMeta[];
+  readonly registeredRenderers: readonly string[];
   readonly openedSnapshots: readonly string[];
   readonly behavior: HarnessBehavior;
 }
@@ -70,6 +86,8 @@ function createHarness(
     | undefined;
   let tool: GuidedToolDefinition | undefined;
   const sentMessages: string[] = [];
+  const sentMessageMeta: SentMessageMeta[] = [];
+  const registeredRenderers: string[] = [];
   const openedSnapshots: string[] = [];
   const pi = {
     registerCommand(
@@ -84,8 +102,24 @@ function createHarness(
     registerTool(definition: GuidedToolDefinition) {
       tool = definition;
     },
-    sendUserMessage(message: string) {
-      sentMessages.push(message);
+    sendMessage(
+      message: {
+        customType: string;
+        content: string;
+        display: boolean;
+        details?: unknown;
+      },
+      options?: { triggerTurn?: boolean },
+    ) {
+      sentMessages.push(message.content);
+      sentMessageMeta.push({
+        customType: message.customType,
+        display: message.display,
+        triggerTurn: options?.triggerTurn === true,
+      });
+    },
+    registerMessageRenderer(customType: string) {
+      registeredRenderers.push(customType);
     },
     async exec() {
       return { stdout: "", stderr: "", code: 0, killed: false };
@@ -142,8 +176,20 @@ function createHarness(
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
-  return { command, tool, sentMessages, openedSnapshots, behavior };
+  return {
+    command,
+    tool,
+    sentMessages,
+    sentMessageMeta,
+    registeredRenderers,
+    openedSnapshots,
+    behavior,
+  };
 }
+
+const plainTheme = {
+  fg: (_color: ThemeColor, text: string) => text,
+} as Pick<Theme, "fg"> as Theme;
 
 function commandContext(
   mode: ExtensionCommandContext["mode"] = "tui",
@@ -261,6 +307,11 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
   assert.equal(harness.sentMessages.length, 1);
   assert.match(harness.sentMessages[0] ?? "", /Prepare a semantic route/);
   assert.match(harness.sentMessages[0] ?? "", /"targetRef": "origin\/main"/);
+  assert.deepEqual(harness.sentMessageMeta[0], {
+    customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
+    display: true,
+    triggerTurn: true,
+  });
 
   await assert.rejects(
     harness.tool.execute(
@@ -662,6 +713,127 @@ test("fails /diffwalk clearly outside interactive TUI mode", async () => {
     /requires interactive TUI mode; current mode is print/,
   );
   assert.deepEqual(harness.sentMessages, []);
+});
+
+test("sends the resumed submission result as a compact custom message", async () => {
+  const harness = createHarness();
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  harness.behavior.submitOnOpen = true;
+  await harness.command("", commandContext());
+
+  assert.deepEqual(
+    harness.sentMessageMeta.map((meta) => meta.customType),
+    [DIFFWALK_KICKOFF_MESSAGE_TYPE, DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE],
+  );
+  assert.deepEqual(harness.sentMessageMeta[1], {
+    customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+    display: true,
+    triggerTurn: true,
+  });
+  assert.match(harness.sentMessages[1] ?? "", /"status":"submitted"/);
+});
+
+test("registers compact TUI renderers for the kickoff and result messages", () => {
+  const harness = createHarness();
+  assert.deepEqual(harness.registeredRenderers, [
+    DIFFWALK_KICKOFF_MESSAGE_TYPE,
+    DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+  ]);
+});
+
+test("renders the kickoff message as a summary and expands to the prompt", () => {
+  const kickoffPrompt =
+    "Prepare a semantic route for a human-guided DiffWalk review.";
+  const message = {
+    role: "custom" as const,
+    customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
+    content: kickoffPrompt,
+    display: true,
+    details: {
+      snapshotId: "snapshot-index" as SnapshotId,
+      targetRef: "origin/main",
+      changedFileCount: 2,
+      needsReviewLineCount: 5,
+      carriedForwardLineCount: 1,
+      unreviewableChangeCount: 1,
+    } satisfies KickoffMessageDetails,
+    timestamp: Date.now(),
+  };
+
+  const collapsed = renderKickoffMessage(
+    message,
+    { expanded: false, outputPad: 0 },
+    plainTheme,
+  );
+  assert.ok(collapsed);
+  const collapsedText = collapsed.render(200).join("\n");
+  assert.match(
+    collapsedText,
+    /DiffWalk kickoff {2}snapshot snapshot-index {2}target origin\/main {2}5 needs-review lines {2}2 changed files {2}1 carried-forward line {2}1 unreviewable change/,
+  );
+  assert.match(collapsedText, /expand to read it/);
+  assert.doesNotMatch(collapsedText, /Prepare a semantic route/);
+
+  const expanded = renderKickoffMessage(
+    message,
+    { expanded: true, outputPad: 0 },
+    plainTheme,
+  );
+  assert.ok(expanded);
+  assert.match(expanded.render(200).join("\n"), /Prepare a semantic route/);
+});
+
+test("renders the submission result message as a summary and expands to the payload", () => {
+  const submitted: GuidedReviewResult = {
+    status: "submitted",
+    snapshotId: "snapshot-index" as SnapshotId,
+    submissionMode: "discuss-first",
+    comments: [],
+  };
+  const message = {
+    role: "custom" as const,
+    customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+    content: formatGuidedReviewResult(submitted),
+    display: true,
+    details: {
+      snapshotId: "snapshot-index" as SnapshotId,
+      submissionMode: "discuss-first",
+      commentCount: 2,
+    } satisfies SubmittedReviewMessageDetails,
+    timestamp: Date.now(),
+  };
+
+  const collapsed = renderSubmittedReviewMessage(
+    message,
+    { expanded: false, outputPad: 0 },
+    plainTheme,
+  );
+  assert.ok(collapsed);
+  const collapsedText = collapsed.render(120).join("\n");
+  assert.match(
+    collapsedText,
+    /DiffWalk review submitted {2}snapshot snapshot-index {2}2 comments {2}discuss-first/,
+  );
+  assert.doesNotMatch(collapsedText, /"instruction"/);
+
+  const expanded = renderSubmittedReviewMessage(
+    message,
+    { expanded: true, outputPad: 0 },
+    plainTheme,
+  );
+  assert.ok(expanded);
+  assert.match(
+    expanded.render(400).join("\n"),
+    /Investigate and respond to every comment/,
+  );
 });
 
 test("formats structured pause, discard, and submission instructions", () => {
