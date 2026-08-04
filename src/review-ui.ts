@@ -2076,6 +2076,13 @@ function pinnedFileTitle(
   return [fitLine(title, width)];
 }
 
+/**
+ * Rows kept visible above and below the selected line while scrolling, so
+ * the unchanged padding around a span reappears when the cursor returns to
+ * the edge of the viewport. Shrinks to fit small viewports.
+ */
+const DIFF_SCROLL_MARGIN = SPAN_DISPLAY_CONTEXT_RADIUS;
+
 function ensureTargetVisible(
   rows: readonly RenderedRow[],
   target: ReviewCommentTarget | undefined,
@@ -2097,8 +2104,14 @@ function ensureTargetVisible(
   let next = clampOffset(offset, rows.length, viewportHeight);
   const selectedHeight = last - first + 1;
   if (selectedHeight <= viewportHeight) {
-    if (first < next) next = first;
-    else if (last >= next + viewportHeight) next = last - viewportHeight + 1;
+    const margin = Math.min(
+      DIFF_SCROLL_MARGIN,
+      Math.floor((viewportHeight - selectedHeight) / 2),
+    );
+    if (first - margin < next) next = Math.max(0, first - margin);
+    else if (last + margin >= next + viewportHeight) {
+      next = last + margin - viewportHeight + 1;
+    }
   } else if (last < next || first >= next + viewportHeight) {
     next = first;
   }
