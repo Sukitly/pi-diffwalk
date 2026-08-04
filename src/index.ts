@@ -19,11 +19,18 @@ import {
 } from "./in-progress-review.ts";
 import {
   buildReviewKickoffPrompt,
+  GUIDED_REVIEW_TOOL_DESCRIPTION,
   GUIDED_REVIEW_TOOL_NAME,
+  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
 } from "./prompts.ts";
 import { computeReviewDelta } from "./review-delta.ts";
+import { detectExactMoves } from "./review-moves.ts";
 import { createReviewSeries } from "./review-series.ts";
 import { openGuidedReview } from "./review-ui.ts";
+import {
+  assessRouteQuality,
+  ReviewRouteAdvisoryNudge,
+} from "./route-advisory.ts";
 import { validateReviewRoute } from "./route-validation.ts";
 import {
   type GuidedReviewResult,
@@ -45,6 +52,8 @@ interface PendingReview {
   review: InProgressReview;
   series: ReviewSeries;
   inProgress: boolean;
+  /** Advisory route-quality signals are returned at most once per review. */
+  advisoryNudged: boolean;
 }
 
 export function parseReviewTarget(args: string): string {
@@ -149,7 +158,12 @@ export function registerDiffWalk(
       delta,
       timestamp: new Date().toISOString(),
     });
-    pendingReview = { review, series, inProgress: false };
+    pendingReview = {
+      review,
+      series,
+      inProgress: false,
+      advisoryNudged: false,
+    };
     pi.sendUserMessage(buildReviewKickoffPrompt(snapshot, delta));
   }
 
@@ -342,10 +356,8 @@ export function registerDiffWalk(
   pi.registerTool<typeof ReviewRouteCandidateSchema, GuidedReviewResult>({
     name: GUIDED_REVIEW_TOOL_NAME,
     label: "Guided Review",
-    description:
-      "Open the DiffWalk walkthrough for the frozen snapshot prepared by /diffwalk. The route must cover every needs-review hunk exactly once.",
-    promptSnippet:
-      "Open the validated human-guided review route for the pending DiffWalk snapshot",
+    description: GUIDED_REVIEW_TOOL_DESCRIPTION,
+    promptSnippet: GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
     parameters: ReviewRouteCandidateSchema,
     executionMode: "sequential",
     async execute(_toolCallId, routeCandidate, signal, _onUpdate, ctx) {
@@ -376,6 +388,17 @@ export function registerDiffWalk(
         pending.review.delta,
         routeCandidate,
       );
+      if (!pending.advisoryNudged) {
+        const advisories = assessRouteQuality(
+          pending.review.snapshot,
+          route,
+          detectExactMoves(pending.review.snapshot),
+        );
+        if (advisories.length > 0) {
+          pending.advisoryNudged = true;
+          throw new ReviewRouteAdvisoryNudge(advisories);
+        }
+      }
       const verificationSignal = signal ?? new AbortController().signal;
       try {
         await verifySnapshot(

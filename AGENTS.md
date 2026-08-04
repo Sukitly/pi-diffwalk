@@ -86,8 +86,10 @@ src/
   git-diff.ts
   review-span.ts
   review-delta.ts
+  review-moves.ts
   in-progress-review.ts
   route-validation.ts
+  route-advisory.ts
   review-coverage.ts
   review-series.ts
   review-comments.ts
@@ -98,11 +100,14 @@ test/
   git-diff.test.ts
   review-span.test.ts
   review-delta.test.ts
+  review-moves.test.ts
   in-progress-review.test.ts
   route-validation.test.ts
+  route-advisory.test.ts
   review-coverage.test.ts
   review-series.test.ts
   review-comments.test.ts
+  prompt-surface.test.ts
 ```
 
 Responsibilities:
@@ -113,8 +118,10 @@ Responsibilities:
 | `src/git-diff.ts` | Capture repository state, parse unified diffs, include untracked files, and reconstruct each changed file as one frozen line sequence |
 | `src/review-span.ts` | Own the changed-line atom, span resolution, and coverage set arithmetic |
 | `src/review-delta.ts` | Classify changed lines against the previous completed round and validate delta coverage |
+| `src/review-moves.ts` | Detect exact relocations between the frozen snapshot's changed lines, deterministically and by content only |
 | `src/in-progress-review.ts` | Own resumable review identity, lifecycle, explicit unit progress, drafts, submission eligibility, and optimistic versioning |
 | `src/route-validation.ts` | Validate route references, coverage, ordering, and explicit skips |
+| `src/route-advisory.ts` | Assess a validated route for mechanical-route signals and format the one-shot advisory nudge |
 | `src/review-coverage.ts` | Materialize submitted review outcomes for every changed line |
 | `src/review-series.ts` | Create and append immutable completed review rounds |
 | `src/review-comments.ts` | Own comment anchors, drafts, ordering, cancellation, and drift-gated submission results |
@@ -213,7 +220,9 @@ Each changed text file is stored as one line sequence covering the whole file, n
 
 The model plans the route only after the extension has created the snapshot inventory and calculated the review delta. The model-planned route covers `needs-review` lines only. Carried-forward lines remain available for explicit human inspection outside the planned route and must not be covered or skipped by the model.
 
-The kickoff inventory carries no file content. It states the frozen comparison, which lines changed on which side, how each line is classified, and the Git hunk boundaries offered as suggested spans. The agent reads the code itself: the new side is the worktree, and the old side is reachable with `git show <mergeBase>:<path>`.
+The kickoff inventory carries no file content. It states the frozen comparison, which lines changed on which side, how each line is classified, the Git hunk boundaries offered as suggested spans, and exact relocations detected by content comparison, stated as coordinates only. The agent reads the code itself: the new side is the worktree, and the old side is reachable with `git show <mergeBase>:<path>`.
+
+Detected moves are advisory. The kickoff prompt invites the agent to keep both sides of a relocation in one review unit; route validation must not enforce move symmetry, because reordering or separating a relocation is a legitimate routing decision.
 
 The route schema must address regions by path and line range and contain only explanatory metadata, such as:
 
@@ -244,6 +253,12 @@ A valid route must satisfy:
 Unchanged lines may appear in any number of spans. Only changed lines are counted for coverage, so two units can share context without conflict.
 
 Return validation errors to the agent so it can repair the tool call. Do not silently repair a route in a way that could hide missing coverage.
+
+After a route passes validation, the extension may return advisory quality signals (hunk mirroring, alphabetical single-file ordering, a split move) instead of opening the walkthrough. Advisory feedback never alters or rejects a valid route, fires at most once per review, and must state that resubmitting the same route proceeds.
+
+Model-visible standing instructions, meaning the kickoff prompt, tool descriptions, and the advisory nudge, describe only decisions the agent must make. Validation internals are explained only through validation error messages at the moment of conflict. A new validation rule ships without new prompt prose unless the agent has a genuine decision to make.
+
+The complete standing model-visible surface is pinned by a golden test (`test/prompt-surface.test.ts` and its fixture). Changing any standing model-visible string requires updating the golden file in the same change. Validation error text stays outside the pinned surface so conflict feedback can improve without ceremony.
 
 Treat agent explanations as untrusted commentary. The UI must distinguish explanation from snapshot content.
 
@@ -332,6 +347,9 @@ At minimum, cover:
 - valid explicit skips
 - a span covering part of a Git hunk, and a unit spanning several files
 - carried-forward lines surviving a line shift and a neighbouring edit
+- exact move detection: relocation across files, uniform reindentation, ambiguity from a third occurrence, size thresholds, and same-hunk suppression
+- advisory signals for hunk mirroring, alphabetical ordering, and split moves, and the one-shot nudge accepting a resubmitted route
+- the pinned model-visible prompt surface matching its golden fixture
 - comment anchors on added and removed lines, and rejection of context lines
 - a kickoff prompt that does not grow with the amount of changed source text
 - snapshot drift detection

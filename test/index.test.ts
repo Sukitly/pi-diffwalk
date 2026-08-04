@@ -438,6 +438,85 @@ test("replaces an unrouted pending review when the target changes or drifts", as
   assert.match(harness.sentMessages[3] ?? "", /"targetRef": "origin\/release"/);
 });
 
+test("returns advisory signals once, then accepts the resubmitted route", async () => {
+  const movedBlock = [
+    "const total = computeTotalAmount(items);",
+    "const tax = totalAmount * currentTaxRate;",
+    "return { totalAmount, taxAmount: tax };",
+  ];
+  const harness = createHarness({
+    snapshot: makeSnapshot("snapshot-index", [
+      {
+        path: "src/from.ts",
+        lines: [" head", ...movedBlock.map((line) => `-${line}`), " tail"],
+      },
+      {
+        path: "src/to.ts",
+        lines: [" top", ...movedBlock.map((line) => `+${line}`), " bottom"],
+      },
+    ]),
+  });
+  await harness.command("", commandContext());
+  assert.match(
+    harness.sentMessages[0] ?? "",
+    /`moves` lists exact relocations/,
+  );
+
+  const splitRoute: ReviewRouteCandidate = {
+    snapshotId: "snapshot-index",
+    units: [
+      {
+        title: "Removal",
+        whyHere: "Old site first.",
+        context: "from -> to",
+        changeSummary: "Removes the block.",
+        reviewFocus: ["Is the removal safe?"],
+        spans: [span("src/from.ts", { old: [2, 4] })],
+      },
+      {
+        title: "Addition",
+        whyHere: "New site second.",
+        context: "from -> to",
+        changeSummary: "Adds the block.",
+        reviewFocus: ["Is the addition safe?"],
+        spans: [span("src/to.ts", { new: [2, 4] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+
+  await assert.rejects(
+    harness.tool.execute(
+      "call-1",
+      splitRoute,
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.name, "ReviewRouteAdvisoryNudge");
+      assert.match(error.message, /exact relocation/);
+      assert.match(error.message, /advisory signals, not validation failures/);
+      return true;
+    },
+  );
+  assert.deepEqual(harness.openedSnapshots, []);
+
+  const completed = await harness.tool.execute(
+    "call-2",
+    splitRoute,
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.deepEqual(completed.details, {
+    status: "paused",
+    snapshotId: "snapshot-index",
+  });
+  assert.deepEqual(harness.openedSnapshots, ["snapshot-index"]);
+});
+
 test("rejects repository drift before opening the walkthrough", async () => {
   const harness = createHarness({ drift: true });
   await harness.command("", commandContext());

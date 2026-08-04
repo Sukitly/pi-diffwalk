@@ -59,7 +59,7 @@ test("describes changed lines as ranges and never embeds file content", () => {
     computeReviewDelta(snapshot),
   );
 
-  assert.equal(inventory.formatVersion, 2);
+  assert.equal(inventory.formatVersion, 3);
   assert.equal(inventory.delta.changedLineCount, 3);
   assert.equal(inventory.delta.needsReviewLineCount, 3);
   assert.equal(inventory.delta.unreviewableChangeCount, 1);
@@ -179,6 +179,50 @@ test("offers Git hunk boundaries as suggested spans the agent may redraw", () =>
     { path: "src/a.ts", newStart: 2, newEnd: 2 },
     { path: "src/a.ts", newStart: 4, newEnd: 4 },
   ]);
+});
+
+test("lists detected moves as coordinates and gates the prompt guidance on them", () => {
+  const movedBlock = [
+    "const total = computeTotalAmount(items);",
+    "const tax = totalAmount * currentTaxRate;",
+    "return { totalAmount, taxAmount: tax };",
+  ];
+  const snapshot = makeSnapshot("snapshot-moves", [
+    {
+      path: "src/from.ts",
+      lines: [" head", ...movedBlock.map((line) => `-${line}`), " tail"],
+    },
+    {
+      path: "src/to.ts",
+      lines: [" top", ...movedBlock.map((line) => `+${line}`), " bottom"],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const inventory = buildReviewPromptInventory(snapshot, delta);
+
+  assert.deepEqual(inventory.moves, [
+    {
+      removed: { path: "src/from.ts", oldLines: "2-4" },
+      added: { path: "src/to.ts", newLines: "2-4" },
+    },
+  ]);
+  const serialized = JSON.stringify(inventory);
+  assert.equal(serialized.includes("computeTotalAmount"), false);
+
+  const prompt = buildReviewKickoffPrompt(snapshot, delta);
+  assert.match(prompt, /`moves` lists exact relocations/);
+
+  const noMoves = fixture();
+  assert.deepEqual(
+    buildReviewPromptInventory(noMoves, computeReviewDelta(noMoves)).moves,
+    [],
+  );
+  assert.equal(
+    buildReviewKickoffPrompt(noMoves, computeReviewDelta(noMoves)).includes(
+      "`moves` lists exact relocations",
+    ),
+    false,
+  );
 });
 
 test("reports an empty snapshot without inventing review work", () => {

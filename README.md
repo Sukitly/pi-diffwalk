@@ -87,6 +87,8 @@ A unit is a semantic region, not a diff artifact. It may span several files, so 
 
 DiffWalk offers the Git hunk boundaries as suggested spans. They are a starting point, not the unit of review. A hunk is produced by the diff algorithm's context radius and has no relationship to what a reviewer must understand together.
 
+DiffWalk also detects exact relocations: a block of removed lines that reappears, byte-exact after indentation normalization, as a block of added lines elsewhere in the change. The inventory lists each detected move as coordinates so the agent can keep both sides of a relocation in one review unit and the human reads a move as a move, not as an unrelated deletion and addition. Detection is conservative and deterministic: it requires a globally unique anchor line, a constant indentation offset, and a minimum amount of relocated code, and it discards ambiguous candidates instead of guessing. The walkthrough screen does not yet mark moved regions.
+
 In an incremental review, the planned route will contain only lines marked `needs-review`. Lines already reviewed without comment will be carried forward outside the planned route. They will remain visible in the review inventory and coverage summary, and the human will be able to inspect them explicitly without requiring the agent to route or skip them again.
 
 Each unit should include:
@@ -99,6 +101,16 @@ Each unit should include:
 - **Next:** Why the following unit comes next.
 
 The agent provides the route and explanation. DiffWalk provides the diff content. The model must never generate or rewrite the displayed patch.
+
+## Route Quality Signals
+
+Route validation answers whether a route is complete. It cannot answer whether a route is thoughtful. After a route passes validation, DiffWalk checks three mechanical signals of a route that was copied from Git hunks instead of planned semantically:
+
+- every unit copies exactly one suggested span, so the route mirrors hunk boundaries (only for routes with at least three units)
+- single-file units walk files in alphabetical path order (only for routes touching at least three files)
+- both sides of a detected relocation are covered, but never by the same unit
+
+When a signal fires, DiffWalk returns it to the agent once instead of opening the walkthrough, so the agent can redraw the route before the human starts reading. The signals are advisory, not a quota: the agent may resubmit the same route and the walkthrough opens. A review is nudged at most once.
 
 ## TUI
 
@@ -206,8 +218,10 @@ src/
   git-diff.ts           Snapshot collection and diff parsing
   review-span.ts        Changed-line atom, span resolution, and coverage arithmetic
   review-delta.ts       Incremental changed-line classification and delta validation
+  review-moves.ts       Exact relocation detection over the frozen snapshot
   in-progress-review.ts Resumable review lifecycle and submission eligibility
   route-validation.ts   Route coverage, ordering, and skip validation
+  route-advisory.ts     Advisory route-quality signals and the one-shot nudge
   review-coverage.ts    Submitted changed-line outcome calculation
   review-series.ts      Completed review round lifecycle
   review-comments.ts    Comment anchors, drafts, and submission results
@@ -218,12 +232,17 @@ test/
   index.test.ts
   git-diff.test.ts
   review-delta.test.ts
+  review-moves.test.ts
   in-progress-review.test.ts
   route-validation.test.ts
+  route-advisory.test.ts
   review-coverage.test.ts
   review-series.test.ts
   review-comments.test.ts
+  prompt-surface.test.ts
 ```
+
+Every standing string the model can see, including the kickoff prompt, the tool description, result instructions, and the advisory nudge, is rendered over fixed fixtures and pinned by a golden file in `test/prompt-surface.test.ts`. Changing the model-visible surface is an explicit, reviewable act. Validation error text is deliberately outside the pinned surface: it is conflict feedback and free to improve.
 
 ## Development Usage
 

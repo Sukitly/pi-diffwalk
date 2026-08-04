@@ -2,6 +2,7 @@ import {
   assertReviewDeltaMatchesSnapshot,
   isNeedsReviewReasonSkippable,
 } from "./review-delta.ts";
+import { detectExactMoves, type MoveSideRange } from "./review-moves.ts";
 import {
   type ChangedLine,
   changedLineKey,
@@ -24,6 +25,12 @@ import type {
 
 export const GUIDED_REVIEW_TOOL_NAME = "guided_review";
 
+export const GUIDED_REVIEW_TOOL_DESCRIPTION =
+  "Open the DiffWalk walkthrough for the frozen snapshot prepared by /diffwalk. The route must cover every needs-review changed line exactly once.";
+
+export const GUIDED_REVIEW_TOOL_PROMPT_SNIPPET =
+  "Open the validated human-guided review route for the pending DiffWalk snapshot";
+
 /**
  * The agent inventory deliberately carries no file content.
  *
@@ -33,7 +40,7 @@ export const GUIDED_REVIEW_TOOL_NAME = "guided_review";
  * which lines changed and which of them still require review.
  */
 export interface ReviewPromptInventory {
-  readonly formatVersion: 2;
+  readonly formatVersion: 3;
   readonly snapshot: {
     readonly id: SnapshotId;
     readonly repositoryRoot: string;
@@ -47,7 +54,18 @@ export interface ReviewPromptInventory {
     readonly unreviewableChangeCount: number;
   };
   readonly notices: readonly ReviewPromptNotice[];
+  /**
+   * Exact relocations detected by comparing changed-line content, stated as
+   * coordinates only. Advisory: the agent is invited, not forced, to keep
+   * both sides of a move in one review unit.
+   */
+  readonly moves: readonly ReviewPromptMove[];
   readonly files: readonly ReviewPromptFile[];
+}
+
+export interface ReviewPromptMove {
+  readonly removed: { readonly path: string; readonly oldLines: string };
+  readonly added: { readonly path: string; readonly newLines: string };
 }
 
 export interface ReviewPromptNotice {
@@ -142,7 +160,7 @@ export function buildReviewPromptInventory(
   });
 
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     snapshot: {
       id: snapshot.id,
       repositoryRoot: snapshot.repositoryRoot,
@@ -167,8 +185,24 @@ export function buildReviewPromptInventory(
       filePath: notice.filePath ?? null,
       message: notice.message,
     })),
+    moves: detectExactMoves(snapshot).map((move) => ({
+      removed: {
+        path: move.removed.path,
+        oldLines: formatMoveLines(move.removed),
+      },
+      added: {
+        path: move.added.path,
+        newLines: formatMoveLines(move.added),
+      },
+    })),
     files,
   };
+}
+
+function formatMoveLines(range: MoveSideRange): string {
+  return range.start === range.end
+    ? `${range.start}`
+    : `${range.start}-${range.end}`;
 }
 
 export function buildReviewKickoffPrompt(
@@ -201,6 +235,11 @@ export function buildReviewKickoffPrompt(
     "- Lines listed under `unresolvedComment` carry an unanswered comment from an earlier round and cannot be skipped.",
     "- Do not cover lines listed under `carriedForward`. They were reviewed in an earlier round and stay available outside the planned route.",
     "- `suggestedSpans` mirrors Git hunk boundaries. Use it only as a starting point; redraw it whenever a semantic region disagrees with it.",
+    ...(inventory.moves.length === 0
+      ? []
+      : [
+          "- `moves` lists exact relocations detected by comparing changed-line content. Put both sides of a move in the same review unit unless separating them is the honest reading order.",
+        ]),
     "- Provide at least one review unit; do not skip everything.",
     "- Keep titles, context, summaries, and questions explanatory. Do not paste patch text into the tool arguments.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
