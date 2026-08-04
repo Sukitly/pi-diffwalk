@@ -318,7 +318,7 @@ const ReviewUnitCandidateSchema = Type.Object(
       description: "Direct description of the change represented by this unit",
     }),
     reviewFocus: Type.Array(Type.String(), {
-      description: "Concrete questions for the human reviewer",
+      description: "Questions naming specific ways this change could be wrong",
       minItems: 1,
     }),
     spans: Type.Array(ReviewSpanCandidateSchema, {

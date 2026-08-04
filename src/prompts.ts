@@ -242,6 +242,7 @@ export function buildReviewKickoffPrompt(
         ]),
     "- Provide at least one review unit; do not skip everything.",
     "- Keep titles, context, summaries, and questions explanatory. Do not paste patch text into the tool arguments.",
+    "- Each `reviewFocus` question must name a specific way the change could be wrong. A mechanical unit needs one question; do not pad with restatements of `changeSummary`.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
     "",
     `When ready, call ${GUIDED_REVIEW_TOOL_NAME} with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.`,
