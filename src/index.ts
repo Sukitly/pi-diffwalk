@@ -3,7 +3,10 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  MessageRenderer,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import {
   assertReviewSnapshotUnchanged,
   captureRepositoryState,
@@ -40,11 +43,39 @@ import {
   type ReviewSeries,
   type ReviewSeriesId,
   type ReviewSnapshot,
+  type ReviewSubmissionMode,
+  type SnapshotId,
   type SubmittedGuidedReviewResult,
 } from "./types.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
 const DISCARD_OPTION = "--discard";
+
+/**
+ * Kickoff and submission payloads reach the LLM verbatim, but rendering the
+ * full text in the transcript buries the conversation. Both are sent as
+ * custom messages so the TUI can show a compact summary instead; the LLM
+ * receives the same content either way.
+ */
+export const DIFFWALK_KICKOFF_MESSAGE_TYPE = "diffwalk-kickoff";
+export const DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE = "diffwalk-review-result";
+
+/** Compact facts rendered in the TUI instead of the full kickoff prompt. */
+export interface KickoffMessageDetails {
+  readonly snapshotId: SnapshotId;
+  readonly targetRef: string;
+  readonly changedFileCount: number;
+  readonly needsReviewLineCount: number;
+  readonly carriedForwardLineCount: number;
+  readonly unreviewableChangeCount: number;
+}
+
+/** Compact facts rendered in the TUI instead of the submission payload. */
+export interface SubmittedReviewMessageDetails {
+  readonly snapshotId: SnapshotId;
+  readonly submissionMode: ReviewSubmissionMode;
+  readonly commentCount: number;
+}
 
 type CommandContext = Pick<ExtensionCommandContext, "cwd" | "ui">;
 
@@ -123,6 +154,30 @@ export function registerDiffWalk(
   let pendingReview: PendingReview | undefined;
   const completedSeriesById = new Map<ReviewSeriesId, ReviewSeries>();
 
+  pi.registerMessageRenderer<KickoffMessageDetails>(
+    DIFFWALK_KICKOFF_MESSAGE_TYPE,
+    renderKickoffMessage,
+  );
+  pi.registerMessageRenderer<SubmittedReviewMessageDetails>(
+    DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+    renderSubmittedReviewMessage,
+  );
+
+  function sendKickoffPrompt(
+    snapshot: ReviewSnapshot,
+    delta: ReviewDelta,
+  ): void {
+    pi.sendMessage(
+      {
+        customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
+        content: buildReviewKickoffPrompt(snapshot, delta),
+        display: true,
+        details: buildKickoffMessageDetails(snapshot, delta),
+      },
+      { triggerTurn: true },
+    );
+  }
+
   async function startNewReview(
     ctx: CommandContext,
     targetRef: string,
@@ -164,7 +219,7 @@ export function registerDiffWalk(
       inProgress: false,
       advisoryNudged: false,
     };
-    pi.sendUserMessage(buildReviewKickoffPrompt(snapshot, delta));
+    sendKickoffPrompt(snapshot, delta);
   }
 
   async function submitPendingReview(
@@ -303,7 +358,15 @@ export function registerDiffWalk(
         }
         const result = await runPendingReview(ctx, existing);
         if (result.status === "submitted") {
-          pi.sendUserMessage(formatGuidedReviewResult(result));
+          pi.sendMessage(
+            {
+              customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+              content: formatGuidedReviewResult(result),
+              display: true,
+              details: buildSubmittedReviewMessageDetails(result),
+            },
+            { triggerTurn: true },
+          );
         } else if (result.status === "discarded") {
           ctx.ui.notify(
             "Discarded the DiffWalk review and its drafts.",
@@ -340,12 +403,7 @@ export function registerDiffWalk(
           await startNewReview(ctx, requestedTarget ?? pendingTarget);
           return;
         }
-        pi.sendUserMessage(
-          buildReviewKickoffPrompt(
-            existing.review.snapshot,
-            existing.review.delta,
-          ),
-        );
+        sendKickoffPrompt(existing.review.snapshot, existing.review.delta);
         return;
       }
 
@@ -499,6 +557,120 @@ function describeNothingToReview(
     parts.push("The worktree matches the comparison.");
   }
   return parts.join(" ");
+}
+
+export function buildKickoffMessageDetails(
+  snapshot: ReviewSnapshot,
+  delta: ReviewDelta,
+): KickoffMessageDetails {
+  return {
+    snapshotId: snapshot.id,
+    targetRef: snapshot.comparison.targetRef,
+    changedFileCount: snapshot.changes.length,
+    needsReviewLineCount: delta.lines.filter(
+      (requirement) => requirement.type === "needs-review",
+    ).length,
+    carriedForwardLineCount: delta.lines.filter(
+      (requirement) => requirement.type === "carried-forward",
+    ).length,
+    unreviewableChangeCount: snapshot.changes.filter(
+      (change) => change.content.type !== "text",
+    ).length,
+  };
+}
+
+export function buildSubmittedReviewMessageDetails(
+  result: SubmittedGuidedReviewResult,
+): SubmittedReviewMessageDetails {
+  return {
+    snapshotId: result.snapshotId,
+    submissionMode: result.submissionMode,
+    commentCount: result.comments.length,
+  };
+}
+
+export const renderKickoffMessage: MessageRenderer<KickoffMessageDetails> = (
+  message,
+  options,
+  theme,
+) => {
+  const details = message.details;
+  const parts = ["kickoff"];
+  if (details !== undefined) {
+    parts.push(
+      `snapshot ${details.snapshotId}`,
+      `target ${details.targetRef}`,
+      countNoun(details.needsReviewLineCount, "needs-review line"),
+      countNoun(details.changedFileCount, "changed file"),
+    );
+    if (details.carriedForwardLineCount > 0) {
+      parts.push(
+        countNoun(details.carriedForwardLineCount, "carried-forward line"),
+      );
+    }
+    if (details.unreviewableChangeCount > 0) {
+      parts.push(
+        countNoun(details.unreviewableChangeCount, "unreviewable change"),
+      );
+    }
+  }
+  return renderCompactMessage(
+    parts.join("  "),
+    "route-preparation prompt sent to the agent; expand to read it",
+    message.content,
+    options,
+    theme,
+  );
+};
+
+export const renderSubmittedReviewMessage: MessageRenderer<
+  SubmittedReviewMessageDetails
+> = (message, options, theme) => {
+  const details = message.details;
+  const parts = ["review submitted"];
+  if (details !== undefined) {
+    parts.push(
+      `snapshot ${details.snapshotId}`,
+      countNoun(details.commentCount, "comment"),
+      details.submissionMode,
+    );
+  }
+  return renderCompactMessage(
+    parts.join("  "),
+    "structured result sent to the agent; expand to read it",
+    message.content,
+    options,
+    theme,
+  );
+};
+
+type CustomMessageContent = Parameters<MessageRenderer>[0]["content"];
+
+function renderCompactMessage(
+  summary: string,
+  collapsedHint: string,
+  content: CustomMessageContent,
+  options: { readonly expanded: boolean; readonly outputPad: number },
+  theme: Pick<Theme, "fg">,
+): Text {
+  const lines = [`${theme.fg("accent", "DiffWalk")} ${summary}`];
+  if (options.expanded) {
+    lines.push(theme.fg("dim", customMessageText(content)));
+  } else {
+    lines.push(theme.fg("dim", collapsedHint));
+  }
+  return new Text(lines.join("\n"), options.outputPad, 0);
+}
+
+function customMessageText(content: CustomMessageContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => (part.type === "text" ? part.text : `[${part.type}]`))
+    .join("\n");
+}
+
+function countNoun(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 export function formatGuidedReviewResult(result: GuidedReviewResult): string {
