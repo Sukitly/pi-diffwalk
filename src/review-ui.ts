@@ -140,6 +140,14 @@ interface RenderedRow {
   readonly text: string;
   readonly targetKey?: string;
   readonly inventoryIndex?: number;
+  readonly spanIndex?: number;
+  readonly isSpanHeader?: boolean;
+}
+
+interface DiffViewport {
+  readonly offset: number;
+  readonly contentHeight: number;
+  readonly pinnedSpanIndex?: number;
 }
 
 interface GuidedReviewComponentOptions {
@@ -475,16 +483,33 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.theme,
       width,
     );
-    this.diffOffset = ensureTargetVisible(
+    const viewport = resolveDiffViewport(
       renderedDiff,
       this.currentTarget(),
       this.diffOffset,
       diffHeight,
     );
+    this.diffOffset = viewport.offset;
+    const pinnedSpan =
+      viewport.pinnedSpanIndex === undefined
+        ? undefined
+        : unitView.spans[viewport.pinnedSpanIndex];
+    const pinnedHeader =
+      pinnedSpan === undefined
+        ? []
+        : [
+            fitLine(
+              this.theme.fg(
+                "muted",
+                this.theme.bold(spanHeaderLabel(pinnedSpan)),
+              ),
+              width,
+            ),
+          ];
     const diffRows = sliceViewport(
       renderedDiff,
       this.diffOffset,
-      diffHeight,
+      viewport.contentHeight,
     ).map(({ text }) => text);
 
     return [
@@ -493,6 +518,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       ...separator,
       ...feedback,
       diffLabel,
+      ...pinnedHeader,
       ...diffRows,
       ...footer,
     ];
@@ -611,16 +637,26 @@ export class GuidedReviewComponent implements Component, Focusable {
       entry?.type === "file"
         ? renderReadOnlyFile(entry, this.theme, width)
         : [this.theme.fg("muted", "This inventory entry has no text diff.")];
-    this.inventoryDiffOffset = clampOffset(
+    const fullOffset = clampOffset(
       this.inventoryDiffOffset,
       content.length,
       viewportHeight,
     );
+    const pinnedTitle =
+      entry?.type === "file" && viewportHeight >= MIN_PINNED_HEADER_VIEWPORT
+        ? pinnedFileTitle(entry, fullOffset, this.theme, width)
+        : [];
+    const contentHeight = viewportHeight - pinnedTitle.length;
+    this.inventoryDiffOffset =
+      pinnedTitle.length === 0
+        ? fullOffset
+        : clampOffset(this.inventoryDiffOffset, content.length, contentHeight);
     return [
       ...header,
+      ...pinnedTitle,
       ...content.slice(
         this.inventoryDiffOffset,
-        this.inventoryDiffOffset + viewportHeight,
+        this.inventoryDiffOffset + contentHeight,
       ),
       ...footer,
     ];
@@ -955,23 +991,26 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.theme,
       width,
     );
-    const currentOffset = ensureTargetVisible(
+    const viewport = resolveDiffViewport(
       rows,
       this.currentTarget(),
       this.diffOffset,
       viewportHeight,
     );
     const nextOffset = clampOffset(
-      currentOffset + direction * viewportHeight,
+      viewport.offset + direction * viewport.contentHeight,
       rows.length,
-      viewportHeight,
+      viewport.contentHeight,
     );
-    if (nextOffset === currentOffset) {
+    if (nextOffset === viewport.offset) {
       this.transientFeedback = undefined;
       this.refresh();
       return;
     }
-    const visibleRows = rows.slice(nextOffset, nextOffset + viewportHeight);
+    const visibleRows = rows.slice(
+      nextOffset,
+      nextOffset + viewport.contentHeight,
+    );
     const selectedKey =
       direction === 1
         ? visibleRows.find((row) => row.targetKey !== undefined)?.targetKey
@@ -1506,13 +1545,9 @@ function renderUnitDiff(
   for (const [spanIndex, spanView] of unit.spans.entries()) {
     if (spanIndex > 0) rows.push({ text: "" });
     rows.push(
-      ...wrapStyled(
-        theme.fg(
-          "muted",
-          `${displayChangePath(spanView.change)}  ${safeText(describeSpanRange(spanView.span))}`,
-        ),
-        width,
-      ).map((text) => ({ text })),
+      ...wrapStyled(theme.fg("muted", spanHeaderLabel(spanView)), width).map(
+        (text) => ({ text, spanIndex, isSpanHeader: true }),
+      ),
     );
     for (const line of spanView.lines) {
       const target = lineTarget(targetsByLine, spanView.change.id, line);
@@ -1526,6 +1561,7 @@ function renderUnitDiff(
         ...renderDiffLine(line, isSelected, hasComment, theme, width).map(
           (text) => ({
             text,
+            spanIndex,
             targetKey: target === undefined ? undefined : targetKey(target),
           }),
         ),
@@ -1533,6 +1569,11 @@ function renderUnitDiff(
     }
   }
   return rows;
+}
+
+/** File path and line ranges shown above a span and pinned when scrolled. */
+function spanHeaderLabel(spanView: SpanView): string {
+  return `${displayChangePath(spanView.change)}  ${safeText(describeSpanRange(spanView.span))}`;
 }
 
 function lineTarget(
@@ -1965,6 +2006,74 @@ function lastTargetKey(rows: readonly RenderedRow[]): string | undefined {
     if (key !== undefined) return key;
   }
   return undefined;
+}
+
+/** Smallest diff viewport that can afford to reserve a line for a pinned header. */
+const MIN_PINNED_HEADER_VIEWPORT = 5;
+
+/**
+ * Scroll offset and pinned span header for the walkthrough diff viewport.
+ *
+ * When the file header of the span at the top of the viewport has scrolled
+ * away, one viewport line is reserved to pin that header so the file name
+ * stays visible, and the offset is recomputed so the selected line remains
+ * inside the smaller viewport. Viewports shorter than
+ * MIN_PINNED_HEADER_VIEWPORT keep every line for content.
+ */
+function resolveDiffViewport(
+  rows: readonly RenderedRow[],
+  target: ReviewCommentTarget | undefined,
+  offset: number,
+  height: number,
+): DiffViewport {
+  let next = ensureTargetVisible(rows, target, offset, height);
+  let pinned =
+    height >= MIN_PINNED_HEADER_VIEWPORT
+      ? stickySpanIndex(rows, next)
+      : undefined;
+  if (pinned !== undefined) {
+    next = ensureTargetVisible(rows, target, next, height - 1);
+    pinned = stickySpanIndex(rows, next);
+  }
+  return {
+    offset: next,
+    contentHeight: pinned === undefined ? height : height - 1,
+    ...(pinned === undefined ? {} : { pinnedSpanIndex: pinned }),
+  };
+}
+
+/**
+ * Index of the span whose header must be pinned for the given scroll offset.
+ *
+ * Returns undefined when the top of the viewport already shows a span header,
+ * so the pinned line never duplicates a visible header.
+ */
+function stickySpanIndex(
+  rows: readonly RenderedRow[],
+  offset: number,
+): number | undefined {
+  if (offset <= 0) return undefined;
+  for (let index = offset; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (row?.spanIndex === undefined) continue;
+    return row.isSpanHeader ? undefined : row.spanIndex;
+  }
+  return undefined;
+}
+
+/**
+ * Single-line file title pinned above the read-only file viewport once the
+ * inline title has scrolled out, so the file name stays visible.
+ */
+function pinnedFileTitle(
+  entry: Extract<InventoryEntry, { readonly type: "file" }>,
+  offset: number,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  const title = theme.fg("accent", theme.bold(safeText(entry.title)));
+  if (offset < wrapStyled(title, width).length) return [];
+  return [fitLine(title, width)];
 }
 
 function ensureTargetVisible(

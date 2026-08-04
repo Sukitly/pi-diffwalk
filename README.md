@@ -142,7 +142,7 @@ Git snapshot diff
 j/k select line • c comment • n complete section • e details • s summary • Esc pause
 ```
 
-One unit can cover several files, so the implementation and the test that proves it are read together. The header shows the span each region belongs to.
+One unit can cover several files, so the implementation and the test that proves it are read together. The header shows the span each region belongs to. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. Terminals too short to spare a line keep every line for diff content.
 
 The normal flow is to select changed lines with `j` or `k`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `s` to inspect review progress and comments at any time.
 
