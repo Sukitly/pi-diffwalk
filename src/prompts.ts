@@ -20,7 +20,7 @@ import type {
   ReviewSnapshot,
   ReviewSpan,
   SnapshotId,
-  SnapshotNoticeKind,
+  SnapshotNoticeType,
 } from "./types.ts";
 
 export const GUIDED_REVIEW_TOOL_NAME = "guided_review";
@@ -40,7 +40,7 @@ export const GUIDED_REVIEW_TOOL_PROMPT_SNIPPET =
  * which lines changed and which of them still require review.
  */
 export interface ReviewPromptInventory {
-  readonly formatVersion: 3;
+  readonly formatVersion: 1;
   readonly snapshot: {
     readonly id: SnapshotId;
     readonly repositoryRoot: string;
@@ -70,7 +70,7 @@ export interface ReviewPromptMove {
 
 export interface ReviewPromptNotice {
   readonly id: NoticeId;
-  readonly kind: SnapshotNoticeKind;
+  readonly type: SnapshotNoticeType;
   readonly filePath: string | null;
   readonly message: string;
 }
@@ -116,7 +116,7 @@ export function buildReviewPromptInventory(
       oldPath: change.oldPath ?? null,
       newPath: change.newPath ?? null,
     };
-    if (change.content.kind !== "text") {
+    if (change.content.type !== "text") {
       return {
         ...base,
         reviewable: false,
@@ -160,7 +160,7 @@ export function buildReviewPromptInventory(
   });
 
   return {
-    formatVersion: 3,
+    formatVersion: 1,
     snapshot: {
       id: snapshot.id,
       repositoryRoot: snapshot.repositoryRoot,
@@ -176,12 +176,12 @@ export function buildReviewPromptInventory(
         (requirement) => requirement.type === "carried-forward",
       ).length,
       unreviewableChangeCount: snapshot.changes.filter(
-        (change) => change.content.kind !== "text",
+        (change) => change.content.type !== "text",
       ).length,
     },
     notices: snapshot.notices.map((notice) => ({
       id: notice.id,
-      kind: notice.kind,
+      type: notice.type,
       filePath: notice.filePath ?? null,
       message: notice.message,
     })),

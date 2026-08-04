@@ -49,7 +49,7 @@ export function changedLineKey(ref: ChangedLineRef): string {
 }
 
 export function textContent(change: FileChange): TextChange | undefined {
-  return change.content.kind === "text" ? change.content : undefined;
+  return change.content.type === "text" ? change.content : undefined;
 }
 
 export function listFileChangedLines(
@@ -59,12 +59,12 @@ export function listFileChangedLines(
   if (content === undefined) return [];
   const lines: ChangedLine[] = [];
   for (const line of content.lines) {
-    if (line.kind === "context") continue;
-    const side: ChangeSide = line.kind === "added" ? "new" : "old";
-    const number = line.kind === "added" ? line.newLine : line.oldLine;
+    if (line.type === "context") continue;
+    const side: ChangeSide = line.type === "added" ? "new" : "old";
+    const number = line.type === "added" ? line.newLine : line.oldLine;
     if (number === undefined) {
       throw new ReviewSpanError(
-        `File change ${change.id} has an ${line.kind} line without a ${side} line number.`,
+        `File change ${change.id} has an ${line.type} line without a ${side} line number.`,
       );
     }
     lines.push({
@@ -130,7 +130,7 @@ export function resolveSpan(
     };
   }
 
-  if (change.content.kind !== "text") {
+  if (change.content.type !== "text") {
     return {
       issues: [
         {

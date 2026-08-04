@@ -97,15 +97,15 @@ type SubmissionStatus =
   | "repository-drifted"
   | "verification-failed";
 
-type FeedbackKind = "info" | "warning";
+type FeedbackType = "info" | "warning";
 
 interface TransientFeedback {
-  readonly kind: FeedbackKind;
+  readonly type: FeedbackType;
   readonly message: string;
 }
 
 interface SubmissionFailure {
-  readonly kind: "repository-drifted" | "verification-failed";
+  readonly type: "repository-drifted" | "verification-failed";
   readonly error: unknown;
 }
 
@@ -124,14 +124,14 @@ interface UnitView {
 
 type InventoryEntry =
   | {
-      readonly kind: "file";
+      readonly type: "file";
       readonly title: string;
       readonly detail: string;
       readonly change: FileChange;
       readonly regions: readonly DiffLine[][];
     }
   | {
-      readonly kind: "metadata-only" | "binary" | "unsupported" | "notice";
+      readonly type: "metadata-only" | "binary" | "unsupported" | "notice";
       readonly title: string;
       readonly detail: string;
     };
@@ -606,7 +606,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const viewportHeight = Math.max(0, rows - header.length - footer.length);
     const entry = this.inventory[this.inventoryIndex];
     const content =
-      entry?.kind === "file"
+      entry?.type === "file"
         ? renderReadOnlyFile(entry, this.theme, width)
         : [this.theme.fg("muted", "This inventory entry has no text diff.")];
     this.inventoryDiffOffset = clampOffset(
@@ -842,7 +842,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.right)) {
       const entry = this.inventory[this.inventoryIndex];
-      if (entry?.kind === "file") {
+      if (entry?.type === "file") {
         this.inventoryDiffOffset = 0;
         this.openScreen("inventory-diff");
       } else {
@@ -1112,7 +1112,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.diffOffset = 0;
       this.explanationOffset = 0;
       this.transientFeedback = {
-        kind: "info",
+        type: "info",
         message: "Continue reviewing this section before submission.",
       };
       this.openScreen("walkthrough");
@@ -1148,14 +1148,14 @@ export class GuidedReviewComponent implements Component, Focusable {
   private failSubmission(attempt: number, error: unknown): void {
     if (attempt !== this.submissionAttempt) return;
     this.submissionAbortController = undefined;
-    const kind =
+    const type =
       error instanceof ReviewSnapshotDriftError ||
       (error instanceof InProgressReviewError &&
         error.code === "repository-drifted")
         ? "repository-drifted"
         : "verification-failed";
-    this.submissionStatus = kind;
-    this.submissionFailure = { kind, error };
+    this.submissionStatus = type;
+    this.submissionFailure = { type, error };
     this.summaryOffset = 0;
     this.screen = "summary";
     this.syncEditorFocus();
@@ -1170,13 +1170,13 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.submissionStatus = "not-checked";
     this.submissionFailure = undefined;
     this.transientFeedback = {
-      kind: "info",
+      type: "info",
       message: "Snapshot verification was cancelled.",
     };
   }
 
-  private setTransientFeedback(kind: FeedbackKind, message: string): void {
-    this.transientFeedback = { kind, message };
+  private setTransientFeedback(type: FeedbackType, message: string): void {
+    this.transientFeedback = { type, message };
     this.refresh();
   }
 
@@ -1378,7 +1378,7 @@ function buildReviewViewModel(
       if (plannedKeys.has(key)) planned += 1;
     }
     inventory.push({
-      kind: "file",
+      type: "file",
       title: `${fileInventoryStatus(planned, skipped, carried)}: ${displayChangePath(change)}`,
       detail: fileInventoryDetail(
         changed.length,
@@ -1394,23 +1394,23 @@ function buildReviewViewModel(
 
   let unsupportedCount = 0;
   for (const change of snapshot.changes) {
-    if (change.content.kind === "text") continue;
+    if (change.content.type === "text") continue;
     if (
-      change.content.kind === "binary" ||
-      change.content.kind === "unsupported"
+      change.content.type === "binary" ||
+      change.content.type === "unsupported"
     ) {
       unsupportedCount += 1;
     }
     inventory.push({
-      kind: change.content.kind,
-      title: `${change.content.kind}: ${change.status}: ${displayChangePath(change)}`,
+      type: change.content.type,
+      title: `${change.content.type}: ${change.status}: ${displayChangePath(change)}`,
       detail: nonTextChangeDetail(change),
     });
   }
   for (const notice of snapshot.notices) {
     inventory.push({
-      kind: "notice",
-      title: `notice: ${notice.filePath === undefined ? notice.kind : displayPath(notice.filePath)}`,
+      type: "notice",
+      title: `notice: ${notice.filePath === undefined ? notice.type : displayPath(notice.filePath)}`,
       detail: notice.message,
     });
   }
@@ -1540,10 +1540,10 @@ function lineTarget(
   fileChangeId: FileChange["id"],
   line: DiffLine,
 ): ReviewCommentTarget | undefined {
-  if (line.kind === "added" && line.newLine !== undefined) {
+  if (line.type === "added" && line.newLine !== undefined) {
     return targetsByLine.get(fileLineKey(fileChangeId, "new", line.newLine));
   }
-  if (line.kind === "removed" && line.oldLine !== undefined) {
+  if (line.type === "removed" && line.oldLine !== undefined) {
     return targetsByLine.get(fileLineKey(fileChangeId, "old", line.oldLine));
   }
   return undefined;
@@ -1561,7 +1561,7 @@ function describeSpanRange(span: ResolvedSpan): string {
 }
 
 function renderReadOnlyFile(
-  entry: Extract<InventoryEntry, { readonly kind: "file" }>,
+  entry: Extract<InventoryEntry, { readonly type: "file" }>,
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
@@ -1625,9 +1625,9 @@ function renderInventoryRows(
     const selected = index === selectedIndex;
     const prefix = selected ? "> " : "  ";
     const color =
-      entry.kind === "binary" ||
-      entry.kind === "unsupported" ||
-      entry.kind === "notice"
+      entry.type === "binary" ||
+      entry.type === "unsupported" ||
+      entry.type === "notice"
         ? "warning"
         : "text";
     const titleRows = wrapWithPrefix(
@@ -1660,7 +1660,7 @@ function renderTransientFeedback(
   if (feedback === undefined) return [];
   return wrapStyled(
     theme.fg(
-      feedback.kind === "warning" ? "warning" : "muted",
+      feedback.type === "warning" ? "warning" : "muted",
       safeText(feedback.message),
     ),
     width,
@@ -1681,7 +1681,7 @@ function renderSubmissionNotice(
   }
   if (failure === undefined) return [];
   const title =
-    failure.kind === "repository-drifted"
+    failure.type === "repository-drifted"
       ? "Repository drift blocks submission"
       : "Snapshot verification failed";
   return [
@@ -1790,7 +1790,7 @@ function renderSummaryLines(
     }
   }
 
-  const nonTextChanges = inventory.filter((entry) => entry.kind !== "file");
+  const nonTextChanges = inventory.filter((entry) => entry.type !== "file");
   lines.push("", theme.fg("muted", theme.bold("Non-text changes and notices")));
   if (nonTextChanges.length === 0) {
     lines.push(theme.fg("dim", "None."));
@@ -1870,13 +1870,13 @@ function sliceSpan(
   if (start < 0) return [];
 
   for (let padded = 0; padded < SPAN_DISPLAY_CONTEXT_RADIUS; padded += 1) {
-    if (start === 0 || content.lines[start - 1]?.kind !== "context") break;
+    if (start === 0 || content.lines[start - 1]?.type !== "context") break;
     start -= 1;
   }
   for (let padded = 0; padded < SPAN_DISPLAY_CONTEXT_RADIUS; padded += 1) {
     if (
       end === content.lines.length - 1 ||
-      content.lines[end + 1]?.kind !== "context"
+      content.lines[end + 1]?.type !== "context"
     ) {
       break;
     }
@@ -1913,7 +1913,7 @@ function buildDisplayRegions(
   let start = -1;
   let end = -1;
   for (const [index, line] of lines.entries()) {
-    if (line.kind === "context") continue;
+    if (line.type === "context") continue;
     const from = Math.max(0, index - radius);
     const to = Math.min(lines.length - 1, index + radius);
     if (start < 0) {
@@ -2109,7 +2109,7 @@ function displayChangePath(change: FileChange): string {
 }
 
 function nonTextChangeDetail(change: FileChange): string {
-  if (change.content.kind === "text") {
+  if (change.content.type === "text") {
     throw new GuidedReviewUiInvariantError(
       `Text change ${change.id} was rendered as a non-text inventory entry.`,
     );
@@ -2142,7 +2142,7 @@ function renderCommentAnchor(comment: ReviewComment): string {
 }
 
 function diffColor(line: DiffLine): Parameters<ReviewUiTheme["fg"]>[0] {
-  switch (line.kind) {
+  switch (line.type) {
     case "added":
       return "toolDiffAdded";
     case "removed":
@@ -2155,7 +2155,7 @@ function diffColor(line: DiffLine): Parameters<ReviewUiTheme["fg"]>[0] {
 /** Restores the unified diff prefix that the frozen model stores separately. */
 function diffLineText(line: DiffLine): string {
   const prefix =
-    line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " ";
+    line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
   return `${prefix}${line.text}`;
 }
 

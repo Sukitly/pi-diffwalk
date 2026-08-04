@@ -63,7 +63,7 @@ const BINARY_CHANGE: FileChange = {
   newMode: "100644",
   gitHeaderLines: [],
   content: {
-    kind: "binary",
+    type: "binary",
     gitBodyLines: [],
     unsupportedReason: "Binary changes are not reviewable as text.",
   },
@@ -88,7 +88,7 @@ function kickoffWithMoves(): string {
       notices: [
         {
           id: "notice:surface" as NoticeId,
-          kind: "cancelled-layer-change",
+          type: "cancelled-layer-change",
           filePath: "src/cancelled.ts",
           message: "Staged and unstaged changes cancel in the worktree.",
         },

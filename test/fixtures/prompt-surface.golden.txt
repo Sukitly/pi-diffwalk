@@ -30,7 +30,7 @@ When ready, call guided_review with snapshotId, ordered units, and skippedSpans.
 
 BEGIN_DIFFWALK_INVENTORY_JSON
 {
-  "formatVersion": 3,
+  "formatVersion": 1,
   "snapshot": {
     "id": "snapshot-surface-moves",
     "repositoryRoot": "/repo",
@@ -51,7 +51,7 @@ BEGIN_DIFFWALK_INVENTORY_JSON
   "notices": [
     {
       "id": "notice:surface",
-      "kind": "cancelled-layer-change",
+      "type": "cancelled-layer-change",
       "filePath": "src/cancelled.ts",
       "message": "Staged and unstaged changes cancel in the worktree."
     }
@@ -157,7 +157,7 @@ When ready, call guided_review with snapshotId, ordered units, and skippedSpans.
 
 BEGIN_DIFFWALK_INVENTORY_JSON
 {
-  "formatVersion": 3,
+  "formatVersion": 1,
   "snapshot": {
     "id": "snapshot-surface-delta",
     "repositoryRoot": "/repo",

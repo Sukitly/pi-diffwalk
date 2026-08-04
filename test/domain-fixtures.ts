@@ -80,7 +80,7 @@ export function makeFileChange(file: FileFixture): FileChange {
     newMode: status === "deleted" ? undefined : "100644",
     gitHeaderLines: [],
     content: {
-      kind: "text",
+      type: "text",
       lines,
       oldLineCount: lines.filter((line) => line.oldLine !== undefined).length,
       newLineCount: lines.filter((line) => line.newLine !== undefined).length,
@@ -99,13 +99,13 @@ function buildLines(spec: readonly string[]): readonly DiffLine[] {
     const marker = raw.slice(0, 1);
     const text = raw.slice(1);
     if (marker === "+") {
-      lines.push({ kind: "added", newLine, text });
+      lines.push({ type: "added", newLine, text });
       newLine += 1;
     } else if (marker === "-") {
-      lines.push({ kind: "removed", oldLine, text });
+      lines.push({ type: "removed", oldLine, text });
       oldLine += 1;
     } else {
-      lines.push({ kind: "context", oldLine, newLine, text });
+      lines.push({ type: "context", oldLine, newLine, text });
       oldLine += 1;
       newLine += 1;
     }
@@ -133,7 +133,7 @@ function buildSuggestedSpans(
   };
 
   for (const line of lines) {
-    if (line.kind === "context") {
+    if (line.type === "context") {
       flush();
       continue;
     }
@@ -174,13 +174,13 @@ export function makeRound(input: RoundFixtureInput): ReviewRound {
 
   const files: FileCoverage[] = [];
   for (const change of input.snapshot.changes) {
-    if (change.content.kind !== "text") continue;
+    if (change.content.type !== "text") continue;
     const path = change.newPath ?? change.oldPath ?? "";
     const records: ChangedLineRecord[] = [];
     for (const line of change.content.lines) {
-      if (line.kind === "context") continue;
-      const side = line.kind === "added" ? "new" : "old";
-      const number = line.kind === "added" ? line.newLine : line.oldLine;
+      if (line.type === "context") continue;
+      const side = line.type === "added" ? "new" : "old";
+      const number = line.type === "added" ? line.newLine : line.oldLine;
       if (number === undefined) continue;
       const disposition =
         dispositions[`${path}:${side}:${number}`] ?? "reviewed-without-comment";

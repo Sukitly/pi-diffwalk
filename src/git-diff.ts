@@ -81,10 +81,10 @@ interface HunkHeader {
   readonly newCount: number;
 }
 
-type ParsedLineKind = "context" | "added" | "removed" | "no-newline-marker";
+type ParsedLineType = "context" | "added" | "removed" | "no-newline-marker";
 
 interface ParsedLine {
-  readonly kind: ParsedLineKind;
+  readonly type: ParsedLineType;
   readonly raw: string;
   readonly oldLine?: number;
   readonly newLine?: number;
@@ -97,7 +97,7 @@ interface HunkDraft {
 
 type ContentDraft =
   | {
-      readonly kind: "text";
+      readonly type: "text";
       readonly hunks: readonly HunkDraft[];
     }
   | BinaryChange
@@ -635,13 +635,13 @@ function parsePatchBlocks(blocks: readonly (readonly string[])[]): PatchDraft {
   if (drafts.length === 1) return requiredAt(drafts, 0, "parsed patch block");
 
   const gitHeaderLines = drafts.flatMap((draft) => draft.gitHeaderLines);
-  if (drafts.every((draft) => draft.content.kind === "text")) {
+  if (drafts.every((draft) => draft.content.type === "text")) {
     return {
       gitHeaderLines,
       content: {
-        kind: "text",
+        type: "text",
         hunks: drafts.flatMap((draft) =>
-          draft.content.kind === "text" ? draft.content.hunks : [],
+          draft.content.type === "text" ? draft.content.hunks : [],
         ),
       },
     };
@@ -650,7 +650,7 @@ function parsePatchBlocks(blocks: readonly (readonly string[])[]): PatchDraft {
   return {
     gitHeaderLines,
     content: {
-      kind: "unsupported",
+      type: "unsupported",
       gitBodyLines: drafts.flatMap((draft) => contentBodyLines(draft.content)),
       unsupportedReason:
         "This file type change contains incompatible patch formats.",
@@ -694,7 +694,7 @@ function buildUnsupportedDraft(
   return buildDraft(record, source, {
     gitHeaderLines: [],
     content: {
-      kind: "unsupported",
+      type: "unsupported",
       gitBodyLines: [],
       unsupportedReason: reason,
     },
@@ -709,7 +709,7 @@ function buildDraft(
   let content = patch.content;
   if (record.statusCode === "U" || record.statusCode === "X") {
     content = {
-      kind: "unsupported",
+      type: "unsupported",
       gitBodyLines: contentBodyLines(patch.content),
       unsupportedReason:
         record.statusCode === "U"
@@ -718,7 +718,7 @@ function buildDraft(
     };
   } else if (record.oldMode === "160000" || record.newMode === "160000") {
     content = {
-      kind: "unsupported",
+      type: "unsupported",
       gitBodyLines: contentBodyLines(patch.content),
       unsupportedReason: "Gitlink changes are not supported.",
     };
@@ -757,7 +757,7 @@ function mapFileStatus(
       return "unknown";
     case "M":
       return record.oldMode !== record.newMode &&
-        content.kind === "metadata-only"
+        content.type === "metadata-only"
         ? "mode-changed"
         : "modified";
     default:
@@ -780,7 +780,7 @@ function parsePatchBlock(lines: readonly string[]): PatchDraft {
     return {
       gitHeaderLines,
       content: {
-        kind: "binary",
+        type: "binary",
         gitBodyLines: lines.slice(binaryStart),
         unsupportedReason: "Binary changes are not reviewable as text.",
       },
@@ -791,7 +791,7 @@ function parsePatchBlock(lines: readonly string[]): PatchDraft {
     return {
       gitHeaderLines,
       content: {
-        kind: "metadata-only",
+        type: "metadata-only",
         gitBodyLines: [],
         unsupportedReason: "This file change has no textual diff hunks.",
       },
@@ -802,7 +802,7 @@ function parsePatchBlock(lines: readonly string[]): PatchDraft {
     return {
       gitHeaderLines,
       content: {
-        kind: "text",
+        type: "text",
         hunks: parseHunks(lines.slice(firstHunk)),
       },
     };
@@ -811,7 +811,7 @@ function parsePatchBlock(lines: readonly string[]): PatchDraft {
     return {
       gitHeaderLines,
       content: {
-        kind: "unsupported",
+        type: "unsupported",
         gitBodyLines: lines.slice(firstHunk),
         unsupportedReason: `DiffWalk could not parse the textual diff: ${reason}`,
       },
@@ -842,21 +842,21 @@ function parseHunks(lines: readonly string[]): readonly HunkDraft[] {
       const raw = requiredAt(lines, index, "hunk line");
       if (raw.startsWith("@@ ")) break;
       if (raw.startsWith(" ")) {
-        diffLines.push({ kind: "context", raw, oldLine, newLine });
+        diffLines.push({ type: "context", raw, oldLine, newLine });
         oldLine += 1;
         newLine += 1;
         oldSeen += 1;
         newSeen += 1;
       } else if (raw.startsWith("+")) {
-        diffLines.push({ kind: "added", raw, newLine });
+        diffLines.push({ type: "added", raw, newLine });
         newLine += 1;
         newSeen += 1;
       } else if (raw.startsWith("-")) {
-        diffLines.push({ kind: "removed", raw, oldLine });
+        diffLines.push({ type: "removed", raw, oldLine });
         oldLine += 1;
         oldSeen += 1;
       } else if (raw === "\\ No newline at end of file") {
-        diffLines.push({ kind: "no-newline-marker", raw });
+        diffLines.push({ type: "no-newline-marker", raw });
       } else {
         throw new GitSnapshotError(
           `Unexpected unified diff line ${JSON.stringify(raw)}.`,
@@ -897,7 +897,7 @@ function parseHunkHeader(raw: string): HunkHeader {
 }
 
 function contentBodyLines(content: ContentDraft): readonly string[] {
-  if (content.kind === "text") {
+  if (content.type === "text") {
     return content.hunks.flatMap((hunk) => [
       hunk.header.raw,
       ...hunk.lines.map((line) => line.raw),
@@ -914,7 +914,7 @@ async function buildFileChange(
 ): Promise<FileChange> {
   const id = hashAs<FileChangeId>("file-change", draft);
   let content: FileChangeContent;
-  if (draft.content.kind === "text") {
+  if (draft.content.type === "text") {
     const hunks = draft.content.hunks;
     try {
       const oldFile = await readOldFile(
@@ -927,7 +927,7 @@ async function buildFileChange(
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error);
       content = {
-        kind: "unsupported",
+        type: "unsupported",
         gitBodyLines: contentBodyLines(draft.content),
         unsupportedReason: `DiffWalk could not reconstruct the frozen file content: ${reason}`,
       };
@@ -1019,7 +1019,7 @@ function buildTextContent(
         : hunk.header.newStart;
     while (oldCursor < oldBegin) {
       lines.push({
-        kind: "context",
+        type: "context",
         oldLine: oldCursor,
         newLine: newCursor,
         text: takeOldLine(`hunk ${JSON.stringify(hunk.header.raw)}`),
@@ -1033,42 +1033,42 @@ function buildTextContent(
       );
     }
 
-    let previousKind: DiffLine["kind"] | undefined;
+    let previousType: DiffLine["type"] | undefined;
     for (const line of hunk.lines) {
-      if (line.kind === "no-newline-marker") {
+      if (line.type === "no-newline-marker") {
         markerSeen = true;
-        if (previousKind === "removed" || previousKind === "context") {
+        if (previousType === "removed" || previousType === "context") {
           oldNoTrailingNewline = true;
         }
-        if (previousKind === "added" || previousKind === "context") {
+        if (previousType === "added" || previousType === "context") {
           newNoTrailingNewline = true;
         }
         continue;
       }
       const text = line.raw.slice(1);
-      if (line.kind === "context") {
+      if (line.type === "context") {
         lines.push({
-          kind: "context",
+          type: "context",
           oldLine: oldCursor,
           newLine: newCursor,
           text,
         });
         oldCursor += 1;
         newCursor += 1;
-      } else if (line.kind === "added") {
-        lines.push({ kind: "added", newLine: newCursor, text });
+      } else if (line.type === "added") {
+        lines.push({ type: "added", newLine: newCursor, text });
         newCursor += 1;
       } else {
-        lines.push({ kind: "removed", oldLine: oldCursor, text });
+        lines.push({ type: "removed", oldLine: oldCursor, text });
         oldCursor += 1;
       }
-      previousKind = line.kind;
+      previousType = line.type;
     }
   }
 
   while (oldCursor <= oldFile.lines.length) {
     lines.push({
-      kind: "context",
+      type: "context",
       oldLine: oldCursor,
       newLine: newCursor,
       text: takeOldLine("the trailing unchanged region"),
@@ -1095,7 +1095,7 @@ function buildTextContent(
   }
 
   return {
-    kind: "text",
+    type: "text",
     lines,
     oldLineCount,
     newLineCount,
@@ -1147,12 +1147,12 @@ function buildCancelledLayerNotices(
     const message = `Staged and unstaged changes for ${JSON.stringify(filePath)} cancel in the effective worktree.`;
     return {
       id: hashAs<NoticeId>("snapshot-notice", {
-        kind: "cancelled-layer-change",
+        type: "cancelled-layer-change",
         fileChangeId: fileChange?.id,
         filePath,
         message,
       }),
-      kind: "cancelled-layer-change",
+      type: "cancelled-layer-change",
       fileChangeId: fileChange?.id,
       filePath,
       message,

@@ -121,7 +121,7 @@ const metadataOnly: FileChange = {
   newMode: "100755",
   gitHeaderLines: ["old mode 100644", "new mode 100755"],
   content: {
-    kind: "metadata-only",
+    type: "metadata-only",
     gitBodyLines: [],
     unsupportedReason: "This file change has no textual diff hunks.",
   },
@@ -135,7 +135,7 @@ const addedBinary: FileChange = {
   newMode: "100644",
   gitHeaderLines: [],
   content: {
-    kind: "binary",
+    type: "binary",
     gitBodyLines: ["Binary files differ"],
     unsupportedReason: "Binary content cannot be reviewed line by line.",
   },
@@ -149,7 +149,7 @@ const deletedBinary: FileChange = {
   oldMode: "100644",
   gitHeaderLines: [],
   content: {
-    kind: "binary",
+    type: "binary",
     gitBodyLines: ["Binary files differ"],
     unsupportedReason: "Binary content cannot be reviewed line by line.",
   },
@@ -203,7 +203,7 @@ function makeUiFixture(): UiFixture {
       notices: [
         {
           id: brand<NoticeId>("notice:cancelled-layer"),
-          kind: "cancelled-layer-change",
+          type: "cancelled-layer-change",
           filePath: "src/cancelled.ts",
           message:
             "Staged and unstaged changes cancel in the effective worktree.",
