@@ -439,7 +439,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
     const summary = renderWalkthroughSummary(unitView.unit, this.theme, width);
     const summaryBudget =
-      bodyHeight >= 8
+      bodyHeight >= 12
         ? Math.min(
             summary.length,
             8,
@@ -463,9 +463,10 @@ export class GuidedReviewComponent implements Component, Focusable {
       "accent",
       this.theme.bold("Git snapshot diff"),
     );
+    const separator = preview.length > 0 ? [""] : [];
     const diffHeight = Math.max(
       0,
-      bodyHeight - preview.length - feedback.length - 1,
+      bodyHeight - preview.length - separator.length - feedback.length - 1,
     );
     const renderedDiff = renderUnitDiff(
       unitView,
@@ -489,6 +490,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     return [
       ...header,
       ...preview,
+      ...separator,
       ...feedback,
       diffLabel,
       ...diffRows,
@@ -703,16 +705,14 @@ export class GuidedReviewComponent implements Component, Focusable {
     const title = this.screenTitle();
     return [
       fitLine(
-        this.theme.fg(
+        `${this.theme.fg(
           "accent",
           this.theme.bold(`DiffWalk • ${position} • ${progress} • ${comments}`),
-        ),
+        )} ${this.theme.fg("dim", `• ${inventory} • ${verification}`)}`,
         width,
       ),
-      fitLine(
-        `${this.theme.fg("text", safeText(title))} ${this.theme.fg("dim", `• ${inventory} • ${verification}`)}`,
-        width,
-      ),
+      fitLine(this.theme.fg("text", safeText(title)), width),
+      "",
     ];
   }
 
