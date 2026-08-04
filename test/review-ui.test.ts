@@ -734,6 +734,126 @@ test("pages inventory diffs by the current viewport", () => {
   assert.match(secondPage, /context line [2-6]/);
 });
 
+/** One review unit covering tall all-added files, for scroll tests. */
+function makeTallFixture(
+  files: readonly { readonly path: string; readonly count: number }[],
+): UiFixture {
+  const snapshot = makeSnapshot(
+    "snapshot-tall",
+    files.map((file) => ({
+      path: file.path,
+      lines: Array.from(
+        { length: file.count },
+        (_, index) => `+line ${index + 1}`,
+      ),
+    })),
+  );
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Tall unit",
+        whyHere: "Scrolling exercises the pinned file header.",
+        context: "tall",
+        changeSummary: "Adds many lines.",
+        reviewFocus: ["Is every line correct?"],
+        spans: files.map((file) => span(file.path, { new: [1, file.count] })),
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+test("pins the span file header once it scrolls out of the diff viewport", () => {
+  const harness = createHarness(
+    60,
+    12,
+    makeTallFixture([{ path: "src/sticky.ts", count: 30 }]),
+  );
+
+  const before = harness.component.render(60);
+  assert.equal(
+    before.filter((line) => line.includes('"src/sticky.ts"')).length,
+    1,
+  );
+
+  press(harness.component, ...Array.from({ length: 20 }, () => "j"));
+  const after = harness.component.render(60);
+  const labelIndex = after.findIndex((line) =>
+    line.includes("Git snapshot diff"),
+  );
+  assert.ok(labelIndex >= 0);
+  assert.match(after[labelIndex + 1] ?? "", /"src\/sticky\.ts" {2}new 1-30/);
+  assert.equal(
+    after.filter((line) => line.includes('"src/sticky.ts"')).length,
+    1,
+  );
+  assert.match(after.join("\n"), />\s+21 \+line 21/);
+});
+
+test("pins only the top span header in a unit that spans several files", () => {
+  const harness = createHarness(
+    60,
+    12,
+    makeTallFixture([
+      { path: "src/a.ts", count: 20 },
+      { path: "src/b.ts", count: 20 },
+    ]),
+  );
+
+  press(harness.component, ...Array.from({ length: 20 }, () => "j"));
+  const bridged = harness.component.render(60);
+  const bridgedLabel = bridged.findIndex((line) =>
+    line.includes("Git snapshot diff"),
+  );
+  assert.match(bridged[bridgedLabel + 1] ?? "", /"src\/a\.ts"/);
+  assert.equal(bridged.filter((line) => line.includes('"src/b.ts"')).length, 1);
+
+  press(harness.component, ...Array.from({ length: 5 }, () => "j"));
+  const atHeader = harness.component.render(60);
+  assert.equal(
+    atHeader.filter((line) => line.includes('"src/a.ts"')).length,
+    0,
+  );
+  assert.equal(
+    atHeader.filter((line) => line.includes('"src/b.ts"')).length,
+    1,
+  );
+
+  press(harness.component, ...Array.from({ length: 5 }, () => "j"));
+  const deep = harness.component.render(60);
+  const deepLabel = deep.findIndex((line) =>
+    line.includes("Git snapshot diff"),
+  );
+  assert.match(deep[deepLabel + 1] ?? "", /"src\/b\.ts"/);
+  assert.equal(deep.filter((line) => line.includes('"src/b.ts"')).length, 1);
+});
+
+test("pins the inventory file title while scrolling the read-only diff", () => {
+  const harness = createHarness(
+    60,
+    12,
+    makeTallFixture([{ path: "src/sticky.ts", count: 30 }]),
+  );
+
+  press(harness.component, "i", "\r");
+  const top = harness.component.render(60);
+  assert.equal(top.filter((line) => line.includes("planned:")).length, 1);
+
+  press(harness.component, ...Array.from({ length: 6 }, () => "j"));
+  const scrolled = harness.component.render(60);
+  assert.match(scrolled[3] ?? "", /planned: "src\/sticky\.ts"/);
+  assert.equal(scrolled.filter((line) => line.includes("planned:")).length, 1);
+
+  press(harness.component, ...Array.from({ length: 40 }, () => "j"));
+  const bottom = harness.component.render(60);
+  assert.match(bottom[3] ?? "", /planned: "src\/sticky\.ts"/);
+  assert.match(bottom.join("\n"), /\+line 30/);
+});
+
 test("shows planned, carried, skipped, metadata, binary, and notice inventory", () => {
   const harness = createHarness(120, 60);
 
