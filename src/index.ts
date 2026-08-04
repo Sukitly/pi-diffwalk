@@ -68,19 +68,19 @@ export function parseReviewTarget(args: string): string {
  * the user meant to review.
  */
 export type DiffWalkCommand =
-  | { readonly kind: "review"; readonly targetRef?: string }
-  | { readonly kind: "discard" };
+  | { readonly type: "review"; readonly targetRef?: string }
+  | { readonly type: "discard" };
 
 export function parseDiffWalkCommand(args: string): DiffWalkCommand {
   const trimmed = args.trim();
-  if (trimmed.length === 0) return { kind: "review" };
-  if (trimmed === DISCARD_OPTION) return { kind: "discard" };
+  if (trimmed.length === 0) return { type: "review" };
+  if (trimmed === DISCARD_OPTION) return { type: "discard" };
   if (trimmed.startsWith("-")) {
     throw new Error(
       `Unknown /diffwalk option ${trimmed}. Use /diffwalk [base] to review a revision, or /diffwalk ${DISCARD_OPTION} to drop a pending review.`,
     );
   }
-  return { kind: "review", targetRef: parseReviewTarget(trimmed) };
+  return { type: "review", targetRef: parseReviewTarget(trimmed) };
 }
 
 export function createPiGitRunner(
@@ -253,7 +253,7 @@ export function registerDiffWalk(
       }
 
       const command = parseDiffWalkCommand(args);
-      if (command.kind === "discard") {
+      if (command.type === "discard") {
         discardPendingReview(ctx);
         return;
       }
@@ -485,7 +485,7 @@ function describeNothingToReview(
   let unreviewableCount = 0;
   for (const change of snapshot.changes) {
     const content = change.content;
-    if (content.kind === "text") continue;
+    if (content.type === "text") continue;
     unreviewableCount += 1;
     const path = change.newPath ?? change.oldPath ?? change.id;
     parts.push(

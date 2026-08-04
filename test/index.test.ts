@@ -173,7 +173,7 @@ function binaryChange(): FileChange {
     newPath: "assets/logo.png",
     gitHeaderLines: [],
     content: {
-      kind: "binary",
+      type: "binary",
       gitBodyLines: [],
       unsupportedReason: "Binary file.",
     },
@@ -204,12 +204,12 @@ test("parses the default and explicit review targets", () => {
 });
 
 test("separates the discard option from a base revision", () => {
-  assert.deepEqual(parseDiffWalkCommand("  "), { kind: "review" });
+  assert.deepEqual(parseDiffWalkCommand("  "), { type: "review" });
   assert.deepEqual(parseDiffWalkCommand(" origin/main "), {
-    kind: "review",
+    type: "review",
     targetRef: "origin/main",
   });
-  assert.deepEqual(parseDiffWalkCommand(" --discard "), { kind: "discard" });
+  assert.deepEqual(parseDiffWalkCommand(" --discard "), { type: "discard" });
   assert.throws(
     () => parseDiffWalkCommand("--drop"),
     /Unknown \/diffwalk option --drop/,
@@ -639,7 +639,7 @@ test("names carried-forward, unreviewable, and noticed changes when nothing need
       notices: [
         {
           id: "notice-1" as NoticeId,
-          kind: "cancelled-layer-change",
+          type: "cancelled-layer-change",
           message: "A submodule change was not reviewed.",
         },
       ],

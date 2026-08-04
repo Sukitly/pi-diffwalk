@@ -117,11 +117,11 @@ function findChange(snapshot: ReviewSnapshot, path: string): FileChange {
   return change;
 }
 function textContent(change: FileChange): TextChange {
-  assert.equal(change.content.kind, "text");
+  assert.equal(change.content.type, "text");
   return change.content as TextChange;
 }
 interface UnifiedLine {
-  readonly kind: string;
+  readonly type: string;
   readonly raw: string;
   readonly oldLine?: number;
   readonly newLine?: number;
@@ -129,8 +129,8 @@ interface UnifiedLine {
 /** Renders the frozen whole-file model back into unified diff form. */
 function unified(change: FileChange): readonly UnifiedLine[] {
   return textContent(change).lines.map((line) => ({
-    kind: line.kind,
-    raw: `${line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}${line.text}`,
+    type: line.type,
+    raw: `${line.type === "added" ? "+" : line.type === "removed" ? "-" : " "}${line.text}`,
     oldLine: line.oldLine,
     newLine: line.newLine,
   }));
@@ -139,7 +139,7 @@ function rawLines(change: FileChange): readonly string[] {
   return unified(change).map((line) => line.raw);
 }
 function changedLines(change: FileChange): readonly UnifiedLine[] {
-  return unified(change).filter((line) => line.kind !== "context");
+  return unified(change).filter((line) => line.type !== "context");
 }
 test("captures an unstaged tracked change with independent old and new line anchors", async (t) => {
   const repository = await createRepository(t);
@@ -152,17 +152,17 @@ test("captures an unstaged tracked change with independent old and new line anch
   assert.equal(change.source, "tracked");
   assert.equal(change.status, "modified");
   assert.deepEqual(
-    unified(change).map(({ kind, raw, oldLine, newLine }) => ({
-      kind,
+    unified(change).map(({ type, raw, oldLine, newLine }) => ({
+      type,
       raw,
       oldLine,
       newLine,
     })),
     [
-      { kind: "context", raw: " one", oldLine: 1, newLine: 1 },
-      { kind: "removed", raw: "-two", oldLine: 2, newLine: undefined },
-      { kind: "added", raw: "+changed", oldLine: undefined, newLine: 2 },
-      { kind: "context", raw: " three", oldLine: 3, newLine: 3 },
+      { type: "context", raw: " one", oldLine: 1, newLine: 1 },
+      { type: "removed", raw: "-two", oldLine: 2, newLine: undefined },
+      { type: "added", raw: "+changed", oldLine: undefined, newLine: 2 },
+      { type: "context", raw: " three", oldLine: 3, newLine: 3 },
     ],
   );
 });
@@ -203,11 +203,11 @@ test("captures untracked text and empty files", async (t) => {
   const text = findChange(snapshot, "untracked file.txt");
   assert.equal(text.source, "untracked");
   assert.equal(text.status, "added");
-  assert.equal(text.content.kind, "text");
+  assert.equal(text.content.type, "text");
   const empty = findChange(snapshot, "empty.txt");
   assert.equal(empty.source, "untracked");
   assert.equal(empty.status, "added");
-  assert.equal(empty.content.kind, "metadata-only");
+  assert.equal(empty.content.type, "metadata-only");
 });
 test("captures staged added and deleted files", async (t) => {
   const repository = await createRepository(t, {
@@ -236,7 +236,7 @@ test("captures exact renames and copies", async (t) => {
   const renamed = findChange(snapshot, "renamed.txt");
   assert.equal(renamed.status, "renamed");
   assert.equal(renamed.oldPath, "rename-source.txt");
-  assert.equal(renamed.content.kind, "metadata-only");
+  assert.equal(renamed.content.type, "metadata-only");
   const copied = findChange(snapshot, "copied.txt");
   assert.equal(copied.status, "copied");
   assert.equal(copied.oldPath, "copy-source.txt");
@@ -251,7 +251,7 @@ test("reports binary files without inventing text hunks", async (t) => {
   await git(repository, "add", "binary.dat");
   const snapshot = await captureReviewSnapshot(gitRunner, repository, "main");
   const change = findChange(snapshot, "binary.dat");
-  assert.equal(change.content.kind, "binary");
+  assert.equal(change.content.type, "binary");
   assert.ok(change.content.gitBodyLines.includes("GIT binary patch"));
   assert.match(change.content.unsupportedReason, /Binary/);
 });
@@ -288,7 +288,7 @@ test("preserves paths containing spaces, Unicode, and newlines", async (t) => {
     const change = findChange(snapshot, path);
     assert.equal(change.oldPath, path);
     assert.equal(change.newPath, path);
-    assert.equal(change.content.kind, "text");
+    assert.equal(change.content.type, "text");
   }
 });
 test("parses multiple hunks and keeps an unchanged hunk fingerprint across line shifts", async (t) => {
@@ -320,7 +320,7 @@ test("parses multiple hunks and keeps an unchanged hunk fingerprint across line 
   // which is what carries a review decision across rounds.
   assert.deepEqual(
     changedLines(firstChange).map((line) => [
-      line.kind,
+      line.type,
       line.raw,
       line.newLine,
     ]),
@@ -331,7 +331,7 @@ test("parses multiple hunks and keeps an unchanged hunk fingerprint across line 
   );
   assert.deepEqual(
     changedLines(secondChange).map((line) => [
-      line.kind,
+      line.type,
       line.raw,
       line.newLine,
     ]),
@@ -356,7 +356,7 @@ test("keeps changed-line identity when an untracked file becomes staged", async 
   assert.equal(stagedChange.source, "tracked");
   assert.deepEqual(rawLines(stagedChange), rawLines(untrackedChange));
   assert.deepEqual(
-    changedLines(stagedChange).map((line) => [line.kind, line.raw]),
+    changedLines(stagedChange).map((line) => [line.type, line.raw]),
     [["added", "+new content"]],
   );
 });
@@ -373,7 +373,7 @@ test("captures mode-only and file type changes", async (t) => {
   assert.equal(mode.status, "mode-changed");
   assert.equal(mode.oldMode, "100644");
   assert.equal(mode.newMode, "100755");
-  assert.equal(mode.content.kind, "metadata-only");
+  assert.equal(mode.content.type, "metadata-only");
   const type = findChange(snapshot, "type.txt");
   assert.equal(type.status, "type-changed");
   assert.equal(type.oldMode, "100644");
@@ -389,8 +389,8 @@ test("reports staged and unstaged changes that cancel in the effective worktree"
   const snapshot = await captureReviewSnapshot(gitRunner, repository, "main");
   assert.equal(snapshot.changes.length, 0);
   assert.deepEqual(
-    snapshot.notices.map(({ kind, filePath }) => ({ kind, filePath })),
-    [{ kind: "cancelled-layer-change", filePath: "cancelled.txt" }],
+    snapshot.notices.map(({ type, filePath }) => ({ type, filePath })),
+    [{ type: "cancelled-layer-change", filePath: "cancelled.txt" }],
   );
 });
 test("reports unmerged files as unsupported changes", async (t) => {
@@ -408,7 +408,7 @@ test("reports unmerged files as unsupported changes", async (t) => {
   const snapshot = await captureReviewSnapshot(gitRunner, repository, "main");
   const change = findChange(snapshot, "conflict.txt");
   assert.equal(change.status, "unmerged");
-  assert.equal(change.content.kind, "unsupported");
+  assert.equal(change.content.type, "unsupported");
   assert.match(change.content.unsupportedReason, /Unmerged/);
 });
 test("compares the merge base to branch commits plus the effective worktree", async (t) => {

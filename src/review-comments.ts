@@ -168,9 +168,9 @@ function buildCommentTargets(
       for (const [lineIndex, diffLine] of content.lines.entries()) {
         if (!spanContains(span, diffLine)) continue;
         const side: ChangeSide | undefined =
-          diffLine.kind === "added"
+          diffLine.type === "added"
             ? "new"
-            : diffLine.kind === "removed"
+            : diffLine.type === "removed"
               ? "old"
               : undefined;
         const number =

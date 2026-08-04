@@ -81,7 +81,7 @@ export type FileChangeContent =
  * mapping and the source of the changed-line set.
  */
 export interface TextChange {
-  readonly kind: "text";
+  readonly type: "text";
   readonly lines: readonly DiffLine[];
   readonly oldLineCount: number;
   readonly newLineCount: number;
@@ -92,28 +92,28 @@ export interface TextChange {
 }
 
 export interface BinaryChange {
-  readonly kind: "binary";
+  readonly type: "binary";
   readonly gitBodyLines: readonly string[];
   readonly unsupportedReason: string;
 }
 
 export interface MetadataOnlyChange {
-  readonly kind: "metadata-only";
+  readonly type: "metadata-only";
   readonly gitBodyLines: readonly string[];
   readonly unsupportedReason: string;
 }
 
 export interface UnsupportedChange {
-  readonly kind: "unsupported";
+  readonly type: "unsupported";
   readonly gitBodyLines: readonly string[];
   readonly unsupportedReason: string;
 }
 
-export type DiffLineKind = "context" | "added" | "removed";
+export type DiffLineType = "context" | "added" | "removed";
 
 /** One line of one file in the frozen snapshot, addressed on the side it exists. */
 export interface DiffLine {
-  readonly kind: DiffLineKind;
+  readonly type: DiffLineType;
   readonly oldLine?: number;
   readonly newLine?: number;
   readonly text: string;
@@ -143,11 +143,11 @@ export interface ResolvedSpan extends ReviewSpan {
   readonly fileChangeId: FileChangeId;
 }
 
-export type SnapshotNoticeKind = "cancelled-layer-change";
+export type SnapshotNoticeType = "cancelled-layer-change";
 
 export interface SnapshotNotice {
   readonly id: NoticeId;
-  readonly kind: SnapshotNoticeKind;
+  readonly type: SnapshotNoticeType;
   readonly fileChangeId?: FileChangeId;
   readonly filePath?: string;
   readonly message: string;

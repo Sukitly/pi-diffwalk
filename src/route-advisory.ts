@@ -78,7 +78,7 @@ function detectHunkMirroring(
   if (route.units.length < HUNK_MIRRORING_MIN_UNITS) return undefined;
   const suggested = new Set<string>();
   for (const change of snapshot.changes) {
-    if (change.content.kind !== "text") continue;
+    if (change.content.type !== "text") continue;
     for (const span of change.content.suggestedSpans) {
       suggested.add(spanKey(span));
     }

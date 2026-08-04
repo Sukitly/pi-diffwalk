@@ -17,7 +17,7 @@ const BINARY: FileChange = {
   newMode: "100644",
   gitHeaderLines: [],
   content: {
-    kind: "binary",
+    type: "binary",
     gitBodyLines: ["GIT binary patch", "literal 42", "zzzz"],
     unsupportedReason: "Binary changes are not reviewable as text.",
   },
@@ -43,7 +43,7 @@ function fixture(): ReviewSnapshot {
       notices: [
         {
           id: "notice:cancelled" as never,
-          kind: "cancelled-layer-change",
+          type: "cancelled-layer-change",
           filePath: "src/cancelled.ts",
           message: "Staged and unstaged changes cancel in the worktree.",
         },
@@ -59,7 +59,7 @@ test("describes changed lines as ranges and never embeds file content", () => {
     computeReviewDelta(snapshot),
   );
 
-  assert.equal(inventory.formatVersion, 3);
+  assert.equal(inventory.formatVersion, 1);
   assert.equal(inventory.delta.changedLineCount, 3);
   assert.equal(inventory.delta.needsReviewLineCount, 3);
   assert.equal(inventory.delta.unreviewableChangeCount, 1);
