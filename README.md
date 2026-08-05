@@ -127,8 +127,7 @@ Focus
 • Is the trusted issuer read from configuration?
 • Do existing tokens remain compatible?
 
-Git snapshot diff
-"src/auth/handler.ts"  old 46-52  new 46-53
+src/auth/handler.ts
      46    46   const request = await parse(raw)
      47    47   const token = request.headers.authorization
      48        - if (!token) return unauthorized()
@@ -136,13 +135,13 @@ Git snapshot diff
            49 + if (claims.issuer !== config.issuer) return unauthorized()
      49    50   return createSession(claims)
 
-"test/auth/handler.test.ts"  new 88-94
+test/auth/handler.test.ts
            88 + test("rejects a foreign issuer", async () => {
 
 j/k select line • c comment • n complete section • e details • s summary • Esc pause
 ```
 
-One unit can cover several files, so the implementation and the test that proves it are read together. The header shows the span each region belongs to. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. Terminals too short to spare a line keep every line for diff content.
+One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. Terminals too short to spare a line keep every line for diff content.
 
 The normal flow is to select changed lines with `j` or `k`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `s` to inspect review progress and comments at any time.
 

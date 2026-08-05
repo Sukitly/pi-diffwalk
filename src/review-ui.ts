@@ -505,14 +505,10 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.theme,
       width,
     );
-    const diffLabel = this.theme.fg(
-      "accent",
-      this.theme.bold("Git snapshot diff"),
-    );
     const separator = preview.length > 0 ? [""] : [];
     const diffHeight = Math.max(
       0,
-      bodyHeight - preview.length - separator.length - feedback.length - 1,
+      bodyHeight - preview.length - separator.length - feedback.length,
     );
     const renderedDiff = renderUnitDiff(
       unitView,
@@ -536,15 +532,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const pinnedHeader =
       pinnedSpan === undefined
         ? []
-        : [
-            fitLine(
-              this.theme.fg(
-                "muted",
-                this.theme.bold(spanHeaderLabel(pinnedSpan)),
-              ),
-              width,
-            ),
-          ];
+        : [fitLine(renderSpanHeader(pinnedSpan, this.theme), width)];
     const diffRows = sliceViewport(
       renderedDiff,
       this.diffOffset,
@@ -556,7 +544,6 @@ export class GuidedReviewComponent implements Component, Focusable {
       ...preview,
       ...separator,
       ...feedback,
-      diffLabel,
       ...pinnedHeader,
       ...diffRows,
       ...footer,
@@ -1863,9 +1850,11 @@ function renderUnitDiff(
   for (const [spanIndex, spanView] of unit.spans.entries()) {
     if (spanIndex > 0) rows.push({ text: "" });
     rows.push(
-      ...wrapStyled(theme.fg("muted", spanHeaderLabel(spanView)), width).map(
-        (text) => ({ text, spanIndex, isSpanHeader: true }),
-      ),
+      ...wrapStyled(renderSpanHeader(spanView, theme), width).map((text) => ({
+        text,
+        spanIndex,
+        isSpanHeader: true,
+      })),
     );
     for (const line of spanView.lines) {
       const target = lineTarget(targetsByLine, spanView.change.id, line);
@@ -1889,9 +1878,9 @@ function renderUnitDiff(
   return rows;
 }
 
-/** File path and line ranges shown above a span and pinned when scrolled. */
-function spanHeaderLabel(spanView: SpanView): string {
-  return `${displayChangePath(spanView.change)}  ${safeText(describeSpanRange(spanView.span))}`;
+/** Highlighted file path shown above a span and pinned when scrolled. */
+function renderSpanHeader(spanView: SpanView, theme: ReviewUiTheme): string {
+  return theme.fg("accent", theme.bold(displayBareChangePath(spanView.change)));
 }
 
 function lineTarget(
@@ -2555,6 +2544,22 @@ function displayChangePath(change: FileChange): string {
   }
   const path = change.newPath ?? change.oldPath;
   return path === undefined ? "<unknown path>" : displayPath(path);
+}
+
+function displayBareChangePath(change: FileChange): string {
+  if (
+    change.oldPath !== undefined &&
+    change.newPath !== undefined &&
+    change.oldPath !== change.newPath
+  ) {
+    return `${displayBarePath(change.oldPath)} -> ${displayBarePath(change.newPath)}`;
+  }
+  const path = change.newPath ?? change.oldPath;
+  return path === undefined ? "<unknown path>" : displayBarePath(path);
+}
+
+function displayBarePath(path: string): string {
+  return safeText(JSON.stringify(path).slice(1, -1));
 }
 
 function nonTextChangeDetail(change: FileChange): string {
