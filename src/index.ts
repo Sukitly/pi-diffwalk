@@ -376,28 +376,18 @@ export function registerDiffWalk(
           return;
         }
         const result = await runPendingReview(ctx, existing);
-        if (result.status === "submitted") {
-          if (shouldSendReviewToAgent(result)) {
-            pi.sendMessage(
-              {
-                customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
-                content: formatGuidedReviewResult(result),
-                display: true,
-                details: buildSubmittedReviewMessageDetails(result),
-              },
-              { triggerTurn: true },
-            );
-          } else {
-            ctx.ui.notify(
-              "DiffWalk review complete. No comments submitted. No agent follow-up needed.",
-              "info",
-            );
-          }
-        } else if (result.status === "discarded") {
-          ctx.ui.notify(
-            "Discarded the DiffWalk review and its drafts.",
-            "info",
+        if (result.status === "submitted" && shouldSendReviewToAgent(result)) {
+          pi.sendMessage(
+            {
+              customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+              content: formatGuidedReviewResult(result),
+              display: true,
+              details: buildSubmittedReviewMessageDetails(result),
+            },
+            { triggerTurn: true },
           );
+        } else {
+          ctx.ui.notify(reviewOutcomeNotification(result), "info");
         }
         return;
       }
@@ -515,33 +505,24 @@ export function registerDiffWalk(
     renderCall(_args, theme) {
       return new Text(theme.fg("toolTitle", "DiffWalk review"), 0, 0);
     },
-    renderResult(result, { isPartial }, theme, context) {
-      if (isPartial) {
-        return new Text(theme.fg("muted", "Opening review..."), 0, 0);
-      }
+    renderResult(result, _options, theme, context) {
       if (context.isError) {
         const content = result.content.find((item) => item.type === "text");
         const message =
           content?.type === "text" ? content.text : "Unknown review error.";
         return new Text(
           [
-            theme.fg("error", "Review could not start"),
+            theme.fg("error", "Review needs attention"),
             theme.fg("muted", message),
           ].join("\n"),
           0,
           0,
         );
       }
-      const details: unknown = result.details;
-      if (!isGuidedReviewResult(details)) {
-        const content = result.content.find((item) => item.type === "text");
-        return new Text(
-          content?.type === "text" ? content.text : "Review finished.",
-          0,
-          0,
-        );
+      if (result.details === undefined) {
+        return new Text("Review finished.", 0, 0);
       }
-      return renderGuidedReviewToolResult(details, theme);
+      return renderGuidedReviewToolResult(result.details, theme);
     },
   });
 }
@@ -701,34 +682,33 @@ function renderGuidedReviewToolResult(
   result: GuidedReviewResult,
   theme: Theme,
 ): Text {
-  if (result.status === "paused") {
-    return new Text(
-      [
-        theme.fg("warning", "Review paused"),
+  const [title = "Review finished", ...body] =
+    reviewOutcomeDisplayLines(result);
+  const titleColor = result.status === "submitted" ? "success" : "warning";
+  return new Text([theme.fg(titleColor, title), ...body].join("\n"), 0, 0);
+}
+
+function reviewOutcomeDisplayLines(result: GuidedReviewResult): string[] {
+  switch (result.status) {
+    case "submitted":
+      return submittedReviewDisplayLines(
+        buildSubmittedReviewMessageDetails(result),
+        "Review complete",
+      );
+    case "paused":
+      return [
+        "Review paused",
         "Progress and draft comments kept. Run /diffwalk to resume.",
-      ].join("\n"),
-      0,
-      0,
-    );
+      ];
+    case "discarded":
+      return ["Review discarded", "Progress and draft comments removed."];
   }
-  if (result.status === "discarded") {
-    return new Text(
-      [
-        theme.fg("warning", "Review discarded"),
-        "Progress and draft comments removed.",
-      ].join("\n"),
-      0,
-      0,
-    );
-  }
-  return new Text(
-    submittedReviewDisplayLines(
-      buildSubmittedReviewMessageDetails(result),
-      theme.fg("success", "Review complete"),
-    ).join("\n"),
-    0,
-    0,
-  );
+}
+
+function reviewOutcomeNotification(result: GuidedReviewResult): string {
+  const [title = "Review finished", ...body] =
+    reviewOutcomeDisplayLines(result);
+  return [`${title}.`, ...body].join(" ");
 }
 
 function submittedReviewDisplayLines(
@@ -743,21 +723,6 @@ function submittedReviewDisplayLines(
     `${countNoun(details.commentCount, "comment")} sent to the agent.`,
     `Next step: ${submissionNextStep(details.submissionMode)}`,
   ];
-}
-
-function isGuidedReviewResult(value: unknown): value is GuidedReviewResult {
-  if (typeof value !== "object" || value === null || !("status" in value)) {
-    return false;
-  }
-  if (value.status === "paused" || value.status === "discarded") return true;
-  if (value.status !== "submitted") return false;
-  return (
-    "comments" in value &&
-    Array.isArray(value.comments) &&
-    "submissionMode" in value &&
-    (value.submissionMode === "discuss-first" ||
-      value.submissionMode === "apply-change-requests")
-  );
 }
 
 function displayPath(change: ReviewSnapshot["changes"][number]): string {
@@ -803,9 +768,12 @@ function describeAdditionalChange(
 }
 
 function submissionNextStep(mode: ReviewSubmissionMode): string {
-  return mode === "discuss-first"
-    ? "Discuss comments before making changes"
-    : "Apply requested changes";
+  switch (mode) {
+    case "discuss-first":
+      return "Discuss comments before making changes";
+    case "apply-change-requests":
+      return "Apply requested changes";
+  }
 }
 
 function countNoun(count: number, noun: string): string {
