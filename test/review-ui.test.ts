@@ -767,6 +767,55 @@ function makeTallFixture(
   return { snapshot, delta, routeCandidate, route };
 }
 
+test("restores leading span padding when scrolling back to the first line", () => {
+  const snapshot = makeSnapshot("snapshot-margin", [
+    {
+      path: "src/margin.ts",
+      lines: [
+        " head 1",
+        " head 2",
+        " head 3",
+        ...Array.from({ length: 25 }, (_, index) => `+line ${index + 1}`),
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Margin unit",
+        whyHere: "Scrolling away and back exercises the scroll margin.",
+        context: "margin",
+        changeSummary: "Adds many lines below unchanged padding.",
+        reviewFocus: ["Does the padding stay reachable?"],
+        spans: [span("src/margin.ts", { new: [4, 28] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  const harness = createHarness(60, 20, {
+    snapshot,
+    delta,
+    routeCandidate,
+    route,
+  });
+
+  assert.match(renderText(harness), /head 1/);
+
+  press(harness.component, ...Array.from({ length: 15 }, () => "j"));
+  const scrolled = renderText(harness);
+  assert.doesNotMatch(scrolled, /head [1-3]/);
+
+  press(harness.component, ...Array.from({ length: 15 }, () => "k"));
+  const returned = renderText(harness);
+  assert.match(returned, />\s+4 \+line 1\s/);
+  assert.match(returned, /head 1/);
+  assert.match(returned, /head 2/);
+  assert.match(returned, /head 3/);
+});
+
 test("pins the span file header once it scrolls out of the diff viewport", () => {
   const harness = createHarness(
     60,
