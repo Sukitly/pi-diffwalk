@@ -44,7 +44,7 @@ import { makeSnapshot, span } from "./domain-fixtures.ts";
 
 type GuidedToolDefinition = ToolDefinition<
   typeof ReviewRouteCandidateSchema,
-  unknown
+  GuidedReviewResult
 >;
 
 interface HarnessBehavior {
@@ -345,6 +345,53 @@ function validRoute(snapshotId = "snapshot-index"): ReviewRouteCandidate {
   };
 }
 
+type GuidedToolRenderContext = Parameters<
+  NonNullable<GuidedToolDefinition["renderResult"]>
+>[3];
+
+function toolRenderContext(isError = false): GuidedToolRenderContext {
+  return {
+    args: validRoute(),
+    toolCallId: "call-render",
+    invalidate() {},
+    lastComponent: undefined,
+    state: {},
+    cwd: "/repo",
+    executionStarted: true,
+    argsComplete: true,
+    isPartial: false,
+    expanded: false,
+    showImages: false,
+    isError,
+  };
+}
+
+function renderedToolResult(
+  tool: GuidedToolDefinition,
+  result: Awaited<ReturnType<GuidedToolDefinition["execute"]>>,
+  isError = false,
+): string {
+  assert.ok(tool.renderResult);
+  return renderedText(
+    tool.renderResult(
+      result,
+      { expanded: false, isPartial: false },
+      plainTheme,
+      toolRenderContext(isError),
+    ),
+    120,
+  );
+}
+
+function toolResultWithoutDetails(
+  message: string,
+): Awaited<ReturnType<GuidedToolDefinition["execute"]>> {
+  return {
+    content: [{ type: "text", text: message }],
+    details: undefined as unknown as GuidedReviewResult,
+  };
+}
+
 test("parses the default and explicit review targets", () => {
   assert.equal(parseReviewTarget(""), "HEAD");
   assert.equal(parseReviewTarget("  \n"), "HEAD");
@@ -510,6 +557,108 @@ test("continues the initial tool turn when a submitted review has comments", asy
   assert.equal(details.status, "submitted");
   assert.equal(details.comments.length, 1);
   assert.equal(submitted.terminate, false);
+});
+
+test("renders every successful guided-review outcome", async () => {
+  const pausedHarness = createHarness();
+  await pausedHarness.command("", commandContext());
+  const paused = await pausedHarness.tool.execute(
+    "call-paused",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  assert.ok(pausedHarness.tool.renderCall);
+  assert.equal(
+    renderedText(
+      pausedHarness.tool.renderCall(
+        validRoute(),
+        plainTheme,
+        toolRenderContext(),
+      ),
+      120,
+    ),
+    "DiffWalk review",
+  );
+  assert.equal(
+    renderedToolResult(pausedHarness.tool, paused),
+    [
+      "Review paused",
+      "Progress and draft comments kept. Run /diffwalk to resume.",
+    ].join("\n"),
+  );
+
+  const discardedHarness = createHarness({ discardOnOpen: true });
+  await discardedHarness.command("", commandContext());
+  const discarded = await discardedHarness.tool.execute(
+    "call-discarded",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(
+    renderedToolResult(discardedHarness.tool, discarded),
+    ["Review discarded", "Progress and draft comments removed."].join("\n"),
+  );
+
+  const noCommentsHarness = createHarness({ submitOnOpen: true });
+  await noCommentsHarness.command("", commandContext());
+  const noComments = await noCommentsHarness.tool.execute(
+    "call-no-comments",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const noCommentsText = renderedToolResult(noCommentsHarness.tool, noComments);
+  assert.equal(
+    noCommentsText,
+    [
+      "Review complete",
+      "No comments submitted.",
+      "No agent follow-up needed.",
+    ].join("\n"),
+  );
+
+  const commentsHarness = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+  });
+  await commentsHarness.command("", commandContext());
+  const comments = await commentsHarness.tool.execute(
+    "call-comments",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const commentsText = renderedToolResult(commentsHarness.tool, comments);
+  assert.equal(
+    commentsText,
+    [
+      "Review complete",
+      "1 comment sent to the agent.",
+      "Next step: Discuss comments before making changes",
+    ].join("\n"),
+  );
+});
+
+test("does not expose protocol JSON when successful result details are missing", () => {
+  const harness = createHarness();
+  const protocolJson = formatGuidedReviewResult({
+    status: "submitted",
+    snapshotId: "snapshot-index" as SnapshotId,
+    submissionMode: "discuss-first",
+    comments: [],
+  });
+
+  assert.equal(
+    renderedToolResult(harness.tool, toolResultWithoutDetails(protocolJson)),
+    "Review finished.",
+  );
 });
 
 test("rejects a different explicit base once the human worked in the review", async () => {
@@ -682,6 +831,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
     skippedSpans: [],
   };
 
+  let advisoryMessage: string | undefined;
   await assert.rejects(
     harness.tool.execute(
       "call-1",
@@ -692,11 +842,24 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
     ),
     (error: unknown) => {
       assert.ok(error instanceof Error);
+      advisoryMessage = error.message;
       assert.equal(error.name, "ReviewRouteAdvisoryNudge");
       assert.match(error.message, /exact relocation/);
       assert.match(error.message, /advisory signals, not validation failures/);
       return true;
     },
+  );
+  assert.ok(advisoryMessage);
+  const renderedAdvisory = renderedToolResult(
+    harness.tool,
+    toolResultWithoutDetails(advisoryMessage),
+    true,
+  );
+  assert.match(renderedAdvisory, /^Review needs attention/);
+  assert.match(renderedAdvisory, /advisory signals, not validation failures/);
+  assert.doesNotMatch(
+    renderedAdvisory,
+    /snapshotId|submissionMode|instruction/,
   );
   assert.deepEqual(harness.openedSnapshots, []);
 
@@ -718,6 +881,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
   const harness = createHarness({ drift: true });
   await harness.command("", commandContext());
 
+  let driftMessage: string | undefined;
   await assert.rejects(
     harness.tool.execute(
       "call-drift",
@@ -728,6 +892,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
     ),
     (error: unknown) => {
       assert.ok(error instanceof ReviewSnapshotDriftError);
+      driftMessage = error.message;
       assert.match(
         error.message,
         /Run \/diffwalk again before opening DiffWalk/,
@@ -735,6 +900,15 @@ test("rejects repository drift before opening the walkthrough", async () => {
       return true;
     },
   );
+  assert.ok(driftMessage);
+  const renderedDrift = renderedToolResult(
+    harness.tool,
+    toolResultWithoutDetails(driftMessage),
+    true,
+  );
+  assert.match(renderedDrift, /^Review needs attention/);
+  assert.match(renderedDrift, /Run \/diffwalk again before opening DiffWalk/);
+  assert.doesNotMatch(renderedDrift, /snapshotId|submissionMode|instruction/);
   assert.deepEqual(harness.openedSnapshots, []);
 
   await assert.rejects(
@@ -980,7 +1154,43 @@ test("completes a resumed review with no comments without messaging the agent", 
   );
   assert.equal(harness.appendedEntries.length, 1);
   assert.deepEqual(notifications, [
-    "Completed the DiffWalk review with no comments.",
+    "Review complete. No comments submitted. No agent follow-up needed.",
+  ]);
+});
+
+test("reports resumed pauses and discards with the tool outcome wording", async () => {
+  const pausedHarness = createHarness();
+  await pausedHarness.command("", commandContext());
+  await pausedHarness.tool.execute(
+    "call-paused",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const pausedNotifications: string[] = [];
+  await pausedHarness.command("", commandContext("tui", pausedNotifications));
+  assert.deepEqual(pausedNotifications, [
+    "Review paused. Progress and draft comments kept. Run /diffwalk to resume.",
+  ]);
+
+  const discardedHarness = createHarness();
+  await discardedHarness.command("", commandContext());
+  await discardedHarness.tool.execute(
+    "call-discarded",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  discardedHarness.behavior.discardOnOpen = true;
+  const discardedNotifications: string[] = [];
+  await discardedHarness.command(
+    "",
+    commandContext("tui", discardedNotifications),
+  );
+  assert.deepEqual(discardedNotifications, [
+    "Review discarded. Progress and draft comments removed.",
   ]);
 });
 
@@ -1099,7 +1309,7 @@ test("renders kickoff facts on separate lines without protocol details", () => {
   assert.equal(renderedText(expanded, 200), collapsedText);
 });
 
-test("renders submitted review facts without protocol details", () => {
+test("renders submitted agent handoff facts without protocol details", () => {
   const submitted: GuidedReviewResult = {
     status: "submitted",
     snapshotId: "snapshot-index" as SnapshotId,
@@ -1128,16 +1338,11 @@ test("renders submitted review facts without protocol details", () => {
   assert.equal(
     collapsedText,
     [
-      "DiffWalk review submitted",
-      "Comments: 2",
+      "DiffWalk review complete",
+      "2 comments sent to the agent.",
       "Next step: Discuss comments before making changes",
     ].join("\n"),
   );
-  assert.doesNotMatch(
-    collapsedText,
-    /snapshot|discuss-first|instruction|agent/i,
-  );
-
   const expanded = renderSubmittedReviewMessage(
     message,
     { expanded: true, outputPad: 0 },

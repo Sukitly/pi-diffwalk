@@ -4,6 +4,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   MessageRenderer,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
@@ -375,28 +376,18 @@ export function registerDiffWalk(
           return;
         }
         const result = await runPendingReview(ctx, existing);
-        if (result.status === "submitted") {
-          if (shouldSendReviewToAgent(result)) {
-            pi.sendMessage(
-              {
-                customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
-                content: formatGuidedReviewResult(result),
-                display: true,
-                details: buildSubmittedReviewMessageDetails(result),
-              },
-              { triggerTurn: true },
-            );
-          } else {
-            ctx.ui.notify(
-              "Completed the DiffWalk review with no comments.",
-              "info",
-            );
-          }
-        } else if (result.status === "discarded") {
-          ctx.ui.notify(
-            "Discarded the DiffWalk review and its drafts.",
-            "info",
+        if (result.status === "submitted" && shouldSendReviewToAgent(result)) {
+          pi.sendMessage(
+            {
+              customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+              content: formatGuidedReviewResult(result),
+              display: true,
+              details: buildSubmittedReviewMessageDetails(result),
+            },
+            { triggerTurn: true },
           );
+        } else {
+          ctx.ui.notify(reviewOutcomeNotification(result), "info");
         }
         return;
       }
@@ -510,6 +501,28 @@ export function registerDiffWalk(
         details: result,
         terminate: !shouldSendReviewToAgent(result),
       };
+    },
+    renderCall(_args, theme) {
+      return new Text(theme.fg("toolTitle", "DiffWalk review"), 0, 0);
+    },
+    renderResult(result, _options, theme, context) {
+      if (context.isError) {
+        const content = result.content.find((item) => item.type === "text");
+        const message =
+          content?.type === "text" ? content.text : "Unknown review error.";
+        return new Text(
+          [
+            theme.fg("error", "Review needs attention"),
+            theme.fg("muted", message),
+          ].join("\n"),
+          0,
+          0,
+        );
+      }
+      if (result.details === undefined) {
+        return new Text("Review finished.", 0, 0);
+      }
+      return renderGuidedReviewToolResult(result.details, theme);
     },
   });
 }
@@ -654,16 +667,63 @@ export const renderKickoffMessage: MessageRenderer<KickoffMessageDetails> = (
 export const renderSubmittedReviewMessage: MessageRenderer<
   SubmittedReviewMessageDetails
 > = (message, options, theme) => {
-  const lines = [`${theme.fg("accent", "DiffWalk")} review submitted`];
   const details = message.details;
-  if (details !== undefined) {
-    lines.push(
-      `Comments: ${details.commentCount}`,
-      `Next step: ${submissionNextStep(details.submissionMode)}`,
-    );
-  }
+  const lines =
+    details === undefined
+      ? [theme.fg("accent", "DiffWalk review complete")]
+      : submittedReviewDisplayLines(
+          details,
+          theme.fg("accent", "DiffWalk review complete"),
+        );
   return new Text(lines.join("\n"), options.outputPad, 0);
 };
+
+function renderGuidedReviewToolResult(
+  result: GuidedReviewResult,
+  theme: Theme,
+): Text {
+  const [title = "Review finished", ...body] =
+    reviewOutcomeDisplayLines(result);
+  const titleColor = result.status === "submitted" ? "success" : "warning";
+  return new Text([theme.fg(titleColor, title), ...body].join("\n"), 0, 0);
+}
+
+function reviewOutcomeDisplayLines(result: GuidedReviewResult): string[] {
+  switch (result.status) {
+    case "submitted":
+      return submittedReviewDisplayLines(
+        buildSubmittedReviewMessageDetails(result),
+        "Review complete",
+      );
+    case "paused":
+      return [
+        "Review paused",
+        "Progress and draft comments kept. Run /diffwalk to resume.",
+      ];
+    case "discarded":
+      return ["Review discarded", "Progress and draft comments removed."];
+  }
+}
+
+function reviewOutcomeNotification(result: GuidedReviewResult): string {
+  const [title = "Review finished", ...body] =
+    reviewOutcomeDisplayLines(result);
+  return [`${title}.`, ...body].join(" ");
+}
+
+function submittedReviewDisplayLines(
+  details: SubmittedReviewMessageDetails,
+  title: string,
+): string[] {
+  if (details.commentCount === 0) {
+    return [title, "No comments submitted.", "No agent follow-up needed."];
+  }
+  return [
+    title,
+    `${countNoun(details.commentCount, "comment")} sent to the agent.`,
+    `Next step: ${submissionNextStep(details.submissionMode)}`,
+  ];
+}
 
 function displayPath(change: ReviewSnapshot["changes"][number]): string {
   if (
@@ -708,9 +768,12 @@ function describeAdditionalChange(
 }
 
 function submissionNextStep(mode: ReviewSubmissionMode): string {
-  return mode === "discuss-first"
-    ? "Discuss comments before making changes"
-    : "Apply requested changes";
+  switch (mode) {
+    case "discuss-first":
+      return "Discuss comments before making changes";
+    case "apply-change-requests":
+      return "Apply requested changes";
+  }
 }
 
 function countNoun(count: number, noun: string): string {
