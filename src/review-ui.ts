@@ -290,6 +290,10 @@ export class GuidedReviewComponent implements Component, Focusable {
   private commentInputError?: string;
   private submissionAttempt = 0;
   private submissionAbortController?: AbortController;
+  /** True after a bare g, waiting for a second g to jump to the top. */
+  private pendingGPrefix = false;
+  /** Accumulated vim-style count prefix, applied to the next movement key. */
+  private pendingCount?: number;
   private cachedWidth?: number;
   private cachedRows?: number;
   private cachedLines?: readonly string[];
@@ -369,24 +373,52 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
 
+    if (this.pendingGPrefix) {
+      this.pendingGPrefix = false;
+      if (matchesKey(data, "g")) {
+        this.pendingCount = undefined;
+        this.goToTop();
+        return;
+      }
+    } else if (this.isMovementScreen()) {
+      if (matchesKey(data, "g")) {
+        this.pendingGPrefix = true;
+        return;
+      }
+      const digit = digitKey(data);
+      if (
+        digit !== undefined &&
+        (this.pendingCount !== undefined || digit > 0)
+      ) {
+        this.pendingCount = Math.min(
+          MAX_COUNT_PREFIX,
+          (this.pendingCount ?? 0) * 10 + digit,
+        );
+        return;
+      }
+    }
+
+    const count = this.pendingCount ?? 1;
+    this.pendingCount = undefined;
+
     switch (this.screen) {
       case "walkthrough":
-        this.handleWalkthroughInput(data);
+        this.handleWalkthroughInput(data, count);
         break;
       case "comment-editor":
         this.handleCommentEditorInput(data);
         break;
       case "explanation":
-        this.handleExplanationInput(data);
+        this.handleExplanationInput(data, count);
         break;
       case "inventory":
-        this.handleInventoryInput(data);
+        this.handleInventoryInput(data, count);
         break;
       case "inventory-diff":
-        this.handleInventoryDiffInput(data);
+        this.handleInventoryDiffInput(data, count);
         break;
       case "summary":
-        this.handleSummaryInput(data);
+        this.handleSummaryInput(data, count);
         break;
       case "cancel-confirmation":
         this.handleCancelConfirmationInput(data);
@@ -774,29 +806,45 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
   }
 
-  private handleWalkthroughInput(data: string): void {
+  private handleWalkthroughInput(data: string, count: number): void {
     if (this.isUp(data)) {
-      this.moveTarget(-1);
+      this.moveTarget(-count);
       return;
     }
     if (this.isDown(data)) {
-      this.moveTarget(1);
+      this.moveTarget(count);
       return;
     }
-    if (matchesKey(data, Key.pageUp)) {
-      this.pageWalkthrough(-1);
+    if (matchesKey(data, "shift+g")) {
+      this.moveTargetToEdge("last");
       return;
     }
-    if (matchesKey(data, Key.pageDown)) {
-      this.pageWalkthrough(1);
+    if (this.isPageUp(data)) {
+      this.pageWalkthrough(-1, "full", count);
       return;
     }
-    if (matchesKey(data, "p") || matchesKey(data, Key.left)) {
-      this.moveUnit(-1);
+    if (this.isPageDown(data)) {
+      this.pageWalkthrough(1, "full", count);
       return;
     }
-    if (matchesKey(data, Key.right)) {
-      this.moveUnit(1);
+    if (matchesKey(data, "ctrl+u")) {
+      this.pageWalkthrough(-1, "half", count);
+      return;
+    }
+    if (matchesKey(data, "ctrl+d")) {
+      this.pageWalkthrough(1, "half", count);
+      return;
+    }
+    if (
+      matchesKey(data, "p") ||
+      matchesKey(data, "h") ||
+      matchesKey(data, Key.left)
+    ) {
+      this.moveUnit(-count);
+      return;
+    }
+    if (matchesKey(data, "l") || matchesKey(data, Key.right)) {
+      this.moveUnit(count);
       return;
     }
     if (matchesKey(data, "n")) {
@@ -841,27 +889,34 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
-  private handleExplanationInput(data: string): void {
+  private handleExplanationInput(data: string, count: number): void {
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, "e") ||
+      matchesKey(data, "h") ||
       matchesKey(data, Key.left)
     ) {
       this.openScreen("walkthrough");
       return;
     }
-    if (this.isUp(data)) this.scrollExplanation(-1);
-    else if (this.isDown(data)) this.scrollExplanation(1);
-    else if (matchesKey(data, Key.pageUp))
-      this.scrollExplanation(-this.secondaryViewportHeight());
-    else if (matchesKey(data, Key.pageDown))
-      this.scrollExplanation(this.secondaryViewportHeight());
+    if (this.isUp(data)) this.scrollExplanation(-count);
+    else if (this.isDown(data)) this.scrollExplanation(count);
+    else if (matchesKey(data, "shift+g")) this.scrollExplanationToEnd();
+    else if (this.isPageUp(data))
+      this.scrollExplanation(-count * this.secondaryViewportHeight());
+    else if (this.isPageDown(data))
+      this.scrollExplanation(count * this.secondaryViewportHeight());
+    else if (matchesKey(data, "ctrl+u"))
+      this.scrollExplanation(-count * halfPage(this.secondaryViewportHeight()));
+    else if (matchesKey(data, "ctrl+d"))
+      this.scrollExplanation(count * halfPage(this.secondaryViewportHeight()));
   }
 
-  private handleInventoryInput(data: string): void {
+  private handleInventoryInput(data: string, count: number): void {
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, "i") ||
+      matchesKey(data, "h") ||
       matchesKey(data, Key.left)
     ) {
       this.transientFeedback = undefined;
@@ -869,14 +924,38 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
     if (this.isUp(data)) {
-      this.moveInventorySelection(-1);
+      this.moveInventorySelection(-count);
       return;
     }
     if (this.isDown(data)) {
-      this.moveInventorySelection(1);
+      this.moveInventorySelection(count);
       return;
     }
-    if (matchesKey(data, Key.enter) || matchesKey(data, Key.right)) {
+    if (matchesKey(data, "shift+g")) {
+      this.moveInventoryToEdge("last");
+      return;
+    }
+    if (this.isPageUp(data)) {
+      this.moveInventorySelection(-count * this.inventoryPageSize());
+      return;
+    }
+    if (this.isPageDown(data)) {
+      this.moveInventorySelection(count * this.inventoryPageSize());
+      return;
+    }
+    if (matchesKey(data, "ctrl+u")) {
+      this.moveInventorySelection(-count * halfPage(this.inventoryPageSize()));
+      return;
+    }
+    if (matchesKey(data, "ctrl+d")) {
+      this.moveInventorySelection(count * halfPage(this.inventoryPageSize()));
+      return;
+    }
+    if (
+      matchesKey(data, Key.enter) ||
+      matchesKey(data, "l") ||
+      matchesKey(data, Key.right)
+    ) {
       const entry = this.inventory[this.inventoryIndex];
       if (entry?.type === "file") {
         this.inventoryDiffOffset = 0;
@@ -890,20 +969,33 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
   }
 
-  private handleInventoryDiffInput(data: string): void {
-    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
+  private handleInventoryDiffInput(data: string, count: number): void {
+    if (
+      matchesKey(data, Key.escape) ||
+      matchesKey(data, "h") ||
+      matchesKey(data, Key.left)
+    ) {
       this.openScreen("inventory");
       return;
     }
-    if (this.isUp(data)) this.scrollInventoryDiff(-1);
-    else if (this.isDown(data)) this.scrollInventoryDiff(1);
-    else if (matchesKey(data, Key.pageUp))
-      this.scrollInventoryDiff(-this.secondaryViewportHeight());
-    else if (matchesKey(data, Key.pageDown))
-      this.scrollInventoryDiff(this.secondaryViewportHeight());
+    if (this.isUp(data)) this.scrollInventoryDiff(-count);
+    else if (this.isDown(data)) this.scrollInventoryDiff(count);
+    else if (matchesKey(data, "shift+g")) this.scrollInventoryDiffToEnd();
+    else if (this.isPageUp(data))
+      this.scrollInventoryDiff(-count * this.secondaryViewportHeight());
+    else if (this.isPageDown(data))
+      this.scrollInventoryDiff(count * this.secondaryViewportHeight());
+    else if (matchesKey(data, "ctrl+u"))
+      this.scrollInventoryDiff(
+        -count * halfPage(this.secondaryViewportHeight()),
+      );
+    else if (matchesKey(data, "ctrl+d"))
+      this.scrollInventoryDiff(
+        count * halfPage(this.secondaryViewportHeight()),
+      );
   }
 
-  private handleSummaryInput(data: string): void {
+  private handleSummaryInput(data: string, count: number): void {
     if (matchesKey(data, Key.escape)) {
       this.transientFeedback = undefined;
       this.openScreen("walkthrough");
@@ -912,6 +1004,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     if (
       matchesKey(data, Key.left) ||
       matchesKey(data, Key.right) ||
+      matchesKey(data, "h") ||
+      matchesKey(data, "l") ||
       matchesKey(data, Key.tab)
     ) {
       this.updateReview(
@@ -927,12 +1021,17 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.refresh();
       return;
     }
-    if (this.isUp(data)) this.scrollSummary(-1);
-    else if (this.isDown(data)) this.scrollSummary(1);
-    else if (matchesKey(data, Key.pageUp))
-      this.scrollSummary(-this.summaryViewportHeight());
-    else if (matchesKey(data, Key.pageDown))
-      this.scrollSummary(this.summaryViewportHeight());
+    if (this.isUp(data)) this.scrollSummary(-count);
+    else if (this.isDown(data)) this.scrollSummary(count);
+    else if (matchesKey(data, "shift+g")) this.scrollSummaryToEnd();
+    else if (this.isPageUp(data))
+      this.scrollSummary(-count * this.summaryViewportHeight());
+    else if (this.isPageDown(data))
+      this.scrollSummary(count * this.summaryViewportHeight());
+    else if (matchesKey(data, "ctrl+u"))
+      this.scrollSummary(-count * halfPage(this.summaryViewportHeight()));
+    else if (matchesKey(data, "ctrl+d"))
+      this.scrollSummary(count * halfPage(this.summaryViewportHeight()));
     else if (matchesKey(data, Key.enter)) this.startSubmission();
   }
 
@@ -951,6 +1050,39 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
   }
 
+  /** Screens where bare g starts a gg jump instead of being text input. */
+  private isMovementScreen(): boolean {
+    return (
+      this.screen !== "comment-editor" && this.screen !== "cancel-confirmation"
+    );
+  }
+
+  /** Jump to the top of the current screen after a gg sequence. */
+  private goToTop(): void {
+    switch (this.screen) {
+      case "walkthrough":
+        this.moveTargetToEdge("first");
+        return;
+      case "explanation":
+        this.explanationOffset = 0;
+        this.refresh();
+        return;
+      case "inventory":
+        this.moveInventoryToEdge("first");
+        return;
+      case "inventory-diff":
+        this.inventoryDiffOffset = 0;
+        this.refresh();
+        return;
+      case "summary":
+        this.summaryOffset = 0;
+        this.refresh();
+        return;
+      default:
+        return;
+    }
+  }
+
   private isUp(data: string): boolean {
     return (
       matchesKey(data, "k") || this.keybindings.matches(data, "tui.select.up")
@@ -960,6 +1092,22 @@ export class GuidedReviewComponent implements Component, Focusable {
   private isDown(data: string): boolean {
     return (
       matchesKey(data, "j") || this.keybindings.matches(data, "tui.select.down")
+    );
+  }
+
+  private isPageUp(data: string): boolean {
+    return (
+      matchesKey(data, Key.pageUp) ||
+      matchesKey(data, "ctrl+b") ||
+      this.keybindings.matches(data, "tui.select.pageUp")
+    );
+  }
+
+  private isPageDown(data: string): boolean {
+    return (
+      matchesKey(data, Key.pageDown) ||
+      matchesKey(data, "ctrl+f") ||
+      this.keybindings.matches(data, "tui.select.pageDown")
     );
   }
 
@@ -976,7 +1124,27 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
-  private pageWalkthrough(direction: -1 | 1): void {
+  private moveTargetToEdge(edge: "first" | "last"): void {
+    const unit = this.currentUnit();
+    if (unit === undefined || unit.targets.length === 0) return;
+    this.selectedTargetByUnit[this.unitIndex] =
+      edge === "first" ? 0 : unit.targets.length - 1;
+    this.transientFeedback = undefined;
+    this.refresh();
+  }
+
+  private moveInventoryToEdge(edge: "first" | "last"): void {
+    if (this.inventory.length === 0) return;
+    this.inventoryIndex = edge === "first" ? 0 : this.inventory.length - 1;
+    this.transientFeedback = undefined;
+    this.refresh();
+  }
+
+  private pageWalkthrough(
+    direction: -1 | 1,
+    step: "full" | "half" = "full",
+    count = 1,
+  ): void {
     const unit = this.currentUnit();
     if (unit === undefined || unit.targets.length === 0) return;
     const width = Math.max(1, this.tui.terminal.columns);
@@ -997,8 +1165,13 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.diffOffset,
       viewportHeight,
     );
+    const stride =
+      count *
+      (step === "half"
+        ? halfPage(viewport.contentHeight)
+        : viewport.contentHeight);
     const nextOffset = clampOffset(
-      viewport.offset + direction * viewport.contentHeight,
+      viewport.offset + direction * stride,
       rows.length,
       viewport.contentHeight,
     );
@@ -1120,6 +1293,12 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
+  private scrollExplanationToEnd(): void {
+    // Render clamps the offset to the real last page.
+    this.explanationOffset = Number.MAX_SAFE_INTEGER;
+    this.refresh();
+  }
+
   private moveInventorySelection(delta: number): void {
     if (this.inventory.length === 0) return;
     this.inventoryIndex = clamp(
@@ -1136,8 +1315,20 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
+  private scrollInventoryDiffToEnd(): void {
+    // Render clamps the offset to the real last page.
+    this.inventoryDiffOffset = Number.MAX_SAFE_INTEGER;
+    this.refresh();
+  }
+
   private scrollSummary(delta: number): void {
     this.summaryOffset = Math.max(0, this.summaryOffset + delta);
+    this.refresh();
+  }
+
+  private scrollSummaryToEnd(): void {
+    // Render clamps the offset to the real last page.
+    this.summaryOffset = Number.MAX_SAFE_INTEGER;
     this.refresh();
   }
 
@@ -1229,6 +1420,11 @@ export class GuidedReviewComponent implements Component, Focusable {
     return Math.max(1, this.tui.terminal.rows - 3);
   }
 
+  /** Inventory entries per page; each entry renders a title and a detail row. */
+  private inventoryPageSize(): number {
+    return Math.max(1, Math.floor(this.secondaryViewportHeight() / 2));
+  }
+
   private summaryViewportHeight(): number {
     const width = Math.max(1, this.tui.terminal.columns);
     const availableHeight = Math.max(0, this.tui.terminal.rows - 3);
@@ -1270,6 +1466,8 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private openScreen(screen: ReviewScreen): void {
     this.screen = screen;
+    this.pendingGPrefix = false;
+    this.pendingCount = undefined;
     this.syncEditorFocus();
     this.refresh();
   }
@@ -2313,6 +2511,22 @@ function submissionLabel(status: SubmissionStatus): string {
     case "verification-failed":
       return "verification-failed";
   }
+}
+
+function halfPage(viewportHeight: number): number {
+  return Math.max(1, Math.floor(viewportHeight / 2));
+}
+
+/** Upper bound for an accumulated count prefix. */
+const MAX_COUNT_PREFIX = 9999;
+
+const DIGIT_KEYS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] as const;
+
+function digitKey(data: string): number | undefined {
+  for (const [value, key] of DIGIT_KEYS.entries()) {
+    if (matchesKey(data, key)) return value;
+  }
+  return undefined;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

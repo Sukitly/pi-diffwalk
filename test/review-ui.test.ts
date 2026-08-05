@@ -634,6 +634,171 @@ test("moves between units with arrow keys without marking them reviewed", () => 
   assert.match(renderText(harness), /reviewed 1\/2/);
 });
 
+test("moves between units with h and l without marking them reviewed", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "l");
+  assert.match(renderText(harness), /unit 2\/2/);
+  assert.match(renderText(harness), /reviewed 0\/2/);
+
+  press(harness.component, "h");
+  assert.match(renderText(harness), /unit 1\/2/);
+});
+
+test("jumps to the first and last commentable line with gg and G", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "G");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+\+const value = validate/,
+    "G selects the last commentable line",
+  );
+
+  press(harness.component, "g", "g");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+-const value = request\.value/,
+    "gg selects the first commentable line",
+  );
+});
+
+test("a bare g prefix does not swallow the following non-g key", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "g", "j");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+\+const value = validate/,
+    "g followed by j is handled as plain j",
+  );
+
+  press(harness.component, "g", "e");
+  assert.match(renderText(harness), /Agent explanation/);
+});
+
+test("typing g and digits in the comment editor stays text input", () => {
+  const harness = createHarness(80, 24);
+
+  press(harness.component, "c", "g", "g", "5", "j", "\r");
+  assert.deepEqual(
+    harness.state.review.comments.map((comment) => comment.body),
+    ["gg5j"],
+  );
+});
+
+test("applies a count prefix to movement keys", () => {
+  const harness = createHarness(
+    60,
+    24,
+    makeTallFixture([{ path: "src/tall.ts", count: 12 }]),
+  );
+
+  press(harness.component, "3", "j");
+  assert.match(renderText(harness), />\s+4\s+\+line 4/);
+
+  press(harness.component, "1", "0", "j");
+  assert.match(
+    renderText(harness),
+    />\s+12\s+\+line 12/,
+    "a multi-digit count clamps at the last line",
+  );
+
+  press(harness.component, "2", "k");
+  assert.match(renderText(harness), />\s+10\s+\+line 10/);
+});
+
+test("clamps a count prefix on unit movement", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "9", "l");
+  assert.match(renderText(harness), /unit 2\/2/);
+
+  press(harness.component, "9", "h");
+  assert.match(renderText(harness), /unit 1\/2/);
+});
+
+test("clears a pending count when a non-movement key follows", () => {
+  const harness = createHarness(
+    60,
+    24,
+    makeTallFixture([{ path: "src/tall.ts", count: 12 }]),
+  );
+
+  press(harness.component, "5", "e");
+  assert.match(renderText(harness), /Agent explanation/);
+  press(harness.component, "h");
+
+  press(harness.component, "j");
+  assert.match(
+    renderText(harness),
+    />\s+2\s+\+line 2/,
+    "the count consumed by e does not leak into j",
+  );
+});
+
+test("scrolls the walkthrough diff by half a viewport with ctrl+d and ctrl+u", () => {
+  const harness = createHarness(30, 8);
+  press(harness.component, "j");
+  const firstPage = renderText(harness);
+
+  press(harness.component, "\u0004");
+  const halfPage = renderText(harness);
+  assert.notEqual(halfPage, firstPage);
+
+  press(harness.component, "\u0015");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "g", "g");
+  assert.match(renderText(harness), />\s+5\s+-const value/);
+});
+
+test("scrolls the explanation with vim keys", () => {
+  const harness = createHarness(50, 8, makeLongExplanationFixture());
+  press(harness.component, "e");
+  const firstPage = renderText(harness);
+
+  press(harness.component, "G");
+  const lastPage = renderText(harness);
+  assert.notEqual(lastPage, firstPage);
+  assert.match(lastPage, /Does the failure path remain explicit\?/);
+
+  press(harness.component, "g", "g");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "\u0004");
+  assert.notEqual(renderText(harness), firstPage);
+  press(harness.component, "\u0015");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "\u0006");
+  assert.notEqual(renderText(harness), firstPage);
+  press(harness.component, "\u0002");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "h");
+  assert.match(renderText(harness), /Git snapshot diff/);
+});
+
+test("navigates the inventory with vim keys", () => {
+  const harness = createHarness(120, 60);
+  press(harness.component, "i");
+
+  press(harness.component, "G");
+  assert.match(renderText(harness), />\s+notice: "src\/cancelled\.ts"/);
+
+  press(harness.component, "g", "g");
+  assert.match(renderText(harness), />\s+planned: "src\/entry/);
+
+  press(harness.component, "l");
+  assert.match(renderText(harness), /context line 1/);
+
+  press(harness.component, "h");
+  assert.match(renderText(harness), /Review inventory/);
+  press(harness.component, "h");
+  assert.match(renderText(harness), /Git snapshot diff/);
+});
+
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
   const harness = createHarness(80, 24);
 

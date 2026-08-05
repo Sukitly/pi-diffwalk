@@ -151,9 +151,13 @@ Controls:
 | Key | Action |
 |---|---|
 | `j`, `k`, `Up`, `Down` | Move through diff lines or scroll the current page |
-| `PageUp`, `PageDown` | Move by a viewport |
+| `gg`, `G` | Jump to the first or last line of the current page |
+| `1`-`9` | Start a count prefix that repeats the next movement, for example `5j` or `2Ctrl+d` |
+| `Ctrl+d`, `Ctrl+u` | Move by half a viewport |
+| `PageUp`, `PageDown`, `Ctrl+f`, `Ctrl+b` | Move by a viewport |
 | `n` | Mark the current review unit as explicitly reviewed and continue; the last unit opens the submission page |
-| `p`, `Left`, `Right` | Move between review units without marking anything reviewed |
+| `p`, `h`, `Left` | Move to the previous review unit without marking anything reviewed |
+| `l`, `Right` | Move to the next review unit without marking anything reviewed |
 | `c` | Add or edit a comment on the selected line |
 | `d` | Delete the comment on the selected line |
 | `e` | Open the complete agent explanation |
@@ -161,7 +165,7 @@ Controls:
 | `s` | Open the comment summary and submission page |
 | `Esc` | Return from a secondary page or open the pause and discard screen |
 
-The walkthrough footer shows only the most common keys. The table above is the complete set.
+The walkthrough footer shows only the most common keys. The table above is the complete set. On secondary pages `h` and `l` follow `Left` and `Right`: `h` returns from the explanation, inventory, and read-only diff pages, `l` opens the selected inventory entry, and on the submission page both switch the submission mode.
 
 The inventory lists one entry per changed file with its planned, skipped, and carried-forward line counts, plus metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Any changed region can be opened for explicit read-only inspection, including regions outside the planned route.
 
