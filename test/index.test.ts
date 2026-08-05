@@ -9,7 +9,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
-import { markReviewUnitReviewed } from "../src/in-progress-review.ts";
+import {
+  markReviewUnitReviewed,
+  upsertInProgressReviewComment,
+} from "../src/in-progress-review.ts";
 import {
   createPiGitRunner,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
@@ -45,6 +48,8 @@ type GuidedToolDefinition = ToolDefinition<
 interface HarnessBehavior {
   drift: boolean;
   submitOnOpen: boolean;
+  discardOnOpen: boolean;
+  commentOnSubmit: boolean;
   markProgressOnOpen: boolean;
   submissionDrift: boolean;
   snapshot: ReviewSnapshot;
@@ -83,6 +88,8 @@ function createHarness(
   const behavior: HarnessBehavior = {
     drift: false,
     submitOnOpen: false,
+    discardOnOpen: false,
+    commentOnSubmit: false,
     markProgressOnOpen: false,
     submissionDrift: false,
     snapshot: makeSnapshot("snapshot-index", [
@@ -180,8 +187,32 @@ function createHarness(
           input.onReviewChange(review);
         }
       }
+      if (behavior.discardOnOpen) {
+        return { status: "discarded", snapshotId: input.review.snapshot.id };
+      }
       if (!behavior.submitOnOpen) {
         return { status: "paused", snapshotId: input.review.snapshot.id };
+      }
+      if (behavior.commentOnSubmit) {
+        const unit = review.route?.units[0];
+        const change = review.snapshot.changes[0];
+        assert.ok(unit);
+        assert.ok(change);
+        review = upsertInProgressReviewComment(
+          review,
+          {
+            reviewUnitId: unit.id,
+            fileChangeId: change.id,
+            side: "new",
+            line: 2,
+            body: "Check this behavior.",
+          },
+          {
+            expectedVersion: review.version,
+            timestamp: new Date().toISOString(),
+          },
+        );
+        input.onReviewChange(review);
       }
       for (const progress of review.unitProgress) {
         review = markReviewUnitReviewed(review, progress.reviewUnitId, {
@@ -387,6 +418,7 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
     status: "paused",
     snapshotId: "snapshot-index",
   });
+  assert.equal(completed.terminate, true);
 
   await harness.command("", commandContext());
   assert.deepEqual(harness.openedSnapshots, [
@@ -405,6 +437,49 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
     ),
     /already has a validated route.*resume it/,
   );
+});
+
+test("terminates the initial tool turn when the review is discarded", async () => {
+  const harness = createHarness({ discardOnOpen: true });
+  await harness.command("", commandContext());
+
+  const discarded = await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  assert.deepEqual(discarded.details, {
+    status: "discarded",
+    snapshotId: "snapshot-index",
+  });
+  assert.equal(discarded.terminate, true);
+});
+
+test("continues the initial tool turn when a submitted review has comments", async () => {
+  const harness = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+  });
+  await harness.command("", commandContext());
+
+  const submitted = await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  const details = submitted.details as Extract<
+    GuidedReviewResult,
+    { status: "submitted" }
+  >;
+  assert.equal(details.status, "submitted");
+  assert.equal(details.comments.length, 1);
+  assert.equal(submitted.terminate, false);
 });
 
 test("rejects a different explicit base once the human worked in the review", async () => {
@@ -676,6 +751,7 @@ test("keeps completed rounds in memory as the next delta baseline", async () => 
   );
   const details = submitted.details as { readonly status: string };
   assert.equal(details.status, "submitted");
+  assert.equal(submitted.terminate, true);
 
   harness.behavior.snapshot = makeSnapshot("snapshot-round-2", [
     { path: "src/file.ts", lines: [" head", "+changed", " tail", "+appended"] },
@@ -853,7 +929,7 @@ test("fails /diffwalk clearly outside interactive TUI mode", async () => {
   assert.deepEqual(harness.sentMessages, []);
 });
 
-test("sends the resumed submission result as a compact custom message", async () => {
+test("completes a resumed review with no comments without messaging the agent", async () => {
   const harness = createHarness();
   await harness.command("", commandContext());
   await harness.tool.execute(
@@ -865,6 +941,32 @@ test("sends the resumed submission result as a compact custom message", async ()
   );
 
   harness.behavior.submitOnOpen = true;
+  const notifications: string[] = [];
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.deepEqual(
+    harness.sentMessageMeta.map((meta) => meta.customType),
+    [DIFFWALK_KICKOFF_MESSAGE_TYPE],
+  );
+  assert.equal(harness.appendedEntries.length, 1);
+  assert.deepEqual(notifications, [
+    "Completed the DiffWalk review with no comments.",
+  ]);
+});
+
+test("sends a resumed submission result when comments need an agent response", async () => {
+  const harness = createHarness();
+  await harness.command("", commandContext());
+  await harness.tool.execute(
+    "call-1",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  harness.behavior.submitOnOpen = true;
+  harness.behavior.commentOnSubmit = true;
   await harness.command("", commandContext());
 
   assert.deepEqual(
@@ -877,6 +979,7 @@ test("sends the resumed submission result as a compact custom message", async ()
     triggerTurn: true,
   });
   assert.match(harness.sentMessages[1] ?? "", /"status":"submitted"/);
+  assert.match(harness.sentMessages[1] ?? "", /Check this behavior/);
 });
 
 test("registers compact TUI renderers for the kickoff and result messages", () => {
