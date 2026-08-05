@@ -64,6 +64,7 @@ type SubmissionVerifier = (
 interface HarnessOptions {
   readonly theme?: Pick<Theme, "fg" | "bg" | "bold">;
   readonly verifier?: SubmissionVerifier;
+  readonly keybindings?: TuiKeybindingsManager;
 }
 
 interface ComponentHarness {
@@ -354,7 +355,7 @@ function createHarness(
   const component = new GuidedReviewComponent({
     tui,
     theme: options.theme ?? plainTheme,
-    keybindings: createKeybindings(),
+    keybindings: options.keybindings ?? createKeybindings(),
     review: state.review,
     route: fixture.route,
     onReviewChange: (review) => {
@@ -778,6 +779,145 @@ test("scrolls the explanation with vim keys", () => {
 
   press(harness.component, "h");
   assert.match(renderText(harness), /Git snapshot diff/);
+});
+
+/** One unit whose span holds two changed lines separated by a long context run. */
+function makeContextGapFixture(contextLines = 30): UiFixture {
+  const snapshot = makeSnapshot("snapshot-context-gap", [
+    {
+      path: "src/gap.ts",
+      lines: [
+        "+first edit",
+        ...Array.from(
+          { length: contextLines },
+          (_, index) => ` filler ${index + 1}`,
+        ),
+        "+second edit",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Gap unit",
+        whyHere: "Both edits are read together with the code between them.",
+        context: "gap",
+        changeSummary: "Edits the region boundaries.",
+        reviewFocus: ["Is the region between the edits still consistent?"],
+        spans: [span("src/gap.ts", { new: [1, contextLines + 2] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+test("half-page scrolling continues through context without snapping back", () => {
+  const harness = createHarness(40, 10, makeContextGapFixture());
+
+  press(harness.component, "\u0004");
+  const scrolled = renderText(harness);
+  assert.doesNotMatch(scrolled, /\+first edit/, "the viewport left the edit");
+  assert.match(scrolled, /filler \d+/);
+
+  press(harness.component, "\u0004");
+  const deeper = renderText(harness);
+  assert.notEqual(deeper, scrolled, "the second half page keeps scrolling");
+
+  for (let index = 0; index < 12; index += 1) {
+    press(harness.component, "\u0004");
+  }
+  assert.match(
+    renderText(harness),
+    />\s+32\s+\+second edit/,
+    "the next commentable line is selected once it enters the viewport",
+  );
+
+  press(harness.component, "g", "g");
+  assert.match(
+    renderText(harness),
+    />\s+1\s+\+first edit/,
+    "gg re-anchors the viewport to the selection",
+  );
+});
+
+test("explanation G lands on a real offset that the next key can leave", () => {
+  const harness = createHarness(50, 8, makeLongExplanationFixture());
+  press(harness.component, "e", "G");
+  const lastPage = renderText(harness);
+
+  press(harness.component, "g", "g", "G", "k");
+  const nearEnd = renderText(harness);
+  assert.notEqual(nearEnd, lastPage, "k right after G leaves the last page");
+
+  press(harness.component, "j");
+  assert.equal(renderText(harness), lastPage);
+});
+
+test("inventory diff G lands on a real offset that the next key can leave", () => {
+  const harness = createHarness(60, 12);
+  press(harness.component, "i", "\r", "G");
+  const lastPage = renderText(harness);
+
+  press(harness.component, "g", "g", "G", "k");
+  const nearEnd = renderText(harness);
+  assert.notEqual(nearEnd, lastPage, "k right after G leaves the last page");
+
+  press(harness.component, "j");
+  assert.equal(renderText(harness), lastPage);
+});
+
+test("summary G lands on a real offset that the next key can leave", () => {
+  const harness = createHarness(50, 8);
+  press(harness.component, "s", "G");
+  const lastPage = renderText(harness);
+
+  press(harness.component, "g", "g", "G", "k");
+  const nearEnd = renderText(harness);
+  assert.notEqual(nearEnd, lastPage, "k right after G leaves the last page");
+
+  press(harness.component, "j");
+  assert.equal(renderText(harness), lastPage);
+});
+
+test("pages the inventory by the rendered viewport", () => {
+  const harness = createHarness(120, 13);
+  press(harness.component, "i");
+
+  // Every entry renders two rows at this width; the viewport is nine rows,
+  // so one page lands on the fifth entry, not a fixed entry count.
+  press(harness.component, "\u001b[6~");
+  assert.match(renderText(harness), />\s+metadata-only: mode-changed/);
+
+  press(harness.component, "\u001b[5~");
+  assert.match(renderText(harness), />\s+planned: "src\/entry/);
+});
+
+test("pages the inventory by rendered rows when entries wrap", () => {
+  const harness = createHarness(30, 9);
+  press(harness.component, "i");
+
+  // Wrapped entries fill the five-row viewport quickly, so one page must
+  // advance far fewer entries than the old fixed two-rows-per-entry guess.
+  press(harness.component, "\u001b[6~");
+  assert.match(renderText(harness), /> planned:\s+"src\/contract/);
+});
+
+test("a configured select binding takes precedence over vim prefix keys", () => {
+  const keybindings = new TuiKeybindingsManager(TUI_KEYBINDINGS, {
+    "tui.select.down": ["down", "g"],
+  });
+  const harness = createHarness(80, 18, makeUiFixture(), { keybindings });
+
+  press(harness.component, "g");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+\+const value = validate/,
+    "g bound to tui.select.down moves the selection instead of arming gg",
+  );
 });
 
 test("navigates the inventory with vim keys", () => {
