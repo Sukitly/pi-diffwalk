@@ -62,7 +62,7 @@ type SubmissionVerifier = (
 ) => Promise<void>;
 
 interface HarnessOptions {
-  readonly theme?: Pick<Theme, "fg" | "bg" | "bold">;
+  readonly theme?: Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
   readonly verifier?: SubmissionVerifier;
   readonly keybindings?: TuiKeybindingsManager;
 }
@@ -104,13 +104,15 @@ const plainTheme = {
   fg: (_color: ThemeColor, text: string) => text,
   bg: (_color: Parameters<Theme["bg"]>[0], text: string) => text,
   bold: (text: string) => text,
-} satisfies Pick<Theme, "fg" | "bg" | "bold">;
+  inverse: (text: string) => text,
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 
 const ansiTheme = {
   fg: (_color: ThemeColor, text: string) => `\u001b[31m${text}\u001b[39m`,
   bg: (_color: Parameters<Theme["bg"]>[0], text: string) => `\u001b[44m${text}`,
   bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
-} satisfies Pick<Theme, "fg" | "bg" | "bold">;
+  inverse: (text: string) => `\u001b[7m${text}\u001b[27m`,
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 
 const spanHeaderTheme = {
   fg: (color: ThemeColor, text: string) => {
@@ -120,7 +122,13 @@ const spanHeaderTheme = {
   },
   bg: (_color: Parameters<Theme["bg"]>[0], text: string) => text,
   bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
-} satisfies Pick<Theme, "fg" | "bg" | "bold">;
+  inverse: (text: string) => `\u001b[7m${text}\u001b[27m`,
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
+
+const inlineTheme = {
+  ...plainTheme,
+  inverse: (text: string) => `[[${text}]]`,
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 
 const metadataOnly: FileChange = {
   id: "file:metadata:script.sh" as FileChangeId,
@@ -292,6 +300,44 @@ function makeLongExplanationFixture(): UiFixture {
   };
 }
 
+const INLINE_PATH = "src/inline.ts";
+
+function makeInlineDiffFixture(lines: readonly string[]): UiFixture {
+  const snapshot = makeSnapshot("snapshot-inline", [
+    { path: INLINE_PATH, lines: [...lines] },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const change = snapshot.changes[0];
+  assert.ok(change);
+  assert.equal(change.content.type, "text");
+  if (change.content.type !== "text") throw new Error("Expected text change.");
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Inline replacement",
+        whyHere: "Review the replacement.",
+        context: "old -> new",
+        changeSummary: "The implementation changed.",
+        reviewFocus: ["Is the replacement correct?"],
+        spans: [
+          span(INLINE_PATH, {
+            old: [1, change.content.oldLineCount],
+            new: [1, change.content.newLineCount],
+          }),
+        ],
+      },
+    ],
+    skippedSpans: [],
+  };
+  return {
+    snapshot,
+    delta,
+    routeCandidate,
+    route: validateReviewRoute(snapshot, delta, routeCandidate),
+  };
+}
+
 function makeReview(fixture: UiFixture): InProgressReview {
   return makeReviewWithRoute(fixture, fixture.route);
 }
@@ -459,10 +505,80 @@ test("escapes terminal control sequences in agent and Git text", () => {
   const walkthrough = renderText(harness);
   assert.match(walkthrough, /context line 0\\x1b\[31m/);
 
+  const replacementHarness = createHarness(
+    100,
+    30,
+    makeInlineDiffFixture([
+      " head",
+      "-old\u001b[31m",
+      "+new\u001b[31m",
+      " tail",
+    ]),
+    { theme: inlineTheme },
+  );
+  const replacement = renderText(replacementHarness);
+  assert.match(replacement, /\\x1b\[31m/);
+  assert.equal(replacement.includes(`${String.fromCharCode(27)}[31m`), false);
+
   press(harness.component, "e");
   const explanation = renderText(harness);
   assert.match(explanation, /\\x1b\[2J/);
   assert.equal(explanation.includes(`${String.fromCharCode(27)}[2J`), false);
+});
+
+test("highlights changed words in one-line replacement blocks", () => {
+  const harness = createHarness(
+    120,
+    30,
+    makeInlineDiffFixture([
+      " head",
+      "-  return oldValue",
+      "+  return newValue",
+      " middle",
+      "-  alpha",
+      "+  beta",
+      " tail",
+    ]),
+    { theme: inlineTheme },
+  );
+  const output = renderText(harness);
+
+  assert.match(output, /- {2}return \[\[oldValue\]\]/);
+  assert.match(output, /\+ {2}return \[\[newValue\]\]/);
+  assert.match(output, /- {2}\[\[alpha\]\]/);
+  assert.match(output, /\+ {2}\[\[beta\]\]/);
+  assert.doesNotMatch(output, /\[\[\s+/);
+});
+
+test("does not guess inline pairings for multi-line replacement blocks", () => {
+  const harness = createHarness(
+    120,
+    30,
+    makeInlineDiffFixture([
+      " head",
+      "-const first = oldFirst",
+      "-const second = oldSecond",
+      "+const first = newFirst",
+      "+const second = newSecond",
+      " tail",
+    ]),
+    { theme: inlineTheme },
+  );
+
+  assert.doesNotMatch(renderText(harness), /\[\[/);
+});
+
+test("does not word-diff very long untrusted lines", () => {
+  const oldLine = `-${"old ".repeat(251)}`;
+  const newLine = `+${"new ".repeat(251)}`;
+  const harness = createHarness(
+    120,
+    30,
+    makeInlineDiffFixture([" head", oldLine, newLine, " tail"]),
+    { theme: inlineTheme },
+  );
+
+  assert.doesNotMatch(renderText(harness), /\[\[/);
 });
 
 test("never renders beyond terminal width or height with ANSI styling", () => {
