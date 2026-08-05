@@ -377,15 +377,22 @@ export function registerDiffWalk(
         }
         const result = await runPendingReview(ctx, existing);
         if (result.status === "submitted") {
-          pi.sendMessage(
-            {
-              customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
-              content: formatGuidedReviewResult(result),
-              display: true,
-              details: buildSubmittedReviewMessageDetails(result),
-            },
-            { triggerTurn: true },
-          );
+          if (shouldSendReviewToAgent(result)) {
+            pi.sendMessage(
+              {
+                customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+                content: formatGuidedReviewResult(result),
+                display: true,
+                details: buildSubmittedReviewMessageDetails(result),
+              },
+              { triggerTurn: true },
+            );
+          } else {
+            ctx.ui.notify(
+              "Completed the DiffWalk review with no comments.",
+              "info",
+            );
+          }
         } else if (result.status === "discarded") {
           ctx.ui.notify(
             "Discarded the DiffWalk review and its drafts.",
@@ -502,6 +509,7 @@ export function registerDiffWalk(
       return {
         content: [{ type: "text", text: formatGuidedReviewResult(result) }],
         details: result,
+        terminate: !shouldSendReviewToAgent(result),
       };
     },
   });
@@ -536,6 +544,10 @@ function hasReviewProgress(review: InProgressReview): boolean {
     review.comments.length > 0 ||
     review.unitProgress.some((progress) => progress.disposition !== "pending")
   );
+}
+
+function shouldSendReviewToAgent(result: GuidedReviewResult): boolean {
+  return result.status === "submitted" && result.comments.length > 0;
 }
 
 /**
