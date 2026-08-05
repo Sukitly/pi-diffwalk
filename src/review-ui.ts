@@ -13,6 +13,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { diffWords } from "diff";
 import { ReviewSnapshotDriftError } from "./git-diff.ts";
 import {
   deleteInProgressReviewComment,
@@ -79,7 +80,7 @@ export class GuidedReviewUiInvariantError extends Error {
   }
 }
 
-type ReviewUiTheme = Pick<Theme, "fg" | "bg" | "bold">;
+type ReviewUiTheme = Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 type ReviewUiKeybindings = Pick<KeybindingsManager, "matches">;
 
 type ReviewScreen =
@@ -1856,7 +1857,8 @@ function renderUnitDiff(
         isSpanHeader: true,
       })),
     );
-    for (const line of spanView.lines) {
+    const inlineTextByIndex = buildInlineDiffText(spanView.lines, theme);
+    for (const [lineIndex, line] of spanView.lines.entries()) {
       const target = lineTarget(targetsByLine, spanView.change.id, line);
       const isSelected =
         target !== undefined &&
@@ -1865,13 +1867,18 @@ function renderUnitDiff(
       const hasComment =
         target !== undefined && commentedTargets.has(targetKey(target));
       rows.push(
-        ...renderDiffLine(line, isSelected, hasComment, theme, width).map(
-          (text) => ({
-            text,
-            spanIndex,
-            targetKey: target === undefined ? undefined : targetKey(target),
-          }),
-        ),
+        ...renderDiffLine(
+          line,
+          isSelected,
+          hasComment,
+          theme,
+          width,
+          inlineTextByIndex.get(lineIndex),
+        ).map((text) => ({
+          text,
+          spanIndex,
+          targetKey: target === undefined ? undefined : targetKey(target),
+        })),
       );
     }
   }
@@ -1920,11 +1927,102 @@ function renderReadOnlyFile(
   ];
   for (const [index, region] of entry.regions.entries()) {
     if (index > 0) lines.push("");
-    for (const line of region) {
-      lines.push(...renderDiffLine(line, false, false, theme, width));
+    const inlineTextByIndex = buildInlineDiffText(region, theme);
+    for (const [lineIndex, line] of region.entries()) {
+      lines.push(
+        ...renderDiffLine(
+          line,
+          false,
+          false,
+          theme,
+          width,
+          inlineTextByIndex.get(lineIndex),
+        ),
+      );
     }
   }
   return lines;
+}
+
+const INLINE_DIFF_MAX_LINE_LENGTH = 1_000;
+
+/**
+ * Mirrors Pi's conservative inline-highlighting rule: only pair a replacement
+ * block when it contains exactly one removed line followed by one added line.
+ * Very long untrusted lines stay line-colored without quadratic word diffing.
+ */
+function buildInlineDiffText(
+  lines: readonly DiffLine[],
+  theme: ReviewUiTheme,
+): ReadonlyMap<number, string> {
+  const rendered = new Map<number, string>();
+  let index = 0;
+  while (index < lines.length) {
+    if (lines[index]?.type !== "removed") {
+      index += 1;
+      continue;
+    }
+
+    const removedStart = index;
+    while (lines[index]?.type === "removed") index += 1;
+    const addedStart = index;
+    while (lines[index]?.type === "added") index += 1;
+    if (addedStart - removedStart !== 1 || index - addedStart !== 1) continue;
+
+    const removed = lines[removedStart];
+    const added = lines[addedStart];
+    if (
+      removed === undefined ||
+      added === undefined ||
+      removed.text.length > INLINE_DIFF_MAX_LINE_LENGTH ||
+      added.text.length > INLINE_DIFF_MAX_LINE_LENGTH
+    ) {
+      continue;
+    }
+    const pair = renderInlineDiffPair(removed.text, added.text, theme);
+    rendered.set(removedStart, `-${pair.removed}`);
+    rendered.set(addedStart, `+${pair.added}`);
+  }
+  return rendered;
+}
+
+function renderInlineDiffPair(
+  removedText: string,
+  addedText: string,
+  theme: ReviewUiTheme,
+): { readonly removed: string; readonly added: string } {
+  const parts = diffWords(safeText(removedText), safeText(addedText));
+  let removed = "";
+  let added = "";
+  let isFirstRemoved = true;
+  let isFirstAdded = true;
+
+  for (const part of parts) {
+    if (part.removed) {
+      let value = part.value;
+      if (isFirstRemoved) {
+        const leadingWhitespace = value.match(/^(\s*)/)?.[1] ?? "";
+        removed += leadingWhitespace;
+        value = value.slice(leadingWhitespace.length);
+        isFirstRemoved = false;
+      }
+      if (value.length > 0) removed += theme.inverse(value);
+    } else if (part.added) {
+      let value = part.value;
+      if (isFirstAdded) {
+        const leadingWhitespace = value.match(/^(\s*)/)?.[1] ?? "";
+        added += leadingWhitespace;
+        value = value.slice(leadingWhitespace.length);
+        isFirstAdded = false;
+      }
+      if (value.length > 0) added += theme.inverse(value);
+    } else {
+      removed += part.value;
+      added += part.value;
+    }
+  }
+
+  return { removed, added };
 }
 
 function renderDiffLine(
@@ -1933,12 +2031,16 @@ function renderDiffLine(
   hasComment: boolean,
   theme: ReviewUiTheme,
   width: number,
+  inlineText?: string,
 ): readonly string[] {
   const oldLine = line.oldLine === undefined ? "" : String(line.oldLine);
   const newLine = line.newLine === undefined ? "" : String(line.newLine);
   const marker = selected ? ">" : hasComment ? "●" : " ";
   const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
-  const raw = theme.fg(diffColor(line), safeText(diffLineText(line)));
+  const raw = theme.fg(
+    diffColor(line),
+    inlineText ?? safeText(diffLineText(line)),
+  );
   const lines = wrapWithPrefix(prefix, raw, width);
   if (!selected) return lines;
   return lines.map((rendered) =>
