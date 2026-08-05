@@ -586,7 +586,8 @@ test("renders every successful guided-review outcome", async () => {
     renderedToolResult(pausedHarness.tool, paused),
     [
       "Review paused",
-      "Progress and draft comments kept. Run /diffwalk to resume.",
+      "Progress and draft comments remain resumable while the snapshot matches.",
+      "Repository changes are allowed; the next /diffwalk discards a stale review and starts over.",
     ].join("\n"),
   );
 
@@ -1171,7 +1172,7 @@ test("reports resumed pauses and discards with the tool outcome wording", async 
   const pausedNotifications: string[] = [];
   await pausedHarness.command("", commandContext("tui", pausedNotifications));
   assert.deepEqual(pausedNotifications, [
-    "Review paused. Progress and draft comments kept. Run /diffwalk to resume.",
+    "Review paused. Progress and draft comments remain resumable while the snapshot matches. Repository changes are allowed; the next /diffwalk discards a stale review and starts over.",
   ]);
 
   const discardedHarness = createHarness();
@@ -1381,8 +1382,13 @@ test("formats structured pause, discard, and submission instructions", () => {
   assert.equal(formattedPause.status, "paused");
   assert.match(
     formattedPause.instruction,
-    /Do not modify repository files or Git state until the user resumes/,
+    /Follow the user's next request normally, including requests to modify repository files or Git state/,
   );
+  assert.match(
+    formattedPause.instruction,
+    /next \/diffwalk discards a stale review and starts from a fresh snapshot/,
+  );
+  assert.doesNotMatch(formattedPause.instruction, /Do not modify/);
 
   const discarded: GuidedReviewResult = {
     status: "discarded",

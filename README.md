@@ -25,7 +25,7 @@ It is not intended to:
 - replace tests, static analysis, security review, or production safeguards
 - treat an agent summary as proof that an implementation is correct
 - let the agent omit inconvenient changes without an explicit reason
-- modify code while the guided review is in progress
+- edit code from inside the walkthrough; repository changes made after pausing invalidate its frozen snapshot
 
 ## Workflow
 
@@ -260,7 +260,7 @@ pi -e ./src/index.ts
 
 Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pause the current review without returning draft comments to the agent. Running `/diffwalk` again in the same extension process resumes the frozen route, explicit unit progress, draft comments, and submission mode when the worktree still matches the snapshot.
 
-If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
+A paused review does not lock the repository. Users and agents may continue modifying files or Git state. If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
 
 Completed review rounds persist as custom entries in the pi session, so the carried-forward baseline survives pi restarts, `/reload`, and session resume. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed lines as carried-forward instead of routing them again. Entries with an unknown format version or a broken structure are ignored on restore. A paused in-progress review is still extension memory only: it does not survive a reload, and the next `/diffwalk` starts over from a fresh snapshot.
 

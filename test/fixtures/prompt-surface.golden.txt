@@ -224,7 +224,7 @@ parameters: {"type":"object","required":["snapshotId","units","skippedSpans"],"p
 
 === tool results ===
 --- paused ---
-{"status":"paused","snapshotId":"snapshot-surface","instruction":"The review is paused and its frozen snapshot is still pending. Do not modify repository files or Git state until the user resumes with /diffwalk and submits or discards the review."}
+{"status":"paused","snapshotId":"snapshot-surface","instruction":"The review is paused. Follow the user's next request normally, including requests to modify repository files or Git state. Progress and draft comments remain resumable only while the repository matches the frozen snapshot; the next /diffwalk discards a stale review and starts from a fresh snapshot."}
 --- discarded ---
 {"status":"discarded","snapshotId":"snapshot-surface","instruction":"The user discarded the review without submitting comments. Wait for the user's direction before acting on the change."}
 --- submitted, discuss-first ---
