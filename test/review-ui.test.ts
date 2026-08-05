@@ -64,6 +64,7 @@ type SubmissionVerifier = (
 interface HarnessOptions {
   readonly theme?: Pick<Theme, "fg" | "bg" | "bold">;
   readonly verifier?: SubmissionVerifier;
+  readonly keybindings?: TuiKeybindingsManager;
 }
 
 interface ComponentHarness {
@@ -354,7 +355,7 @@ function createHarness(
   const component = new GuidedReviewComponent({
     tui,
     theme: options.theme ?? plainTheme,
-    keybindings: createKeybindings(),
+    keybindings: options.keybindings ?? createKeybindings(),
     review: state.review,
     route: fixture.route,
     onReviewChange: (review) => {
@@ -632,6 +633,310 @@ test("moves between units with arrow keys without marking them reviewed", () => 
 
   press(harness.component, "n");
   assert.match(renderText(harness), /reviewed 1\/2/);
+});
+
+test("moves between units with h and l without marking them reviewed", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "l");
+  assert.match(renderText(harness), /unit 2\/2/);
+  assert.match(renderText(harness), /reviewed 0\/2/);
+
+  press(harness.component, "h");
+  assert.match(renderText(harness), /unit 1\/2/);
+});
+
+test("jumps to the first and last commentable line with gg and G", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "G");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+\+const value = validate/,
+    "G selects the last commentable line",
+  );
+
+  press(harness.component, "g", "g");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+-const value = request\.value/,
+    "gg selects the first commentable line",
+  );
+});
+
+test("a bare g prefix does not swallow the following non-g key", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "g", "j");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+\+const value = validate/,
+    "g followed by j is handled as plain j",
+  );
+
+  press(harness.component, "g", "e");
+  assert.match(renderText(harness), /Agent explanation/);
+});
+
+test("typing g and digits in the comment editor stays text input", () => {
+  const harness = createHarness(80, 24);
+
+  press(harness.component, "c", "g", "g", "5", "j", "\r");
+  assert.deepEqual(
+    harness.state.review.comments.map((comment) => comment.body),
+    ["gg5j"],
+  );
+});
+
+test("applies a count prefix to movement keys", () => {
+  const harness = createHarness(
+    60,
+    24,
+    makeTallFixture([{ path: "src/tall.ts", count: 12 }]),
+  );
+
+  press(harness.component, "3", "j");
+  assert.match(renderText(harness), />\s+4\s+\+line 4/);
+
+  press(harness.component, "1", "0", "j");
+  assert.match(
+    renderText(harness),
+    />\s+12\s+\+line 12/,
+    "a multi-digit count clamps at the last line",
+  );
+
+  press(harness.component, "2", "k");
+  assert.match(renderText(harness), />\s+10\s+\+line 10/);
+});
+
+test("clamps a count prefix on unit movement", () => {
+  const harness = createHarness(80, 18);
+
+  press(harness.component, "9", "l");
+  assert.match(renderText(harness), /unit 2\/2/);
+
+  press(harness.component, "9", "h");
+  assert.match(renderText(harness), /unit 1\/2/);
+});
+
+test("clears a pending count when a non-movement key follows", () => {
+  const harness = createHarness(
+    60,
+    24,
+    makeTallFixture([{ path: "src/tall.ts", count: 12 }]),
+  );
+
+  press(harness.component, "5", "e");
+  assert.match(renderText(harness), /Agent explanation/);
+  press(harness.component, "h");
+
+  press(harness.component, "j");
+  assert.match(
+    renderText(harness),
+    />\s+2\s+\+line 2/,
+    "the count consumed by e does not leak into j",
+  );
+});
+
+test("scrolls the walkthrough diff by half a viewport with ctrl+d and ctrl+u", () => {
+  const harness = createHarness(30, 8);
+  press(harness.component, "j");
+  const firstPage = renderText(harness);
+
+  press(harness.component, "\u0004");
+  const halfPage = renderText(harness);
+  assert.notEqual(halfPage, firstPage);
+
+  press(harness.component, "\u0015");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "g", "g");
+  assert.match(renderText(harness), />\s+5\s+-const value/);
+});
+
+test("scrolls the explanation with vim keys", () => {
+  const harness = createHarness(50, 8, makeLongExplanationFixture());
+  press(harness.component, "e");
+  const firstPage = renderText(harness);
+
+  press(harness.component, "G");
+  const lastPage = renderText(harness);
+  assert.notEqual(lastPage, firstPage);
+  assert.match(lastPage, /Does the failure path remain explicit\?/);
+
+  press(harness.component, "g", "g");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "\u0004");
+  assert.notEqual(renderText(harness), firstPage);
+  press(harness.component, "\u0015");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "\u0006");
+  assert.notEqual(renderText(harness), firstPage);
+  press(harness.component, "\u0002");
+  assert.equal(renderText(harness), firstPage);
+
+  press(harness.component, "h");
+  assert.match(renderText(harness), /Git snapshot diff/);
+});
+
+/** One unit whose span holds two changed lines separated by a long context run. */
+function makeContextGapFixture(contextLines = 30): UiFixture {
+  const snapshot = makeSnapshot("snapshot-context-gap", [
+    {
+      path: "src/gap.ts",
+      lines: [
+        "+first edit",
+        ...Array.from(
+          { length: contextLines },
+          (_, index) => ` filler ${index + 1}`,
+        ),
+        "+second edit",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Gap unit",
+        whyHere: "Both edits are read together with the code between them.",
+        context: "gap",
+        changeSummary: "Edits the region boundaries.",
+        reviewFocus: ["Is the region between the edits still consistent?"],
+        spans: [span("src/gap.ts", { new: [1, contextLines + 2] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+test("half-page scrolling continues through context without snapping back", () => {
+  const harness = createHarness(40, 10, makeContextGapFixture());
+
+  press(harness.component, "\u0004");
+  const scrolled = renderText(harness);
+  assert.doesNotMatch(scrolled, /\+first edit/, "the viewport left the edit");
+  assert.match(scrolled, /filler \d+/);
+
+  press(harness.component, "\u0004");
+  const deeper = renderText(harness);
+  assert.notEqual(deeper, scrolled, "the second half page keeps scrolling");
+
+  for (let index = 0; index < 12; index += 1) {
+    press(harness.component, "\u0004");
+  }
+  assert.match(
+    renderText(harness),
+    />\s+32\s+\+second edit/,
+    "the next commentable line is selected once it enters the viewport",
+  );
+
+  press(harness.component, "g", "g");
+  assert.match(
+    renderText(harness),
+    />\s+1\s+\+first edit/,
+    "gg re-anchors the viewport to the selection",
+  );
+});
+
+test("explanation G lands on a real offset that the next key can leave", () => {
+  const harness = createHarness(50, 8, makeLongExplanationFixture());
+  press(harness.component, "e", "G");
+  const lastPage = renderText(harness);
+
+  press(harness.component, "g", "g", "G", "k");
+  const nearEnd = renderText(harness);
+  assert.notEqual(nearEnd, lastPage, "k right after G leaves the last page");
+
+  press(harness.component, "j");
+  assert.equal(renderText(harness), lastPage);
+});
+
+test("inventory diff G lands on a real offset that the next key can leave", () => {
+  const harness = createHarness(60, 12);
+  press(harness.component, "i", "\r", "G");
+  const lastPage = renderText(harness);
+
+  press(harness.component, "g", "g", "G", "k");
+  const nearEnd = renderText(harness);
+  assert.notEqual(nearEnd, lastPage, "k right after G leaves the last page");
+
+  press(harness.component, "j");
+  assert.equal(renderText(harness), lastPage);
+});
+
+test("summary G lands on a real offset that the next key can leave", () => {
+  const harness = createHarness(50, 8);
+  press(harness.component, "s", "G");
+  const lastPage = renderText(harness);
+
+  press(harness.component, "g", "g", "G", "k");
+  const nearEnd = renderText(harness);
+  assert.notEqual(nearEnd, lastPage, "k right after G leaves the last page");
+
+  press(harness.component, "j");
+  assert.equal(renderText(harness), lastPage);
+});
+
+test("pages the inventory by the rendered viewport", () => {
+  const harness = createHarness(120, 13);
+  press(harness.component, "i");
+
+  // Every entry renders two rows at this width; the viewport is nine rows,
+  // so one page lands on the fifth entry, not a fixed entry count.
+  press(harness.component, "\u001b[6~");
+  assert.match(renderText(harness), />\s+metadata-only: mode-changed/);
+
+  press(harness.component, "\u001b[5~");
+  assert.match(renderText(harness), />\s+planned: "src\/entry/);
+});
+
+test("pages the inventory by rendered rows when entries wrap", () => {
+  const harness = createHarness(30, 9);
+  press(harness.component, "i");
+
+  // Wrapped entries fill the five-row viewport quickly, so one page must
+  // advance far fewer entries than the old fixed two-rows-per-entry guess.
+  press(harness.component, "\u001b[6~");
+  assert.match(renderText(harness), /> planned:\s+"src\/contract/);
+});
+
+test("a configured select binding takes precedence over vim prefix keys", () => {
+  const keybindings = new TuiKeybindingsManager(TUI_KEYBINDINGS, {
+    "tui.select.down": ["down", "g"],
+  });
+  const harness = createHarness(80, 18, makeUiFixture(), { keybindings });
+
+  press(harness.component, "g");
+  assert.match(
+    renderText(harness),
+    />\s+5\s+\+const value = validate/,
+    "g bound to tui.select.down moves the selection instead of arming gg",
+  );
+});
+
+test("navigates the inventory with vim keys", () => {
+  const harness = createHarness(120, 60);
+  press(harness.component, "i");
+
+  press(harness.component, "G");
+  assert.match(renderText(harness), />\s+notice: "src\/cancelled\.ts"/);
+
+  press(harness.component, "g", "g");
+  assert.match(renderText(harness), />\s+planned: "src\/entry/);
+
+  press(harness.component, "l");
+  assert.match(renderText(harness), /context line 1/);
+
+  press(harness.component, "h");
+  assert.match(renderText(harness), /Review inventory/);
+  press(harness.component, "h");
+  assert.match(renderText(harness), /Git snapshot diff/);
 });
 
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
