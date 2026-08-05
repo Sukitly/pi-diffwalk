@@ -112,6 +112,16 @@ const ansiTheme = {
   bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
 } satisfies Pick<Theme, "fg" | "bg" | "bold">;
 
+const spanHeaderTheme = {
+  fg: (color: ThemeColor, text: string) => {
+    if (color === "accent") return `\u001b[35m${text}\u001b[39m`;
+    if (color === "muted") return `\u001b[90m${text}\u001b[39m`;
+    return text;
+  },
+  bg: (_color: Parameters<Theme["bg"]>[0], text: string) => text,
+  bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
+} satisfies Pick<Theme, "fg" | "bg" | "bold">;
+
 const metadataOnly: FileChange = {
   id: "file:metadata:script.sh" as FileChangeId,
   source: "tracked",
@@ -413,7 +423,8 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   const walkthrough = renderText(harness);
 
   assert.match(walkthrough, /Review this change/);
-  assert.match(walkthrough, /Git snapshot diff/);
+  assert.match(walkthrough, /src\/entry 文\\nfile\.ts/);
+  assert.doesNotMatch(walkthrough, /Git snapshot diff/);
   assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
   assert.doesNotMatch(walkthrough, /Why here/);
 
@@ -421,7 +432,7 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   const explanation = renderText(harness);
   assert.match(explanation, /Agent explanation/);
   assert.match(explanation, /Why here/);
-  assert.doesNotMatch(explanation, /Git snapshot diff/);
+  assert.doesNotMatch(explanation, /src\/entry 文\\nfile\.ts/);
 });
 
 test("renders every component row as one terminal line", () => {
@@ -489,7 +500,7 @@ test("keeps every wrapped row of the selected diff line visible", () => {
 
   assert.match(output, />\s+\d*\s+5\s+\+const value = validate/);
   assert.match(output, /TAIL_END/);
-  assert.match(output, /Git snapshot diff/);
+  assert.match(output, /src\/entry 文\\nfile\.ts/);
 });
 
 test("pages through a selected line taller than the diff viewport", () => {
@@ -778,7 +789,7 @@ test("scrolls the explanation with vim keys", () => {
   assert.equal(renderText(harness), firstPage);
 
   press(harness.component, "h");
-  assert.match(renderText(harness), /Git snapshot diff/);
+  assert.match(renderText(harness), /request\.value/);
 });
 
 /** One unit whose span holds two changed lines separated by a long context run. */
@@ -936,7 +947,7 @@ test("navigates the inventory with vim keys", () => {
   press(harness.component, "h");
   assert.match(renderText(harness), /Review inventory/);
   press(harness.component, "h");
-  assert.match(renderText(harness), /Git snapshot diff/);
+  assert.match(renderText(harness), /Review this change/);
 });
 
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
@@ -985,7 +996,7 @@ test("prefills an existing comment and discards an edit without changing it", ()
   press(harness.component, "!", "\u001b");
 
   assert.equal(harness.state.review.comments[0]?.body, "Original");
-  assert.match(renderText(harness), /Git snapshot diff/);
+  assert.match(renderText(harness), /Review this change/);
 });
 
 test("keeps comment input errors local to the editor", () => {
@@ -1121,28 +1132,29 @@ test("restores leading span padding when scrolling back to the first line", () =
   assert.match(returned, /head 3/);
 });
 
-test("pins the span file header once it scrolls out of the diff viewport", () => {
+test("shows only the highlighted file name before and after its header pins", () => {
   const harness = createHarness(
     60,
     12,
     makeTallFixture([{ path: "src/sticky.ts", count: 30 }]),
+    { theme: spanHeaderTheme },
   );
+  const styledFileName = "\u001b[35m\u001b[1msrc/sticky.ts\u001b[22m\u001b[39m";
 
   const before = harness.component.render(60);
-  assert.equal(
-    before.filter((line) => line.includes('"src/sticky.ts"')).length,
-    1,
-  );
+  const inlineHeader = before.find((line) => line.includes("src/sticky.ts"));
+  assert.ok(inlineHeader);
+  assert.ok(inlineHeader.includes(styledFileName));
+  assert.doesNotMatch(inlineHeader, /\b(?:old|new)\b|"/);
 
   press(harness.component, ...Array.from({ length: 20 }, () => "j"));
   const after = harness.component.render(60);
-  const labelIndex = after.findIndex((line) =>
-    line.includes("Git snapshot diff"),
-  );
-  assert.ok(labelIndex >= 0);
-  assert.match(after[labelIndex + 1] ?? "", /"src\/sticky\.ts" {2}new 1-30/);
+  const pinnedHeader = after.find((line) => line.includes("src/sticky.ts"));
+  assert.ok(pinnedHeader);
+  assert.ok(pinnedHeader.includes(styledFileName));
+  assert.doesNotMatch(pinnedHeader, /\b(?:old|new)\b|"/);
   assert.equal(
-    after.filter((line) => line.includes('"src/sticky.ts"')).length,
+    after.filter((line) => line.includes("src/sticky.ts")).length,
     1,
   );
   assert.match(after.join("\n"), />\s+21 \+line 21/);
@@ -1160,30 +1172,19 @@ test("pins only the top span header in a unit that spans several files", () => {
 
   press(harness.component, ...Array.from({ length: 20 }, () => "j"));
   const bridged = harness.component.render(60);
-  const bridgedLabel = bridged.findIndex((line) =>
-    line.includes("Git snapshot diff"),
-  );
-  assert.match(bridged[bridgedLabel + 1] ?? "", /"src\/a\.ts"/);
-  assert.equal(bridged.filter((line) => line.includes('"src/b.ts"')).length, 1);
+  const pinnedA = bridged.findIndex((line) => line.includes("src/a.ts"));
+  const inlineB = bridged.findIndex((line) => line.includes("src/b.ts"));
+  assert.ok(pinnedA >= 0);
+  assert.ok(inlineB > pinnedA);
 
   press(harness.component, ...Array.from({ length: 5 }, () => "j"));
   const atHeader = harness.component.render(60);
-  assert.equal(
-    atHeader.filter((line) => line.includes('"src/a.ts"')).length,
-    0,
-  );
-  assert.equal(
-    atHeader.filter((line) => line.includes('"src/b.ts"')).length,
-    1,
-  );
+  assert.equal(atHeader.filter((line) => line.includes("src/a.ts")).length, 0);
+  assert.equal(atHeader.filter((line) => line.includes("src/b.ts")).length, 1);
 
   press(harness.component, ...Array.from({ length: 5 }, () => "j"));
   const deep = harness.component.render(60);
-  const deepLabel = deep.findIndex((line) =>
-    line.includes("Git snapshot diff"),
-  );
-  assert.match(deep[deepLabel + 1] ?? "", /"src\/b\.ts"/);
-  assert.equal(deep.filter((line) => line.includes('"src/b.ts"')).length, 1);
+  assert.equal(deep.filter((line) => line.includes("src/b.ts")).length, 1);
 });
 
 test("pins the inventory file title while scrolling the read-only diff", () => {
@@ -1319,7 +1320,7 @@ test("pauses explicitly without discarding drafts", () => {
   assert.match(renderText(harness), /Pause to keep 1 draft comment/);
   press(harness.component, "\u001b");
   assert.equal(harness.cancellations.count, 0);
-  assert.match(renderText(harness), /Git snapshot diff/);
+  assert.match(renderText(harness), /Review this change/);
 
   press(harness.component, "\u001b", "\r");
   assert.equal(harness.cancellations.count, 1);
