@@ -698,7 +698,8 @@ function reviewOutcomeDisplayLines(result: GuidedReviewResult): string[] {
     case "paused":
       return [
         "Review paused",
-        "Progress and draft comments kept. Run /diffwalk to resume.",
+        "Progress and draft comments remain resumable while the snapshot matches.",
+        "Repository changes are allowed; the next /diffwalk discards a stale review and starts over.",
       ];
     case "discarded":
       return ["Review discarded", "Progress and draft comments removed."];
@@ -786,7 +787,7 @@ export function formatGuidedReviewResult(result: GuidedReviewResult): string {
       status: result.status,
       snapshotId: result.snapshotId,
       instruction:
-        "The review is paused and its frozen snapshot is still pending. Do not modify repository files or Git state until the user resumes with /diffwalk and submits or discards the review.",
+        "The review is paused. Follow the user's next request normally, including requests to modify repository files or Git state. Progress and draft comments remain resumable only while the repository matches the frozen snapshot; the next /diffwalk discards a stale review and starts from a fresh snapshot.",
     });
   }
   if (result.status === "discarded") {
