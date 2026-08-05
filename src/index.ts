@@ -4,7 +4,6 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   MessageRenderer,
-  Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
@@ -49,7 +48,6 @@ import {
   type ReviewSeriesId,
   type ReviewSnapshot,
   type ReviewSubmissionMode,
-  type SnapshotId,
   type SubmittedGuidedReviewResult,
 } from "./types.ts";
 
@@ -57,27 +55,28 @@ const DEFAULT_REVIEW_TARGET = "HEAD";
 const DISCARD_OPTION = "--discard";
 
 /**
- * Kickoff and submission payloads reach the LLM verbatim, but rendering the
- * full text in the transcript buries the conversation. Both are sent as
- * custom messages so the TUI can show a compact summary instead; the LLM
- * receives the same content either way.
+ * Kickoff and submission payloads reach the LLM verbatim. The TUI renders
+ * separate user-facing facts and keeps protocol details out of the transcript.
  */
 export const DIFFWALK_KICKOFF_MESSAGE_TYPE = "diffwalk-kickoff";
 export const DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE = "diffwalk-review-result";
 
-/** Compact facts rendered in the TUI instead of the full kickoff prompt. */
+export interface KickoffAdditionalChangeDetails {
+  readonly path: string;
+  readonly description: string;
+}
+
+/** User-facing facts rendered in the TUI instead of the kickoff prompt. */
 export interface KickoffMessageDetails {
-  readonly snapshotId: SnapshotId;
   readonly targetRef: string;
   readonly changedFileCount: number;
   readonly needsReviewLineCount: number;
   readonly carriedForwardLineCount: number;
-  readonly unreviewableChangeCount: number;
+  readonly additionalChanges?: readonly KickoffAdditionalChangeDetails[];
 }
 
-/** Compact facts rendered in the TUI instead of the submission payload. */
+/** User-facing facts rendered in the TUI instead of the submission payload. */
 export interface SubmittedReviewMessageDetails {
-  readonly snapshotId: SnapshotId;
   readonly submissionMode: ReviewSubmissionMode;
   readonly commentCount: number;
 }
@@ -595,7 +594,6 @@ export function buildKickoffMessageDetails(
   delta: ReviewDelta,
 ): KickoffMessageDetails {
   return {
-    snapshotId: snapshot.id,
     targetRef: snapshot.comparison.targetRef,
     changedFileCount: snapshot.changes.length,
     needsReviewLineCount: delta.lines.filter(
@@ -604,9 +602,12 @@ export function buildKickoffMessageDetails(
     carriedForwardLineCount: delta.lines.filter(
       (requirement) => requirement.type === "carried-forward",
     ).length,
-    unreviewableChangeCount: snapshot.changes.filter(
-      (change) => change.content.type !== "text",
-    ).length,
+    additionalChanges: snapshot.changes
+      .filter((change) => change.content.type !== "text")
+      .map((change) => ({
+        path: displayPath(change),
+        description: describeAdditionalChange(change),
+      })),
   };
 }
 
@@ -614,7 +615,6 @@ export function buildSubmittedReviewMessageDetails(
   result: SubmittedGuidedReviewResult,
 ): SubmittedReviewMessageDetails {
   return {
-    snapshotId: result.snapshotId,
     submissionMode: result.submissionMode,
     commentCount: result.comments.length,
   };
@@ -625,79 +625,92 @@ export const renderKickoffMessage: MessageRenderer<KickoffMessageDetails> = (
   options,
   theme,
 ) => {
+  const lines = [theme.fg("accent", "DiffWalk")];
   const details = message.details;
-  const parts = ["kickoff"];
   if (details !== undefined) {
-    parts.push(
-      `snapshot ${details.snapshotId}`,
-      `target ${details.targetRef}`,
-      countNoun(details.needsReviewLineCount, "needs-review line"),
-      countNoun(details.changedFileCount, "changed file"),
+    lines.push(
+      `Compared with: ${details.targetRef}`,
+      `Changed files: ${details.changedFileCount}`,
+      `Lines to review: ${details.needsReviewLineCount}`,
     );
     if (details.carriedForwardLineCount > 0) {
-      parts.push(
-        countNoun(details.carriedForwardLineCount, "carried-forward line"),
+      lines.push(
+        `Previously reviewed: ${countNoun(details.carriedForwardLineCount, "line")}`,
       );
     }
-    if (details.unreviewableChangeCount > 0) {
-      parts.push(
-        countNoun(details.unreviewableChangeCount, "unreviewable change"),
+    const additionalChanges = details.additionalChanges ?? [];
+    if (additionalChanges.length > 0) {
+      lines.push(
+        "Additional changes:",
+        ...additionalChanges.map(
+          (change) => `  ${change.path}: ${change.description}`,
+        ),
       );
     }
   }
-  return renderCompactMessage(
-    parts.join("  "),
-    "route-preparation prompt sent to the agent; expand to read it",
-    message.content,
-    options,
-    theme,
-  );
+  return new Text(lines.join("\n"), options.outputPad, 0);
 };
 
 export const renderSubmittedReviewMessage: MessageRenderer<
   SubmittedReviewMessageDetails
 > = (message, options, theme) => {
+  const lines = [`${theme.fg("accent", "DiffWalk")} review submitted`];
   const details = message.details;
-  const parts = ["review submitted"];
   if (details !== undefined) {
-    parts.push(
-      `snapshot ${details.snapshotId}`,
-      countNoun(details.commentCount, "comment"),
-      details.submissionMode,
+    lines.push(
+      `Comments: ${details.commentCount}`,
+      `Next step: ${submissionNextStep(details.submissionMode)}`,
     );
   }
-  return renderCompactMessage(
-    parts.join("  "),
-    "structured result sent to the agent; expand to read it",
-    message.content,
-    options,
-    theme,
-  );
+  return new Text(lines.join("\n"), options.outputPad, 0);
 };
 
-type CustomMessageContent = Parameters<MessageRenderer>[0]["content"];
-
-function renderCompactMessage(
-  summary: string,
-  collapsedHint: string,
-  content: CustomMessageContent,
-  options: { readonly expanded: boolean; readonly outputPad: number },
-  theme: Pick<Theme, "fg">,
-): Text {
-  const lines = [`${theme.fg("accent", "DiffWalk")} ${summary}`];
-  if (options.expanded) {
-    lines.push(theme.fg("dim", customMessageText(content)));
-  } else {
-    lines.push(theme.fg("dim", collapsedHint));
+function displayPath(change: ReviewSnapshot["changes"][number]): string {
+  if (
+    change.oldPath !== undefined &&
+    change.newPath !== undefined &&
+    change.oldPath !== change.newPath
+  ) {
+    return `${change.oldPath} -> ${change.newPath}`;
   }
-  return new Text(lines.join("\n"), options.outputPad, 0);
+  return change.newPath ?? change.oldPath ?? "Unknown file";
 }
 
-function customMessageText(content: CustomMessageContent): string {
-  if (typeof content === "string") return content;
-  return content
-    .map((part) => (part.type === "text" ? part.text : `[${part.type}]`))
-    .join("\n");
+function describeAdditionalChange(
+  change: ReviewSnapshot["changes"][number],
+): string {
+  if (change.content.type === "binary") return "binary file";
+  if (change.oldMode === "160000" || change.newMode === "160000") {
+    return "Git submodule changed";
+  }
+  switch (change.status) {
+    case "added":
+      return "empty file added";
+    case "deleted":
+      return "empty file deleted";
+    case "renamed":
+      return "renamed without text changes";
+    case "copied":
+      return "copied without text changes";
+    case "mode-changed":
+      return "file permissions changed";
+    case "type-changed":
+      return "file type changed";
+    case "unmerged":
+      return "unresolved merge conflict";
+    case "unknown":
+      return "unknown Git change";
+    case "modified":
+      return change.content.type === "metadata-only"
+        ? "metadata changed"
+        : "text changes could not be read";
+  }
+}
+
+function submissionNextStep(mode: ReviewSubmissionMode): string {
+  return mode === "discuss-first"
+    ? "Discuss comments before making changes"
+    : "Apply requested changes";
 }
 
 function countNoun(count: number, noun: string): string {

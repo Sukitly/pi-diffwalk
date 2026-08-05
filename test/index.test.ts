@@ -14,6 +14,7 @@ import {
   upsertInProgressReviewComment,
 } from "../src/in-progress-review.ts";
 import {
+  buildKickoffMessageDetails,
   createPiGitRunner,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
@@ -27,6 +28,7 @@ import {
   renderSubmittedReviewMessage,
   type SubmittedReviewMessageDetails,
 } from "../src/index.ts";
+import { computeReviewDelta } from "../src/review-delta.ts";
 import { DIFFWALK_SERIES_ENTRY_TYPE } from "../src/review-persistence.ts";
 import type {
   FileChange,
@@ -263,6 +265,16 @@ const plainTheme = {
   fg: (_color: ThemeColor, text: string) => text,
 } as Pick<Theme, "fg"> as Theme;
 
+function renderedText(
+  component: { render(width: number): string[] },
+  width: number,
+): string {
+  return component
+    .render(width)
+    .map((line) => line.trimEnd())
+    .join("\n");
+}
+
 function commandContext(
   mode: ExtensionCommandContext["mode"] = "tui",
   notifications: string[] = [],
@@ -294,6 +306,24 @@ function binaryChange(): FileChange {
       type: "binary",
       gitBodyLines: [],
       unsupportedReason: "Binary file.",
+    },
+  };
+}
+
+function modeChange(): FileChange {
+  return {
+    id: "file-change:mode" as FileChangeId,
+    source: "tracked",
+    status: "mode-changed",
+    oldPath: "scripts/deploy.sh",
+    newPath: "scripts/deploy.sh",
+    oldMode: "100644",
+    newMode: "100755",
+    gitHeaderLines: [],
+    content: {
+      type: "metadata-only",
+      gitBodyLines: [],
+      unsupportedReason: "This file change has no textual diff hunks.",
     },
   };
 }
@@ -990,21 +1020,50 @@ test("registers compact TUI renderers for the kickoff and result messages", () =
   ]);
 });
 
-test("renders the kickoff message as a summary and expands to the prompt", () => {
-  const kickoffPrompt =
-    "Prepare a semantic route for a human-guided DiffWalk review.";
+test("builds user-facing kickoff details with concrete additional changes", () => {
+  const snapshot = makeSnapshot(
+    "snapshot-details",
+    [{ path: "src/file.ts", lines: [" head", "+changed", " tail"] }],
+    { changes: [binaryChange(), modeChange()] },
+  );
+
+  assert.deepEqual(
+    buildKickoffMessageDetails(snapshot, computeReviewDelta(snapshot)),
+    {
+      targetRef: "main",
+      changedFileCount: 3,
+      needsReviewLineCount: 1,
+      carriedForwardLineCount: 0,
+      additionalChanges: [
+        { path: "assets/logo.png", description: "binary file" },
+        {
+          path: "scripts/deploy.sh",
+          description: "file permissions changed",
+        },
+      ],
+    },
+  );
+});
+
+test("renders kickoff facts on separate lines without protocol details", () => {
+  const kickoffPrompt = "Prepare a semantic route for snapshot snapshot-index.";
   const message = {
     role: "custom" as const,
     customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
     content: kickoffPrompt,
     display: true,
     details: {
-      snapshotId: "snapshot-index" as SnapshotId,
       targetRef: "origin/main",
-      changedFileCount: 2,
+      changedFileCount: 3,
       needsReviewLineCount: 5,
       carriedForwardLineCount: 1,
-      unreviewableChangeCount: 1,
+      additionalChanges: [
+        { path: "assets/logo.png", description: "binary file" },
+        {
+          path: "scripts/deploy.sh",
+          description: "file permissions changed",
+        },
+      ],
     } satisfies KickoffMessageDetails,
     timestamp: Date.now(),
   };
@@ -1015,13 +1074,21 @@ test("renders the kickoff message as a summary and expands to the prompt", () =>
     plainTheme,
   );
   assert.ok(collapsed);
-  const collapsedText = collapsed.render(200).join("\n");
-  assert.match(
+  const collapsedText = renderedText(collapsed, 200);
+  assert.equal(
     collapsedText,
-    /DiffWalk kickoff {2}snapshot snapshot-index {2}target origin\/main {2}5 needs-review lines {2}2 changed files {2}1 carried-forward line {2}1 unreviewable change/,
+    [
+      "DiffWalk",
+      "Compared with: origin/main",
+      "Changed files: 3",
+      "Lines to review: 5",
+      "Previously reviewed: 1 line",
+      "Additional changes:",
+      "  assets/logo.png: binary file",
+      "  scripts/deploy.sh: file permissions changed",
+    ].join("\n"),
   );
-  assert.match(collapsedText, /expand to read it/);
-  assert.doesNotMatch(collapsedText, /Prepare a semantic route/);
+  assert.doesNotMatch(collapsedText, /snapshot|agent|route-preparation/i);
 
   const expanded = renderKickoffMessage(
     message,
@@ -1029,10 +1096,10 @@ test("renders the kickoff message as a summary and expands to the prompt", () =>
     plainTheme,
   );
   assert.ok(expanded);
-  assert.match(expanded.render(200).join("\n"), /Prepare a semantic route/);
+  assert.equal(renderedText(expanded, 200), collapsedText);
 });
 
-test("renders the submission result message as a summary and expands to the payload", () => {
+test("renders submitted review facts without protocol details", () => {
   const submitted: GuidedReviewResult = {
     status: "submitted",
     snapshotId: "snapshot-index" as SnapshotId,
@@ -1045,7 +1112,6 @@ test("renders the submission result message as a summary and expands to the payl
     content: formatGuidedReviewResult(submitted),
     display: true,
     details: {
-      snapshotId: "snapshot-index" as SnapshotId,
       submissionMode: "discuss-first",
       commentCount: 2,
     } satisfies SubmittedReviewMessageDetails,
@@ -1058,12 +1124,19 @@ test("renders the submission result message as a summary and expands to the payl
     plainTheme,
   );
   assert.ok(collapsed);
-  const collapsedText = collapsed.render(120).join("\n");
-  assert.match(
+  const collapsedText = renderedText(collapsed, 120);
+  assert.equal(
     collapsedText,
-    /DiffWalk review submitted {2}snapshot snapshot-index {2}2 comments {2}discuss-first/,
+    [
+      "DiffWalk review submitted",
+      "Comments: 2",
+      "Next step: Discuss comments before making changes",
+    ].join("\n"),
   );
-  assert.doesNotMatch(collapsedText, /"instruction"/);
+  assert.doesNotMatch(
+    collapsedText,
+    /snapshot|discuss-first|instruction|agent/i,
+  );
 
   const expanded = renderSubmittedReviewMessage(
     message,
@@ -1071,9 +1144,23 @@ test("renders the submission result message as a summary and expands to the payl
     plainTheme,
   );
   assert.ok(expanded);
+  assert.equal(renderedText(expanded, 400), collapsedText);
+
+  const applyDirectly = renderSubmittedReviewMessage(
+    {
+      ...message,
+      details: {
+        submissionMode: "apply-change-requests",
+        commentCount: 2,
+      },
+    },
+    { expanded: false, outputPad: 0 },
+    plainTheme,
+  );
+  assert.ok(applyDirectly);
   assert.match(
-    expanded.render(400).join("\n"),
-    /Investigate and respond to every comment/,
+    renderedText(applyDirectly, 120),
+    /Next step: Apply requested changes/,
   );
 });
 
