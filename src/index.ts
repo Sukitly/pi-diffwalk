@@ -4,6 +4,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   MessageRenderer,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
@@ -388,7 +389,7 @@ export function registerDiffWalk(
             );
           } else {
             ctx.ui.notify(
-              "Completed the DiffWalk review with no comments.",
+              "DiffWalk review complete. No comments submitted. No agent follow-up needed.",
               "info",
             );
           }
@@ -510,6 +511,37 @@ export function registerDiffWalk(
         details: result,
         terminate: !shouldSendReviewToAgent(result),
       };
+    },
+    renderCall(_args, theme) {
+      return new Text(theme.fg("toolTitle", "DiffWalk review"), 0, 0);
+    },
+    renderResult(result, { isPartial }, theme, context) {
+      if (isPartial) {
+        return new Text(theme.fg("muted", "Opening review..."), 0, 0);
+      }
+      if (context.isError) {
+        const content = result.content.find((item) => item.type === "text");
+        const message =
+          content?.type === "text" ? content.text : "Unknown review error.";
+        return new Text(
+          [
+            theme.fg("error", "Review could not start"),
+            theme.fg("muted", message),
+          ].join("\n"),
+          0,
+          0,
+        );
+      }
+      const details: unknown = result.details;
+      if (!isGuidedReviewResult(details)) {
+        const content = result.content.find((item) => item.type === "text");
+        return new Text(
+          content?.type === "text" ? content.text : "Review finished.",
+          0,
+          0,
+        );
+      }
+      return renderGuidedReviewToolResult(details, theme);
     },
   });
 }
@@ -654,16 +686,79 @@ export const renderKickoffMessage: MessageRenderer<KickoffMessageDetails> = (
 export const renderSubmittedReviewMessage: MessageRenderer<
   SubmittedReviewMessageDetails
 > = (message, options, theme) => {
-  const lines = [`${theme.fg("accent", "DiffWalk")} review submitted`];
   const details = message.details;
-  if (details !== undefined) {
-    lines.push(
-      `Comments: ${details.commentCount}`,
-      `Next step: ${submissionNextStep(details.submissionMode)}`,
-    );
-  }
+  const lines =
+    details === undefined
+      ? [theme.fg("accent", "DiffWalk review complete")]
+      : submittedReviewDisplayLines(
+          details,
+          theme.fg("accent", "DiffWalk review complete"),
+        );
   return new Text(lines.join("\n"), options.outputPad, 0);
 };
+
+function renderGuidedReviewToolResult(
+  result: GuidedReviewResult,
+  theme: Theme,
+): Text {
+  if (result.status === "paused") {
+    return new Text(
+      [
+        theme.fg("warning", "Review paused"),
+        "Progress and draft comments kept. Run /diffwalk to resume.",
+      ].join("\n"),
+      0,
+      0,
+    );
+  }
+  if (result.status === "discarded") {
+    return new Text(
+      [
+        theme.fg("warning", "Review discarded"),
+        "Progress and draft comments removed.",
+      ].join("\n"),
+      0,
+      0,
+    );
+  }
+  return new Text(
+    submittedReviewDisplayLines(
+      buildSubmittedReviewMessageDetails(result),
+      theme.fg("success", "Review complete"),
+    ).join("\n"),
+    0,
+    0,
+  );
+}
+
+function submittedReviewDisplayLines(
+  details: SubmittedReviewMessageDetails,
+  title: string,
+): string[] {
+  if (details.commentCount === 0) {
+    return [title, "No comments submitted.", "No agent follow-up needed."];
+  }
+  return [
+    title,
+    `${countNoun(details.commentCount, "comment")} sent to the agent.`,
+    `Next step: ${submissionNextStep(details.submissionMode)}`,
+  ];
+}
+
+function isGuidedReviewResult(value: unknown): value is GuidedReviewResult {
+  if (typeof value !== "object" || value === null || !("status" in value)) {
+    return false;
+  }
+  if (value.status === "paused" || value.status === "discarded") return true;
+  if (value.status !== "submitted") return false;
+  return (
+    "comments" in value &&
+    Array.isArray(value.comments) &&
+    "submissionMode" in value &&
+    (value.submissionMode === "discuss-first" ||
+      value.submissionMode === "apply-change-requests")
+  );
+}
 
 function displayPath(change: ReviewSnapshot["changes"][number]): string {
   if (
