@@ -130,6 +130,48 @@ test("reopens a line whose earlier comment is unresolved", () => {
   );
 });
 
+test("carries forward a commented line after the reviewer resolves its thread", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+commented", "+clean", " tail"] },
+  ]);
+  const baseline = makeRound({
+    id: "round-1",
+    snapshot,
+    dispositions: { "src/a.ts:new:2": "commented" },
+  });
+  const change = snapshot.changes[0];
+  assert.ok(change);
+
+  const delta = computeReviewDelta(snapshot, baseline, {
+    resolvedCommentLines: [{ fileChangeId: change.id, side: "new", line: 2 }],
+  });
+
+  assert.equal(
+    requirementFor(delta, snapshot, "src/a.ts", "new", 2)?.type,
+    "carried-forward",
+  );
+  assert.deepEqual(summarize(delta), { "carried-forward": 2 });
+});
+
+test("rejects a resolved-thread anchor that was not commented in the baseline", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+reviewed", " tail"] },
+  ]);
+  const baseline = makeRound({ id: "round-1", snapshot });
+  const change = snapshot.changes[0];
+  assert.ok(change);
+
+  assert.throws(
+    () =>
+      computeReviewDelta(snapshot, baseline, {
+        resolvedCommentLines: [
+          { fileChangeId: change.id, side: "new", line: 2 },
+        ],
+      }),
+    /not commented in baseline round/,
+  );
+});
+
 test("reopens a previously skipped line", () => {
   const snapshot = makeSnapshot("snapshot-1", [
     { path: "src/a.ts", lines: [" keep", "+skipped", " tail"] },

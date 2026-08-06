@@ -1831,6 +1831,8 @@ function addLabeledText(
   );
 }
 
+const INLINE_SPAN_MERGE_GAP = 6;
+
 function renderUnitDiff(
   unit: UnitView,
   selectedTarget: ReviewCommentTarget | undefined,
@@ -1845,44 +1847,160 @@ function renderUnitDiff(
       target,
     ]),
   );
-  const commentedTargets = new Set(
-    comments.map((comment) => targetKey(comment)),
+  const commentsByTarget = new Map(
+    comments.map((comment) => [targetKey(comment), comment]),
   );
+  let previousChangeId: FileChange["id"] | undefined;
+  let previousStart = -1;
+  let previousEnd = -1;
+
   for (const [spanIndex, spanView] of unit.spans.entries()) {
-    if (spanIndex > 0) rows.push({ text: "" });
-    rows.push(
-      ...wrapStyled(renderSpanHeader(spanView, theme), width).map((text) => ({
-        text,
-        spanIndex,
-        isSpanHeader: true,
-      })),
-    );
-    const inlineTextByIndex = buildInlineDiffText(spanView.lines, theme);
-    for (const [lineIndex, line] of spanView.lines.entries()) {
-      const target = lineTarget(targetsByLine, spanView.change.id, line);
-      const isSelected =
-        target !== undefined &&
-        selectedTarget !== undefined &&
-        targetKey(target) === targetKey(selectedTarget);
-      const hasComment =
-        target !== undefined && commentedTargets.has(targetKey(target));
+    const content = textContent(spanView.change);
+    if (content === undefined) {
+      throw new GuidedReviewUiInvariantError(
+        `Review span references non-text file change ${spanView.change.id}.`,
+      );
+    }
+    const firstLine = spanView.lines[0];
+    const lastLine = spanView.lines.at(-1);
+    if (firstLine === undefined || lastLine === undefined) continue;
+    const start = content.lines.indexOf(firstLine);
+    const end = content.lines.indexOf(lastLine);
+    if (start < 0 || end < start) {
+      throw new GuidedReviewUiInvariantError(
+        `Review span lines are not part of frozen file change ${spanView.change.id}.`,
+      );
+    }
+
+    const startsFile = previousChangeId !== spanView.change.id;
+    if (startsFile) {
+      if (rows.length > 0) rows.push({ text: "" });
       rows.push(
-        ...renderDiffLine(
-          line,
-          isSelected,
-          hasComment,
-          theme,
-          width,
-          inlineTextByIndex.get(lineIndex),
-        ).map((text) => ({
+        ...wrapStyled(renderSpanHeader(spanView, theme), width).map((text) => ({
           text,
           spanIndex,
-          targetKey: target === undefined ? undefined : targetKey(target),
+          isSpanHeader: true,
+        })),
+      );
+      previousChangeId = spanView.change.id;
+      previousStart = start;
+      previousEnd = end;
+      rows.push(
+        ...renderUnitDiffLines(
+          spanView.lines,
+          spanIndex,
+          spanView.change.id,
+          targetsByLine,
+          commentsByTarget,
+          selectedTarget,
+          theme,
+          width,
+        ),
+      );
+      continue;
+    }
+
+    let lines: readonly DiffLine[];
+    if (start < previousStart) {
+      rows.push(renderOmittedDiffLines(undefined, spanIndex, theme, width));
+      lines = spanView.lines;
+      previousStart = start;
+      previousEnd = end;
+    } else if (end <= previousEnd) {
+      lines = [];
+    } else {
+      const gap = start - previousEnd - 1;
+      if (gap > INLINE_SPAN_MERGE_GAP) {
+        rows.push(renderOmittedDiffLines(gap, spanIndex, theme, width));
+        lines = spanView.lines;
+        previousStart = start;
+      } else {
+        lines = content.lines.slice(previousEnd + 1, end + 1);
+      }
+      previousEnd = end;
+    }
+    rows.push(
+      ...renderUnitDiffLines(
+        lines,
+        spanIndex,
+        spanView.change.id,
+        targetsByLine,
+        commentsByTarget,
+        selectedTarget,
+        theme,
+        width,
+      ),
+    );
+  }
+  return rows;
+}
+
+function renderUnitDiffLines(
+  lines: readonly DiffLine[],
+  spanIndex: number,
+  fileChangeId: FileChange["id"],
+  targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
+  commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  selectedTarget: ReviewCommentTarget | undefined,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly RenderedRow[] {
+  const rows: RenderedRow[] = [];
+  const inlineTextByIndex = buildInlineDiffText(lines, theme);
+  for (const [lineIndex, line] of lines.entries()) {
+    const target = lineTarget(targetsByLine, fileChangeId, line);
+    const isSelected =
+      target !== undefined &&
+      selectedTarget !== undefined &&
+      targetKey(target) === targetKey(selectedTarget);
+    const comment =
+      target === undefined
+        ? undefined
+        : commentsByTarget.get(targetKey(target));
+    rows.push(
+      ...renderDiffLine(
+        line,
+        isSelected,
+        comment !== undefined,
+        theme,
+        width,
+        inlineTextByIndex.get(lineIndex),
+      ).map((text) => ({
+        text,
+        spanIndex,
+        targetKey: target === undefined ? undefined : targetKey(target),
+      })),
+    );
+    if (comment !== undefined && target !== undefined) {
+      rows.push(
+        ...renderInlineDraftComment(comment, theme, width).map((text) => ({
+          text,
+          spanIndex,
+          targetKey: targetKey(target),
         })),
       );
     }
   }
   return rows;
+}
+
+function renderOmittedDiffLines(
+  count: number | undefined,
+  spanIndex: number,
+  theme: ReviewUiTheme,
+  width: number,
+): RenderedRow {
+  const detail =
+    count === undefined
+      ? "routed region continues elsewhere in this file"
+      : `${count} frozen diff line${count === 1 ? "" : "s"} not shown`;
+  return {
+    text: fitLine(
+      `${" ".repeat(DIFF_GUTTER_WIDTH)}${theme.fg("dim", `⋯ ${detail}`)}`,
+      width,
+    ),
+    spanIndex,
+  };
 }
 
 /** Highlighted file path shown above a span and pinned when scrolled. */
@@ -2046,6 +2164,39 @@ function renderDiffLine(
   return lines.map((rendered) =>
     theme.bg("selectedBg", truncateToWidth(rendered, width, "", true)),
   );
+}
+
+const DIFF_GUTTER_WIDTH = 14;
+const COMMENT_CARD_MAX_WIDTH = 120;
+
+function renderInlineDraftComment(
+  comment: ReviewComment,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
+  const contentWidth = Math.min(cardWidth, COMMENT_CARD_MAX_WIDTH);
+  const content = [
+    ...wrapStyled(
+      theme.fg("accent", theme.bold("  [Draft comment]")),
+      contentWidth,
+    ),
+    ...wrapWithPrefix(
+      "  ",
+      theme.fg("text", safeText(comment.body)),
+      contentWidth,
+    ),
+  ];
+  return [
+    ...renderBackgroundBlock(
+      content,
+      "userMessageBg",
+      theme,
+      width,
+      DIFF_GUTTER_WIDTH,
+    ),
+    "",
+  ];
 }
 
 function renderSelectedDiffText(
@@ -2590,6 +2741,30 @@ function fitLine(line: string, width: number): string {
 function fillLine(line: string, width: number): string {
   const fitted = fitLine(line, width);
   return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
+}
+
+function renderBackgroundBlock(
+  lines: readonly string[],
+  background: Parameters<ReviewUiTheme["bg"]>[0],
+  theme: ReviewUiTheme,
+  width: number,
+  leftMargin: number,
+): readonly string[] {
+  const margin = clampedMargin(width, leftMargin);
+  const backgroundWidth = widthAfterMargin(width, leftMargin);
+  const prefix = " ".repeat(margin);
+  return lines.map(
+    (line) =>
+      `${prefix}${theme.bg(background, fillLine(line, backgroundWidth))}`,
+  );
+}
+
+function clampedMargin(width: number, margin: number): number {
+  return Math.min(Math.max(0, margin), Math.max(0, width - 1));
+}
+
+function widthAfterMargin(width: number, margin: number): number {
+  return Math.max(1, width - clampedMargin(width, margin));
 }
 
 function fillScreenHeight(

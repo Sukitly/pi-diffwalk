@@ -34,6 +34,21 @@ import {
   serializeReviewSeriesEntry,
 } from "./review-persistence.ts";
 import { createReviewSeries } from "./review-series.ts";
+import {
+  DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
+  parseReviewThreadBatchEntry,
+  serializeReviewThreadBatchEntry,
+} from "./review-thread-persistence.ts";
+import { openReviewThreads } from "./review-thread-ui.ts";
+import {
+  attachReviewThreadResponses,
+  createReviewThreadBatch,
+  REVIEW_RESPONSES_TOOL_DESCRIPTION,
+  REVIEW_RESPONSES_TOOL_NAME,
+  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  ReviewResponseCandidateSchema,
+  resolvedCommentLines,
+} from "./review-threads.ts";
 import { openGuidedReview } from "./review-ui.ts";
 import {
   assessRouteQuality,
@@ -49,11 +64,14 @@ import {
   type ReviewSeriesId,
   type ReviewSnapshot,
   type ReviewSubmissionMode,
+  type ReviewThreadBatch,
+  type ReviewThreadBatchId,
   type SubmittedGuidedReviewResult,
 } from "./types.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
 const DISCARD_OPTION = "--discard";
+const THREADS_OPTION = "--threads";
 
 /**
  * Kickoff and submission payloads reach the LLM verbatim. The TUI renders
@@ -105,15 +123,17 @@ export function parseReviewTarget(args: string): string {
  */
 export type DiffWalkCommand =
   | { readonly type: "review"; readonly targetRef?: string }
-  | { readonly type: "discard" };
+  | { readonly type: "discard" }
+  | { readonly type: "threads" };
 
 export function parseDiffWalkCommand(args: string): DiffWalkCommand {
   const trimmed = args.trim();
   if (trimmed.length === 0) return { type: "review" };
   if (trimmed === DISCARD_OPTION) return { type: "discard" };
+  if (trimmed === THREADS_OPTION) return { type: "threads" };
   if (trimmed.startsWith("-")) {
     throw new Error(
-      `Unknown /diffwalk option ${trimmed}. Use /diffwalk [base] to review a revision, or /diffwalk ${DISCARD_OPTION} to drop a pending review.`,
+      `Unknown /diffwalk option ${trimmed}. Use /diffwalk [base] to review a revision, /diffwalk ${THREADS_OPTION} to reopen comment threads, or /diffwalk ${DISCARD_OPTION} to drop a pending review.`,
     );
   }
   return { type: "review", targetRef: parseReviewTarget(trimmed) };
@@ -139,6 +159,7 @@ export interface DiffWalkDependencies {
   readonly captureRepositoryState: typeof captureRepositoryState;
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
   readonly openGuidedReview: typeof openGuidedReview;
+  readonly openReviewThreads: typeof openReviewThreads;
 }
 
 const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
@@ -146,6 +167,7 @@ const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   captureRepositoryState,
   assertReviewSnapshotUnchanged,
   openGuidedReview,
+  openReviewThreads,
 };
 
 export default function diffWalk(pi: ExtensionAPI): void {
@@ -158,14 +180,23 @@ export function registerDiffWalk(
 ): void {
   let pendingReview: PendingReview | undefined;
   const completedSeriesById = new Map<ReviewSeriesId, ReviewSeries>();
+  const threadBatchesById = new Map<ReviewThreadBatchId, ReviewThreadBatch>();
+  let latestThreadBatchId: ReviewThreadBatchId | undefined;
 
   pi.on("session_start", (_event, ctx) => {
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type !== "custom") continue;
-      if (entry.customType !== DIFFWALK_SERIES_ENTRY_TYPE) continue;
-      const series = parseReviewSeriesEntry(entry.data);
-      if (series === undefined) continue;
-      completedSeriesById.set(series.id, series);
+      if (entry.customType === DIFFWALK_SERIES_ENTRY_TYPE) {
+        const series = parseReviewSeriesEntry(entry.data);
+        if (series !== undefined) completedSeriesById.set(series.id, series);
+        continue;
+      }
+      if (entry.customType === DIFFWALK_THREAD_BATCH_ENTRY_TYPE) {
+        const batch = parseReviewThreadBatchEntry(entry.data);
+        if (batch === undefined) continue;
+        threadBatchesById.set(batch.id, batch);
+        latestThreadBatchId = batch.id;
+      }
     }
   });
 
@@ -177,6 +208,51 @@ export function registerDiffWalk(
     DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
     renderSubmittedReviewMessage,
   );
+
+  function persistThreadBatch(batch: ReviewThreadBatch): void {
+    threadBatchesById.set(batch.id, batch);
+    latestThreadBatchId = batch.id;
+    pi.appendEntry(
+      DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
+      serializeReviewThreadBatchEntry(batch),
+    );
+  }
+
+  function snapshotForThreadBatch(batch: ReviewThreadBatch): ReviewSnapshot {
+    const series = completedSeriesById.get(batch.seriesId);
+    const round = series?.rounds.find(
+      (candidate) => candidate.id === batch.roundId,
+    );
+    if (round === undefined || round.snapshot.id !== batch.snapshotId) {
+      throw new Error(
+        `Cannot find frozen snapshot ${batch.snapshotId} for DiffWalk thread batch ${batch.id}.`,
+      );
+    }
+    return round.snapshot;
+  }
+
+  function assertThreadBatchCanChange(batch: ReviewThreadBatch): void {
+    if (pendingReview?.review.delta.baselineRoundId === batch.roundId) {
+      throw new Error(
+        `DiffWalk thread batch ${batch.id} is the baseline of pending review ${pendingReview.review.id}. Finish or discard that review before changing thread resolution.`,
+      );
+    }
+  }
+
+  async function openThreadBatch(
+    ctx: Pick<ExtensionContext, "mode" | "ui">,
+    batch: ReviewThreadBatch,
+  ): Promise<ReviewThreadBatch> {
+    assertThreadBatchCanChange(batch);
+    const result = await dependencies.openReviewThreads(ctx, {
+      snapshot: snapshotForThreadBatch(batch),
+      batch,
+      onBatchChange: persistThreadBatch,
+    });
+    threadBatchesById.set(result.id, result);
+    latestThreadBatchId = result.id;
+    return result;
+  }
 
   function sendKickoffPrompt(
     snapshot: ReviewSnapshot,
@@ -211,7 +287,19 @@ export function registerDiffWalk(
       targetRef,
     });
     const series = completedSeriesById.get(createdSeries.id) ?? createdSeries;
-    const delta = computeReviewDelta(snapshot, series.rounds.at(-1));
+    const baseline = series.rounds.at(-1);
+    const baselineThreads =
+      baseline === undefined
+        ? undefined
+        : [...threadBatchesById.values()].find(
+            (batch) => batch.roundId === baseline.id,
+          );
+    const delta = computeReviewDelta(snapshot, baseline, {
+      resolvedCommentLines:
+        baselineThreads === undefined
+          ? []
+          : resolvedCommentLines(baselineThreads),
+    });
     if (
       !delta.lines.some((requirement) => requirement.type === "needs-review")
     ) {
@@ -264,11 +352,25 @@ export function registerDiffWalk(
       DIFFWALK_SERIES_ENTRY_TYPE,
       serializeReviewSeriesEntry(submitted.series),
     );
+    const commentBatch =
+      review.comments.length === 0
+        ? undefined
+        : createReviewThreadBatch({
+            seriesId: submitted.series.id,
+            roundId: submitted.round.id,
+            snapshotId: review.snapshot.id,
+            submissionMode: review.submissionMode,
+            comments: review.comments,
+          });
+    if (commentBatch !== undefined) persistThreadBatch(commentBatch);
     return {
       status: "submitted",
       snapshotId: review.snapshot.id,
       submissionMode: review.submissionMode,
       comments: review.comments,
+      ...(commentBatch === undefined
+        ? {}
+        : { commentBatchId: commentBatch.id }),
     };
   }
 
@@ -329,6 +431,18 @@ export function registerDiffWalk(
       const command = parseDiffWalkCommand(args);
       if (command.type === "discard") {
         discardPendingReview(ctx);
+        return;
+      }
+      if (command.type === "threads") {
+        const batch =
+          latestThreadBatchId === undefined
+            ? undefined
+            : threadBatchesById.get(latestThreadBatchId);
+        if (batch === undefined) {
+          ctx.ui.notify("No DiffWalk comment threads are available.", "info");
+          return;
+        }
+        await openThreadBatch(ctx, batch);
         return;
       }
 
@@ -424,6 +538,83 @@ export function registerDiffWalk(
       }
 
       await startNewReview(ctx, requestedTarget ?? DEFAULT_REVIEW_TARGET);
+    },
+  });
+
+  pi.registerTool<typeof ReviewResponseCandidateSchema, ReviewThreadBatch>({
+    name: REVIEW_RESPONSES_TOOL_NAME,
+    label: "DiffWalk Responses",
+    description: REVIEW_RESPONSES_TOOL_DESCRIPTION,
+    promptSnippet: REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewResponseCandidateSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, candidate, signal, _onUpdate, ctx) {
+      signal?.throwIfAborted();
+      const batch = threadBatchesById.get(
+        candidate.batchId as ReviewThreadBatchId,
+      );
+      if (batch === undefined) {
+        throw new Error(
+          `No pending DiffWalk comment batch matches ${candidate.batchId}. Use the batchId from the submitted review result.`,
+        );
+      }
+      assertThreadBatchCanChange(batch);
+      const answered = attachReviewThreadResponses(batch, candidate);
+      persistThreadBatch(answered);
+      signal?.throwIfAborted();
+      const reviewed = await openThreadBatch(ctx, answered);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Recorded ${reviewed.threads.length} structured DiffWalk responses. The reviewer inspected the anchored threads.`,
+          },
+        ],
+        details: reviewed,
+        terminate: true,
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg(
+          "toolTitle",
+          `DiffWalk responses (${args.responses?.length ?? 0})`,
+        ),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme, context) {
+      if (context.isError) {
+        const content = result.content.find((item) => item.type === "text");
+        return new Text(
+          theme.fg(
+            "error",
+            content?.type === "text"
+              ? content.text
+              : "DiffWalk responses were rejected.",
+          ),
+          0,
+          0,
+        );
+      }
+      const batch = result.details;
+      if (batch === undefined) {
+        return new Text(
+          theme.fg("success", "DiffWalk responses recorded"),
+          0,
+          0,
+        );
+      }
+      const resolved = batch.threads.filter((thread) => thread.resolved).length;
+      return new Text(
+        theme.fg(
+          "success",
+          `${batch.threads.length} responses reviewed • ${resolved} resolved`,
+        ),
+        0,
+        0,
+      );
     },
   });
 
@@ -802,10 +993,18 @@ export function formatGuidedReviewResult(result: GuidedReviewResult): string {
     status: result.status,
     snapshotId: result.snapshotId,
     submissionMode: result.submissionMode,
-    comments: result.comments,
+    ...(result.commentBatchId === undefined
+      ? {}
+      : { commentBatchId: result.commentBatchId }),
+    comments: result.comments.map((comment, index) => ({
+      commentId: `C${index + 1}`,
+      ...comment,
+    })),
     instruction:
-      result.submissionMode === "discuss-first"
-        ? "Investigate and respond to every comment without modifying files."
-        : "Apply direct change requests; explain questions, uncertainty, or disagreement before making unrelated changes.",
+      result.comments.length === 0
+        ? "No comments require an Agent response."
+        : result.submissionMode === "discuss-first"
+          ? `Investigate every comment without modifying files. Do not answer in ordinary assistant text. After investigation is complete, call ${REVIEW_RESPONSES_TOOL_NAME} as the only tool call in your final assistant response, with this commentBatchId and exactly one direct response for every commentId. The tool opens the responses at their frozen diff anchors for the reviewer.`
+          : `Apply direct change requests and investigate questions or disagreements. Do not provide the final comment answers in ordinary assistant text. After all investigation and edits are complete, call ${REVIEW_RESPONSES_TOOL_NAME} as the only tool call in your final assistant response, with this commentBatchId and exactly one direct response for every commentId, explaining any applied change, uncertainty, or disagreement. The tool opens the responses at their frozen diff anchors for the reviewer.`,
   });
 }

@@ -13,6 +13,8 @@ export type SnapshotId = Brand<string, "SnapshotId">;
 export type FileChangeId = Brand<string, "FileChangeId">;
 export type NoticeId = Brand<string, "NoticeId">;
 export type ReviewUnitId = Brand<string, "ReviewUnitId">;
+export type ReviewThreadBatchId = Brand<string, "ReviewThreadBatchId">;
+export type ReviewCommentId = Brand<string, "ReviewCommentId">;
 export type GitObjectId = Brand<string, "GitObjectId">;
 export type StateFingerprint = Brand<string, "StateFingerprint">;
 
@@ -403,11 +405,32 @@ export interface ReviewComment {
 
 export type ReviewSubmissionMode = "discuss-first" | "apply-change-requests";
 
+export interface AgentReviewResponse {
+  readonly body: string;
+}
+
+export interface ReviewCommentThread {
+  readonly id: ReviewCommentId;
+  readonly comment: ReviewComment;
+  readonly response?: AgentReviewResponse;
+  readonly resolved: boolean;
+}
+
+export interface ReviewThreadBatch {
+  readonly id: ReviewThreadBatchId;
+  readonly seriesId: ReviewSeriesId;
+  readonly roundId: ReviewRoundId;
+  readonly snapshotId: SnapshotId;
+  readonly submissionMode: ReviewSubmissionMode;
+  readonly threads: readonly ReviewCommentThread[];
+}
+
 export interface SubmittedGuidedReviewResult {
   readonly status: "submitted";
   readonly snapshotId: SnapshotId;
   readonly submissionMode: ReviewSubmissionMode;
   readonly comments: readonly ReviewComment[];
+  readonly commentBatchId?: ReviewThreadBatchId;
 }
 
 export interface PausedGuidedReviewResult {

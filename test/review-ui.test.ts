@@ -130,6 +130,14 @@ const inlineTheme = {
   inverse: (text: string) => `[[${text}]]`,
 } satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 
+const cardTheme = {
+  ...plainTheme,
+  bg: (color: Parameters<Theme["bg"]>[0], text: string) => {
+    const code = color === "userMessageBg" ? 24 : 25;
+    return `\u001b[48;5;${code}m${text}\u001b[49m`;
+  },
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
+
 const metadataOnly: FileChange = {
   id: "file:metadata:script.sh" as FileChangeId,
   source: "tracked",
@@ -942,6 +950,66 @@ function makeContextGapFixture(contextLines = 30): UiFixture {
   return { snapshot, delta, routeCandidate, route };
 }
 
+function makeSplitSameFileFixture(contextLines: number): UiFixture {
+  const snapshot = makeSnapshot("snapshot-split-same-file", [
+    {
+      path: "src/gap.ts",
+      lines: [
+        "+first edit",
+        ...Array.from(
+          { length: contextLines },
+          (_, index) => ` filler ${index + 1}`,
+        ),
+        "+second edit",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Split file unit",
+        whyHere: "Both edits belong to one file-level behavior.",
+        context: "first -> second",
+        changeSummary: "Edits two regions of one file.",
+        reviewFocus: ["Can either edit disagree with the shared behavior?"],
+        spans: [
+          span("src/gap.ts", { new: [1, 1] }),
+          span("src/gap.ts", { new: [contextLines + 2, contextLines + 2] }),
+        ],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+test("groups nearby spans from one file under one header without duplicate context", () => {
+  const harness = createHarness(80, 30, makeSplitSameFileFixture(3));
+  const output = renderText(harness);
+
+  assert.equal(output.match(/src\/gap\.ts/g)?.length, 1);
+  assert.equal(output.match(/filler \d/g)?.length, 3);
+  assert.doesNotMatch(output, /frozen diff lines not shown/);
+  assert.match(output, /\+first edit[\s\S]*\+second edit/);
+});
+
+test("separates distant spans with one omission marker and keeps the file title pinned", () => {
+  const harness = createHarness(80, 30, makeSplitSameFileFixture(30));
+  const top = renderText(harness);
+
+  assert.equal(top.match(/src\/gap\.ts/g)?.length, 1);
+  assert.match(top, /24 frozen diff lines not shown/);
+
+  harness.terminal.rows = 10;
+  press(harness.component, "G");
+  const bottom = renderText(harness);
+  assert.equal(bottom.match(/src\/gap\.ts/g)?.length, 1);
+  assert.match(bottom, />\s+32\s+\+second edit/);
+});
+
 test("half-page scrolling continues through context without snapping back", () => {
   const harness = createHarness(40, 10, makeContextGapFixture());
 
@@ -1091,6 +1159,34 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
   assert.equal(comment?.side, "old");
   assert.equal(comment?.line, 5);
   assert.match(renderText(harness), /comments 1/);
+  assert.match(
+    renderText(harness),
+    /\[Draft comment\][\s\S]*请检查[\s\S]*失败路径/,
+  );
+});
+
+test("renders a saved draft as a full-width message card", () => {
+  const width = 100;
+  const harness = createHarness(width, 24, makeUiFixture(), {
+    theme: cardTheme,
+  });
+
+  press(harness.component, "c", "C", "h", "e", "c", "k", "\r");
+  const background = `${" ".repeat(14)}\u001b[48;5;24m`;
+  const cardRows = harness.component
+    .render(width)
+    .filter((line) => line.startsWith(background));
+
+  assert.ok(
+    cardRows.some((line) => line.startsWith(`${background}  [Draft comment]`)),
+  );
+  assert.ok(cardRows.some((line) => line.startsWith(`${background}  Check`)));
+  assert.equal(
+    cardRows.every(
+      (line) => visibleWidth(line) === width && line.endsWith("\u001b[49m"),
+    ),
+    true,
+  );
 });
 
 test("invalidates cached editor output when focus changes", () => {

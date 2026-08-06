@@ -6,6 +6,7 @@ import {
 } from "./review-span.ts";
 import type {
   ChangedLineRecord,
+  ChangedLineRef,
   ChangedLineRequirement,
   ChangeSide,
   FileChange,
@@ -30,9 +31,14 @@ export class ReviewDeltaError extends Error {
  */
 const MAX_ALIGNMENT_CELLS = 1_000_000;
 
+export interface ComputeReviewDeltaOptions {
+  readonly resolvedCommentLines?: readonly ChangedLineRef[];
+}
+
 export function computeReviewDelta(
   snapshot: ReviewSnapshot,
   baseline?: ReviewRound,
+  options: ComputeReviewDeltaOptions = {},
 ): ReviewDelta {
   assertUniqueFileChanges(snapshot);
   const current = listChangedLines(snapshot);
@@ -56,6 +62,16 @@ export function computeReviewDelta(
   for (const file of baseline.coverage.files) {
     baselineByPath.set(fileKey(file.oldPath, file.newPath), file);
   }
+  const resolvedComments = collectResolvedComments(
+    baseline,
+    options.resolvedCommentLines ?? [],
+  );
+  const baselineChangeByPath = new Map(
+    baseline.snapshot.changes.map((change) => [
+      coverageFileKey(change),
+      change,
+    ]),
+  );
 
   const requirements = new Map<string, ChangedLineRequirement>();
   const consumedFiles = new Set<string>();
@@ -73,7 +89,19 @@ export function computeReviewDelta(
       continue;
     }
     consumedFiles.add(key);
-    removedLineCount += alignFile(changedLines, previous.lines, requirements);
+    const baselineChange = baselineChangeByPath.get(key);
+    if (baselineChange === undefined) {
+      throw new ReviewDeltaError(
+        `Baseline round ${baseline.id} has coverage for ${key} without a matching snapshot change.`,
+      );
+    }
+    removedLineCount += alignFile(
+      changedLines,
+      previous.lines,
+      requirements,
+      baselineChange.id,
+      resolvedComments,
+    );
   }
 
   for (const [key, file] of baselineByPath) {
@@ -96,11 +124,49 @@ export function computeReviewDelta(
   };
 }
 
+function collectResolvedComments(
+  baseline: ReviewRound,
+  refs: readonly ChangedLineRef[],
+): ReadonlySet<string> {
+  const changesById = new Map(
+    baseline.snapshot.changes.map((change) => [change.id, change]),
+  );
+  const coverageByPath = new Map(
+    baseline.coverage.files.map((file) => [
+      fileKey(file.oldPath, file.newPath),
+      file,
+    ]),
+  );
+  const result = new Set<string>();
+
+  for (const ref of refs) {
+    const change = changesById.get(ref.fileChangeId);
+    if (change === undefined) {
+      throw new ReviewDeltaError(
+        `Resolved comment references unknown file change ${ref.fileChangeId} in baseline round ${baseline.id}.`,
+      );
+    }
+    const coverage = coverageByPath.get(coverageFileKey(change));
+    const record = coverage?.lines.find(
+      (line) => line.side === ref.side && line.line === ref.line,
+    );
+    if (record?.disposition !== "commented") {
+      throw new ReviewDeltaError(
+        `Resolved comment references ${ref.side} line ${ref.line} of file change ${ref.fileChangeId}, which is not commented in baseline round ${baseline.id}.`,
+      );
+    }
+    result.add(changedLineKey(ref));
+  }
+  return result;
+}
+
 /** Returns the number of baseline lines that no longer exist in this file. */
 function alignFile(
   current: readonly ChangedLine[],
   previous: readonly ChangedLineRecord[],
   requirements: Map<string, ChangedLineRequirement>,
+  previousFileChangeId: FileChange["id"],
+  resolvedComments: ReadonlySet<string>,
 ): number {
   const pairs = alignSequences(
     current.map((line) => lineKey(line.side, line.text)),
@@ -113,7 +179,20 @@ function alignFile(
     const record = previous[previousIndex];
     if (line === undefined || record === undefined) continue;
     matchedPrevious.add(previousIndex);
-    requirements.set(changedLineKey(line), fromRecord(line, record));
+    requirements.set(
+      changedLineKey(line),
+      fromRecord(
+        line,
+        record,
+        resolvedComments.has(
+          changedLineKey({
+            fileChangeId: previousFileChangeId,
+            side: record.side,
+            line: record.line,
+          }),
+        ),
+      ),
+    );
   }
 
   for (const line of current) {
@@ -129,6 +208,7 @@ function alignFile(
 function fromRecord(
   line: ChangedLine,
   record: ChangedLineRecord,
+  resolvedComment: boolean,
 ): ChangedLineRequirement {
   switch (record.disposition) {
     case "reviewed-without-comment":
@@ -140,7 +220,15 @@ function fromRecord(
         reviewedInRoundId: record.reviewedInRoundId,
       };
     case "commented":
-      return needsReview(line, "unresolved-comment");
+      return resolvedComment
+        ? {
+            type: "carried-forward",
+            fileChangeId: line.fileChangeId,
+            side: line.side,
+            line: line.line,
+            reviewedInRoundId: record.commentedInRoundId,
+          }
+        : needsReview(line, "unresolved-comment");
     case "skipped":
       return needsReview(line, "previously-skipped");
   }
