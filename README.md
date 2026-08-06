@@ -16,8 +16,8 @@ It is intended to:
 - order review units by how the system works, not by file name
 - explain the relevant call path, contracts, and invariants before showing a diff
 - keep every explanation anchored to a frozen Git snapshot
-- let the reviewer attach comments to exact diff lines
-- send all comments back to the agent as one structured result
+- let the reviewer attach comments to exact diff lines and read them inline
+- require structured agent responses anchored to those comments
 
 It is not intended to:
 
@@ -33,6 +33,7 @@ Run:
 
 ```text
 /diffwalk [base]
+/diffwalk --threads
 /diffwalk --discard
 ```
 
@@ -41,6 +42,7 @@ Examples:
 ```text
 /diffwalk
 /diffwalk origin/main
+/diffwalk --threads
 /diffwalk --discard
 ```
 
@@ -48,7 +50,7 @@ With no base argument, DiffWalk will review the current worktree against `HEAD`,
 
 When the comparison contains no line that needs review, DiffWalk reports that and starts nothing. No snapshot is left pending, and the agent receives no route request. The report still names carried-forward lines from the previous round, changes that cannot be reviewed line by line, and snapshot notices.
 
-`/diffwalk --discard` drops a pending review without opening the walkthrough.
+`/diffwalk --threads` reopens the most recently viewed comment batch. `/diffwalk --discard` drops a pending walkthrough without opening it.
 
 The review flow is:
 
@@ -58,10 +60,12 @@ The review flow is:
 4. The agent constructs a review route by drawing spans over the regions a reviewer must understand together.
 5. DiffWalk validates that every changed line requiring review is covered once or explicitly skipped with a reason.
 6. The TUI walks the reviewer through the route one review unit at a time.
-7. The reviewer adds comments to specific lines as needed.
+7. The reviewer adds comments that render directly below their diff anchors.
 8. A final page shows every comment before submission.
-9. DiffWalk returns the comments to the agent as one structured tool result.
-10. The agent explains, investigates, or modifies the code according to the selected submission mode.
+9. DiffWalk returns an immutable comment batch with batch-local IDs such as `C1`.
+10. The agent explains, investigates, or modifies the code according to the selected submission mode, then submits exactly one structured response per comment.
+11. DiffWalk automatically opens a follow-up diff containing only the commented regions, with each agent response pinned below its comment.
+12. The reviewer resolves or reopens each thread explicitly.
 
 ## Review Order
 
@@ -168,16 +172,29 @@ The walkthrough footer shows only the most common keys. The table above is the c
 
 The inventory lists one entry per changed file with its planned, skipped, and carried-forward line counts, plus metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Any changed region can be opened for explicit read-only inspection, including regions outside the planned route.
 
-A comment will retain its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context.
+A comment retains its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context. After saving, the complete draft body appears directly below the selected diff line.
 
 ## Comment Submission
 
-The final page will support two submission modes:
+The final page supports two submission modes:
 
 - **Discuss first:** The agent investigates and responds to every comment without editing code.
 - **Apply change requests:** The agent applies direct change requests and explains questions or disagreements.
 
 The comments are returned only after the reviewer explicitly completes every planned review unit and submits the batch. An incomplete summary sends Enter back to the first pending unit. This keeps the review uninterrupted and prevents the agent from changing later regions while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
+
+The agent must finish by calling `submit_diffwalk_responses` with the batch ID and exactly one non-empty response for every comment ID. Missing, duplicate, unknown, blank, repeated, or cross-batch responses are rejected. The tool opens a full-screen follow-up view before ending the agent turn. The follow-up view derives compact context windows from the frozen snapshot and merges adjacent windows, so unrelated route regions are not shown.
+
+Follow-up controls:
+
+| Key | Action |
+|---|---|
+| `j`, `k`, `Up`, `Down` | Select the next or previous comment thread |
+| `PageUp`, `PageDown`, `Ctrl+f`, `Ctrl+b` | Scroll long thread content by a viewport |
+| `r` | Resolve an answered thread or reopen a resolved thread |
+| `Esc` | Close the follow-up view; use `/diffwalk --threads` to reopen it |
+
+An agent response marks a thread answered, not resolved. Only the reviewer can change the resolved state. Unresolved comments remain `unresolved-comment` work in the next incremental review; resolved comments are carried forward. Resolution cannot change while a later walkthrough based on that thread batch is pending, because doing so would invalidate its frozen review delta.
 
 ## Grounding and Coverage
 
@@ -194,7 +211,8 @@ DiffWalk will enforce the following rules:
 - A span naming an unknown file, an out-of-range line, or no changed line causes route validation to fail.
 - A changed line covered twice, or both covered and skipped, causes route validation to fail.
 - A changed worktree is detected before comment submission.
-- Comments retain stable snapshot locations even if the live worktree later changes.
+- Comments and structured agent responses retain stable snapshot locations even if the live worktree later changes.
+- Agent responses cannot resolve comments; resolution is an explicit reviewer action.
 - Binary files, generated files, renames, deletions, and untracked files must be represented or explicitly reported as unsupported.
 
 These rules do not make the agent's explanation correct. They prevent the explanation from silently changing or hiding the code under review.
@@ -209,8 +227,11 @@ These rules do not make the agent's explanation correct. They prevent the explan
     -> guided_review tool call
     -> route coverage validation
     -> interactive review TUI
-    -> structured comment result
-    -> agent response or implementation
+    -> structured comment batch
+    -> agent investigation or implementation
+    -> submit_diffwalk_responses tool call
+    -> filtered comment-thread TUI
+    -> reviewer resolution
 ```
 
 The source layout is:
@@ -227,10 +248,13 @@ src/
   route-advisory.ts     Advisory route-quality signals and the one-shot nudge
   review-coverage.ts    Submitted changed-line outcome calculation
   review-series.ts      Completed review round lifecycle
-  review-persistence.ts Session-entry serialization of completed rounds
-  review-comments.ts    Comment anchors, drafts, and submission results
-  review-ui.ts           Interactive TUI
-  prompts.ts             Agent instructions for route construction
+  review-persistence.ts        Session-entry serialization of completed rounds
+  review-comments.ts           Comment anchors and drafts
+  review-threads.ts            Comment batches, structured responses, and resolution
+  review-thread-persistence.ts Session-entry serialization of comment threads
+  review-ui.ts                 Interactive walkthrough TUI
+  review-thread-ui.ts          Filtered anchored response TUI
+  prompts.ts                   Agent instructions for route construction
   types.ts               Shared data structures and schemas
 test/
   index.test.ts
@@ -244,6 +268,9 @@ test/
   review-series.test.ts
   review-persistence.test.ts
   review-comments.test.ts
+  review-threads.test.ts
+  review-thread-persistence.test.ts
+  review-thread-ui.test.ts
   prompt-surface.test.ts
 ```
 
@@ -262,7 +289,7 @@ Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pa
 
 A paused review does not lock the repository. Users and agents may continue modifying files or Git state. If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
 
-Completed review rounds persist as custom entries in the pi session, so the carried-forward baseline survives pi restarts, `/reload`, and session resume. The next `/diffwalk` against the same repository, branch, and base classifies unchanged, previously reviewed lines as carried-forward instead of routing them again. Entries with an unknown format version or a broken structure are ignored on restore. A paused in-progress review is still extension memory only: it does not survive a reload, and the next `/diffwalk` starts over from a fresh snapshot.
+Completed review rounds and submitted comment-thread batches persist as custom entries in the pi session, so the carried-forward baseline, structured responses, and reviewer resolution survive pi restarts, `/reload`, and session resume. The next `/diffwalk` against the same repository, branch, and base classifies unchanged reviewed lines and resolved comments as carried-forward. Entries with an unknown format version or a broken structure are ignored on restore. A paused in-progress walkthrough is still extension memory only: it does not survive a reload, and the next `/diffwalk` starts over from a fresh snapshot.
 
 ## Review Lifecycle Domain
 
@@ -309,8 +336,10 @@ The current version includes:
 - an inventory-only agent prompt that carries no file content
 - complete changed-line coverage validation
 - line-oriented diff navigation
-- inline comment editing
+- inline comment editing and anchored draft display
 - comment summary and batch submission
+- structured agent responses in an automatically opened filtered thread UI
+- reviewer-owned thread resolution and persisted thread reopening
 - worktree drift detection
 - explicit pause and in-process resume of an interrupted review
 - incremental review rounds with carried-forward classification, persisted across restarts as session entries

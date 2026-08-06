@@ -12,6 +12,12 @@ import {
 import { computeReviewDelta } from "../src/review-delta.ts";
 import { detectExactMoves } from "../src/review-moves.ts";
 import {
+  REVIEW_RESPONSES_TOOL_DESCRIPTION,
+  REVIEW_RESPONSES_TOOL_NAME,
+  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  ReviewResponseCandidateSchema,
+} from "../src/review-threads.ts";
+import {
   assessRouteQuality,
   formatAdvisoryNudge,
 } from "../src/route-advisory.ts";
@@ -19,7 +25,9 @@ import { validateReviewRoute } from "../src/route-validation.ts";
 import type {
   FileChange,
   NoticeId,
+  ReviewComment,
   ReviewRouteCandidate,
+  ReviewThreadBatchId,
   SnapshotId,
 } from "../src/types.ts";
 import { ReviewRouteCandidateSchema } from "../src/types.ts";
@@ -175,8 +183,35 @@ function toolSurface(): string {
   ].join("\n");
 }
 
+function responseToolSurface(): string {
+  return [
+    `name: ${REVIEW_RESPONSES_TOOL_NAME}`,
+    `description: ${REVIEW_RESPONSES_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewResponseCandidateSchema)}`,
+  ].join("\n");
+}
+
+function surfaceComment(snapshotId: SnapshotId): ReviewComment {
+  return {
+    snapshotId,
+    reviewUnitId: "review-unit:surface" as ReviewComment["reviewUnitId"],
+    fileChangeId: "file:surface" as ReviewComment["fileChangeId"],
+    side: "new",
+    line: 7,
+    filePath: "src/surface.ts",
+    oldPath: "src/surface.ts",
+    newPath: "src/surface.ts",
+    newLine: 7,
+    selectedText: "surface line",
+    nearbyContext: [{ type: "added", newLine: 7, text: "surface line" }],
+    body: "Explain this behavior.",
+  };
+}
+
 function resultSurface(): string {
   const snapshotId = "snapshot-surface" as SnapshotId;
+  const commentBatchId = "review-thread-batch:surface" as ReviewThreadBatchId;
   return [
     "--- paused ---",
     formatGuidedReviewResult({ status: "paused", snapshotId }),
@@ -187,14 +222,16 @@ function resultSurface(): string {
       status: "submitted",
       snapshotId,
       submissionMode: "discuss-first",
-      comments: [],
+      comments: [surfaceComment(snapshotId)],
+      commentBatchId,
     }),
     "--- submitted, apply-change-requests ---",
     formatGuidedReviewResult({
       status: "submitted",
       snapshotId,
       submissionMode: "apply-change-requests",
-      comments: [],
+      comments: [surfaceComment(snapshotId)],
+      commentBatchId,
     }),
   ].join("\n");
 }
@@ -204,6 +241,7 @@ function renderSurface(): string {
     ["kickoff prompt: fresh review with moves", kickoffWithMoves()],
     ["kickoff prompt: incremental review without moves", kickoffWithoutMoves()],
     ["guided_review tool", toolSurface()],
+    ["submit_diffwalk_responses tool", responseToolSurface()],
     ["tool results", resultSurface()],
     ["advisory nudge", advisoryNudge()],
   ];

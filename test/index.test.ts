@@ -30,14 +30,22 @@ import {
 } from "../src/index.ts";
 import { computeReviewDelta } from "../src/review-delta.ts";
 import { DIFFWALK_SERIES_ENTRY_TYPE } from "../src/review-persistence.ts";
+import { DIFFWALK_THREAD_BATCH_ENTRY_TYPE } from "../src/review-thread-persistence.ts";
+import {
+  REVIEW_RESPONSES_TOOL_NAME,
+  type ReviewResponseCandidateSchema,
+  setReviewThreadResolved,
+} from "../src/review-threads.ts";
 import type {
   FileChange,
   FileChangeId,
   GuidedReviewResult,
   NoticeId,
+  ReviewComment,
   ReviewRouteCandidate,
   ReviewRouteCandidateSchema,
   ReviewSnapshot,
+  ReviewThreadBatch,
   SnapshotId,
 } from "../src/types.ts";
 import { makeSnapshot, span } from "./domain-fixtures.ts";
@@ -47,6 +55,11 @@ type GuidedToolDefinition = ToolDefinition<
   GuidedReviewResult
 >;
 
+type ResponseToolDefinition = ToolDefinition<
+  typeof ReviewResponseCandidateSchema,
+  ReviewThreadBatch
+>;
+
 interface HarnessBehavior {
   drift: boolean;
   submitOnOpen: boolean;
@@ -54,6 +67,7 @@ interface HarnessBehavior {
   commentOnSubmit: boolean;
   markProgressOnOpen: boolean;
   submissionDrift: boolean;
+  resolveThreadOnOpen: boolean;
   snapshot: ReviewSnapshot;
 }
 
@@ -74,10 +88,12 @@ interface Harness {
     ctx: ExtensionCommandContext,
   ) => Promise<void>;
   readonly tool: GuidedToolDefinition;
+  readonly responseTool: ResponseToolDefinition;
   readonly sentMessages: readonly string[];
   readonly sentMessageMeta: readonly SentMessageMeta[];
   readonly registeredRenderers: readonly string[];
   readonly openedSnapshots: readonly string[];
+  readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
   readonly behavior: HarnessBehavior;
   /** Replays persisted entries into a fresh harness, as session_start does. */
@@ -94,6 +110,7 @@ function createHarness(
     commentOnSubmit: false,
     markProgressOnOpen: false,
     submissionDrift: false,
+    resolveThreadOnOpen: false,
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -103,10 +120,12 @@ function createHarness(
     | ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
     | undefined;
   let tool: GuidedToolDefinition | undefined;
+  let responseTool: ResponseToolDefinition | undefined;
   const sentMessages: string[] = [];
   const sentMessageMeta: SentMessageMeta[] = [];
   const registeredRenderers: string[] = [];
   const openedSnapshots: string[] = [];
+  const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
   let sessionStartHandler:
     | ((event: unknown, ctx: unknown) => unknown)
@@ -129,8 +148,12 @@ function createHarness(
       assert.equal(name, "diffwalk");
       command = options.handler;
     },
-    registerTool(definition: GuidedToolDefinition) {
-      tool = definition;
+    registerTool(definition: GuidedToolDefinition | ResponseToolDefinition) {
+      if (definition.name === REVIEW_RESPONSES_TOOL_NAME) {
+        responseTool = definition as ResponseToolDefinition;
+      } else {
+        tool = definition as GuidedToolDefinition;
+      }
     },
     sendMessage(
       message: {
@@ -175,6 +198,22 @@ function createHarness(
       if (behavior.drift) {
         throw new ReviewSnapshotDriftError("Repository changed.");
       }
+    },
+    async openReviewThreads(_ctx, input) {
+      openedThreadBatches.push(input.batch.id);
+      if (
+        behavior.resolveThreadOnOpen &&
+        input.batch.threads[0]?.response !== undefined
+      ) {
+        const resolved = setReviewThreadResolved(
+          input.batch,
+          input.batch.threads[0].id,
+          true,
+        );
+        input.onBatchChange(resolved);
+        return resolved;
+      }
+      return input.batch;
     },
     async openGuidedReview(_ctx, input) {
       openedSnapshots.push(input.review.snapshot.id);
@@ -230,6 +269,7 @@ function createHarness(
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
+  assert.ok(responseTool);
   assert.ok(sessionStartHandler);
   const restoreSession = async (
     entries: readonly AppendedEntry[],
@@ -251,10 +291,12 @@ function createHarness(
   return {
     command,
     tool,
+    responseTool,
     sentMessages,
     sentMessageMeta,
     registeredRenderers,
     openedSnapshots,
+    openedThreadBatches,
     appendedEntries,
     behavior,
     restoreSession,
@@ -325,6 +367,23 @@ function modeChange(): FileChange {
       gitBodyLines: [],
       unsupportedReason: "This file change has no textual diff hunks.",
     },
+  };
+}
+
+function commentFixture(): ReviewComment {
+  return {
+    snapshotId: "snapshot-index" as SnapshotId,
+    reviewUnitId: "unit-index" as ReviewComment["reviewUnitId"],
+    fileChangeId: "file-index" as ReviewComment["fileChangeId"],
+    side: "new",
+    line: 2,
+    filePath: "src/file.ts",
+    oldPath: "src/file.ts",
+    newPath: "src/file.ts",
+    newLine: 2,
+    selectedText: "changed",
+    nearbyContext: [{ type: "added", newLine: 2, text: "changed" }],
+    body: "Check this behavior.",
   };
 }
 
@@ -405,6 +464,7 @@ test("separates the discard option from a base revision", () => {
     targetRef: "origin/main",
   });
   assert.deepEqual(parseDiffWalkCommand(" --discard "), { type: "discard" });
+  assert.deepEqual(parseDiffWalkCommand(" --threads "), { type: "threads" });
   assert.throws(
     () => parseDiffWalkCommand("--drop"),
     /Unknown \/diffwalk option --drop/,
@@ -557,6 +617,150 @@ test("continues the initial tool turn when a submitted review has comments", asy
   assert.equal(details.status, "submitted");
   assert.equal(details.comments.length, 1);
   assert.equal(submitted.terminate, false);
+});
+
+test("accepts complete structured responses and opens anchored threads", async () => {
+  const harness = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+  });
+  await harness.command("", commandContext());
+  const submitted = await harness.tool.execute(
+    "call-review",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const result = submitted.details;
+  assert.equal(result.status, "submitted");
+  if (result.status !== "submitted") throw new Error("Expected submission.");
+  assert.ok(result.commentBatchId);
+
+  const responses = await harness.responseTool.execute(
+    "call-responses",
+    {
+      batchId: result.commentBatchId,
+      responses: [{ commentId: "C1", body: "The behavior is intentional." }],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  assert.equal(responses.terminate, true);
+  assert.equal(
+    responses.details?.threads[0]?.response?.body,
+    "The behavior is intentional.",
+  );
+  assert.deepEqual(harness.openedThreadBatches, [result.commentBatchId]);
+  assert.equal(
+    harness.appendedEntries.filter(
+      (entry) => entry.customType === DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
+    ).length,
+    2,
+  );
+});
+
+test("carries a reviewer-resolved comment forward in the next round", async () => {
+  const harness = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+    resolveThreadOnOpen: true,
+  });
+  await harness.command("", commandContext());
+  const submitted = await harness.tool.execute(
+    "call-review",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const result = submitted.details;
+  assert.equal(result.status, "submitted");
+  if (result.status !== "submitted" || result.commentBatchId === undefined) {
+    throw new Error("Expected a submitted comment batch.");
+  }
+  await harness.responseTool.execute(
+    "call-responses",
+    {
+      batchId: result.commentBatchId,
+      responses: [{ commentId: "C1", body: "Answered." }],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  harness.behavior.snapshot = makeSnapshot("snapshot-round-2", [
+    { path: "src/file.ts", lines: [" head", "+changed", " tail", "+new"] },
+  ]);
+  await harness.command("", commandContext());
+
+  const kickoff = harness.sentMessages.at(-1) ?? "";
+  assert.match(kickoff, /"needsReviewLineCount": 1/);
+  assert.match(kickoff, /"carriedForwardLineCount": 1/);
+  assert.doesNotMatch(kickoff, /"unresolvedComment"[\s\S]*"2"/);
+});
+
+test("does not change thread state under a later pending review delta", async () => {
+  const harness = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+  });
+  await harness.command("", commandContext());
+  const submitted = await harness.tool.execute(
+    "call-review",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const result = submitted.details;
+  assert.equal(result.status, "submitted");
+  if (result.status !== "submitted" || result.commentBatchId === undefined) {
+    throw new Error("Expected a submitted comment batch.");
+  }
+
+  harness.behavior.snapshot = makeSnapshot("snapshot-round-2", [
+    { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
+  ]);
+  await harness.command("", commandContext());
+
+  await assert.rejects(
+    harness.responseTool.execute(
+      "call-responses",
+      {
+        batchId: result.commentBatchId,
+        responses: [{ commentId: "C1", body: "Too late." }],
+      },
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /baseline of pending review.*Finish or discard/,
+  );
+});
+
+test("reopens the latest persisted comment threads", async () => {
+  const first = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+  });
+  await first.command("", commandContext());
+  await first.tool.execute(
+    "call-review",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  const second = createHarness();
+  await second.restoreSession(first.appendedEntries);
+  await second.command("--threads", commandContext());
+
+  assert.equal(second.openedThreadBatches.length, 1);
 });
 
 test("renders every successful guided-review outcome", async () => {
@@ -1401,12 +1605,22 @@ test("formats structured pause, discard, and submission instructions", () => {
 
   const submitted: GuidedReviewResult = {
     status: "submitted",
-    snapshotId: "snapshot-1" as SnapshotId,
+    snapshotId: "snapshot-index" as SnapshotId,
     submissionMode: "discuss-first",
-    comments: [],
+    comments: [commentFixture()],
+    commentBatchId: "batch-index" as ReviewThreadBatch["id"],
   };
   const formatted = JSON.parse(formatGuidedReviewResult(submitted)) as {
+    readonly commentBatchId: string;
+    readonly comments: readonly { readonly commentId: string }[];
     readonly instruction: string;
   };
+  assert.equal(formatted.commentBatchId, "batch-index");
+  assert.equal(formatted.comments[0]?.commentId, "C1");
   assert.match(formatted.instruction, /without modifying files/);
+  assert.match(formatted.instruction, new RegExp(REVIEW_RESPONSES_TOOL_NAME));
+  assert.match(
+    formatted.instruction,
+    /Do not answer in ordinary assistant text/,
+  );
 });
