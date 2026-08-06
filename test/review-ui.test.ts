@@ -10,9 +10,9 @@ import type {
 import {
   CURSOR_MARKER,
   type Terminal,
-  TUI,
   TUI_KEYBINDINGS,
   KeybindingsManager as TuiKeybindingsManager,
+  TuiMainScreen,
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { ReviewSnapshotDriftError } from "../src/git-diff.ts";
@@ -410,7 +410,7 @@ function createHarness(
   options: HarnessOptions = {},
 ): ComponentHarness {
   const terminal = new FakeTerminal(columns, rows);
-  const tui = new TUI(terminal, false);
+  const tui = new TuiMainScreen(terminal, false);
   const state = { review: makeReview(fixture) };
   const submittedModes: ReviewSubmissionMode[] = [];
   const completedResults: SubmittedGuidedReviewResult[] = [];
@@ -1626,7 +1626,7 @@ test("rejects carried-forward route references before opening custom UI", async 
 test("opens a full-screen overlay and submits through one domain pipeline", async () => {
   const fixture = makeUiFixture();
   const terminal = new FakeTerminal(80, 24);
-  const tui = new TUI(terminal, false);
+  const tui = new TuiMainScreen(terminal, false);
   let submittedReview: InProgressReview | undefined;
   let submittedSignal: AbortSignal | undefined;
   let customOptions: Parameters<ExtensionContext["ui"]["custom"]>[1];
@@ -1696,7 +1696,7 @@ async function openWithSubmissionFailure(error: Error): Promise<{
 }> {
   const fixture = makeUiFixture();
   const terminal = new FakeTerminal(100, 30);
-  const tui = new TUI(terminal, false);
+  const tui = new TuiMainScreen(terminal, false);
   let settled = false;
   let output = "";
   let outputAfterModeChange = "";
