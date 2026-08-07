@@ -127,7 +127,7 @@ BEGIN_DIFFWALK_INVENTORY_JSON
 }
 END_DIFFWALK_INVENTORY_JSON
 
-=== kickoff prompt: incremental review with project rules and without moves ===
+=== kickoff prompt: incremental review with global and project rules without moves ===
 Prepare a semantic route for a human-guided DiffWalk review.
 
 Route preparation is read-only:
@@ -155,15 +155,23 @@ Construct the route according to these rules:
 - Each `reviewFocus` question must name a specific way the change could be wrong. A mechanical unit needs one question; do not pad with restatements of `changeSummary`.
 - Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.
 
-Apply the `instructions` string in this project-defined JSON when constructing the route:
-BEGIN_DIFFWALK_PROJECT_RULES_JSON
+Apply the ordered `rules` entries in this JSON when constructing the route. Later entries take precedence when preferences conflict:
+BEGIN_DIFFWALK_REVIEW_RULES_JSON
 {
   "formatVersion": 1,
-  "source": ".pi/diffwalk/rules.md",
-  "instructions": "- Review compatibility before internal implementation.\n- Keep behavioral tests with the code they prove."
+  "rules": [
+    {
+      "scope": "global",
+      "instructions": "- Review compatibility before internal implementation."
+    },
+    {
+      "scope": "project",
+      "instructions": "- Keep behavioral tests with the code they prove."
+    }
+  ]
 }
-END_DIFFWALK_PROJECT_RULES_JSON
-Project rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.
+END_DIFFWALK_REVIEW_RULES_JSON
+Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.
 
 When ready, call guided_review with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.
 

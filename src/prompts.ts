@@ -9,10 +9,7 @@ import {
   type LineRange,
   listFileChangedLines,
 } from "./review-span.ts";
-import {
-  DIFFWALK_RULES_SOURCE,
-  type LoadedDiffWalkRules,
-} from "./route-rules.ts";
+import type { LoadedDiffWalkRules } from "./route-rules.ts";
 import type {
   ChangedLineRequirement,
   FileChangeId,
@@ -212,7 +209,7 @@ function formatMoveLines(range: MoveSideRange): string {
 export function buildReviewKickoffPrompt(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
-  rules?: LoadedDiffWalkRules,
+  rules: readonly LoadedDiffWalkRules[] = [],
 ): string {
   const inventory = buildReviewPromptInventory(snapshot, delta);
   const comparison = snapshot.comparison;
@@ -249,23 +246,25 @@ export function buildReviewKickoffPrompt(
     "- Keep titles, context, summaries, and questions explanatory. Do not paste patch text into the tool arguments.",
     "- Each `reviewFocus` question must name a specific way the change could be wrong. A mechanical unit needs one question; do not pad with restatements of `changeSummary`.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
-    ...(rules === undefined
+    ...(rules.length === 0
       ? []
       : [
           "",
-          "Apply the `instructions` string in this project-defined JSON when constructing the route:",
-          "BEGIN_DIFFWALK_PROJECT_RULES_JSON",
+          "Apply the ordered `rules` entries in this JSON when constructing the route. Later entries take precedence when preferences conflict:",
+          "BEGIN_DIFFWALK_REVIEW_RULES_JSON",
           JSON.stringify(
             {
               formatVersion: 1,
-              source: DIFFWALK_RULES_SOURCE,
-              instructions: rules.content,
+              rules: rules.map((rule) => ({
+                scope: rule.scope,
+                instructions: rule.content,
+              })),
             },
             null,
             2,
           ),
-          "END_DIFFWALK_PROJECT_RULES_JSON",
-          "Project rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.",
+          "END_DIFFWALK_REVIEW_RULES_JSON",
+          "Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.",
         ]),
     "",
     `When ready, call ${GUIDED_REVIEW_TOOL_NAME} with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.`,
