@@ -1050,6 +1050,65 @@ function makeSplitSameFileFixture(contextLines: number): UiFixture {
   return { snapshot, delta, routeCandidate, route };
 }
 
+function makeMixedSideOverlapFixture(): UiFixture {
+  const path = "src/mixed-overlap.ts";
+  const snapshot = makeSnapshot("snapshot-mixed-overlap", [
+    {
+      path,
+      lines: [
+        " before",
+        "+early target",
+        "+carried one",
+        "+carried two",
+        "+later target",
+        " replacement context",
+        "-carried removed",
+        "-old target",
+        "+final target",
+        " after",
+      ],
+    },
+  ]);
+  const baseDelta = computeReviewDelta(snapshot);
+  const changeId = fileChangeId("modified", path);
+  const delta: ReviewDelta = {
+    ...baseDelta,
+    lines: baseDelta.lines.map((line) =>
+      line.fileChangeId === changeId &&
+      ((line.side === "new" && (line.line === 3 || line.line === 4)) ||
+        (line.side === "old" && line.line === 3))
+        ? {
+            type: "carried-forward",
+            fileChangeId: line.fileChangeId,
+            side: line.side,
+            line: line.line,
+            reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
+          }
+        : line,
+    ),
+  };
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Mixed-side overlap",
+        whyHere: "The replacement must be reviewed in frozen diff order.",
+        context: "early -> replacement -> final",
+        changeSummary: "Updates both sides of one replacement block.",
+        reviewFocus: ["Can the replacement retain the removed behavior?"],
+        spans: [
+          span(path, { old: [4, 4] }),
+          span(path, { new: [2, 2] }),
+          span(path, { new: [5, 7] }),
+        ],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
 test("groups nearby spans from one file under one header without duplicate context", () => {
   const harness = createHarness(80, 30, makeSplitSameFileFixture(3));
   const output = renderText(harness);
@@ -1058,6 +1117,24 @@ test("groups nearby spans from one file under one header without duplicate conte
   assert.equal(output.match(/filler \d/g)?.length, 3);
   assert.doesNotMatch(output, /frozen diff lines not shown/);
   assert.match(output, /\+first edit[\s\S]*\+second edit/);
+});
+
+test("deduplicates overlapping mixed-side spans and hides carried-forward gaps", () => {
+  const harness = createHarness(80, 30, makeMixedSideOverlapFixture());
+  let output = renderText(harness);
+
+  assert.match(output, />\s+2\s+\+early target/);
+  assert.equal(output.match(/-old target/g)?.length, 1);
+  assert.match(output, /2 frozen diff lines not shown/);
+  assert.doesNotMatch(output, /carried one|carried two|carried removed/);
+
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+5\s+\+later target/);
+
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.equal(output.match(/>\s+4\s+-old target/g)?.length, 1);
 });
 
 test("separates distant spans with one omission marker and keeps the file title pinned", () => {

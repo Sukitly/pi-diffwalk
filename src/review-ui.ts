@@ -1746,18 +1746,21 @@ function buildReviewViewModel(
     targetsByUnit.set(target.reviewUnitId, unitTargets);
   }
 
-  const units = route.units.map((unit) => ({
-    unit,
-    spans: unit.spans.map((span) => {
+  const units = route.units.map((unit) => {
+    const spans = unit.spans.map((span) => {
       const change = changesById.get(span.fileChangeId);
       assert.ok(
         change,
         `Validated route references missing file change ${span.fileChangeId}.`,
       );
       return { change, span, lines: sliceSpan(change, span) };
-    }),
-    targets: targetsByUnit.get(unit.id) ?? [],
-  }));
+    });
+    return {
+      unit,
+      spans,
+      targets: orderTargetsForDisplay(spans, targetsByUnit.get(unit.id) ?? []),
+    };
+  });
 
   const requirements = new Map(
     delta.lines.map((requirement) => [
@@ -1843,6 +1846,54 @@ function buildReviewViewModel(
   }
 
   return { units, inventory, unsupportedCount };
+}
+
+function orderTargetsForDisplay(
+  spans: readonly SpanView[],
+  targets: readonly ReviewCommentTarget[],
+): readonly ReviewCommentTarget[] {
+  const orderByLine = new Map<string, number>();
+  let order = 0;
+  for (const block of groupSpanViewsByFile(spans)) {
+    const content = textContent(block.change);
+    if (content === undefined) continue;
+    for (const line of content.lines) {
+      const side: ChangeSide | undefined =
+        line.type === "added"
+          ? "new"
+          : line.type === "removed"
+            ? "old"
+            : undefined;
+      const number = side === "new" ? line.newLine : line.oldLine;
+      if (side !== undefined && number !== undefined) {
+        orderByLine.set(fileLineKey(block.change.id, side, number), order);
+      }
+      order += 1;
+    }
+  }
+
+  return targets
+    .map((target, originalIndex) => ({ target, originalIndex }))
+    .sort((left, right) => {
+      const leftOrder =
+        orderByLine.get(
+          fileLineKey(
+            left.target.fileChangeId,
+            left.target.side,
+            left.target.line,
+          ),
+        ) ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder =
+        orderByLine.get(
+          fileLineKey(
+            right.target.fileChangeId,
+            right.target.side,
+            right.target.line,
+          ),
+        ) ?? Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder || left.originalIndex - right.originalIndex;
+    })
+    .map(({ target }) => target);
 }
 
 function renderWalkthroughSummary(
@@ -2029,6 +2080,22 @@ function addLabeledText(
 
 const INLINE_SPAN_MERGE_GAP = 6;
 
+interface IndexedSpanView {
+  readonly spanIndex: number;
+  readonly spanView: SpanView;
+}
+
+interface FileSpanBlock {
+  readonly change: FileChange;
+  readonly spans: IndexedSpanView[];
+}
+
+interface FileDisplayRegion {
+  start: number;
+  end: number;
+  readonly gapBefore?: number;
+}
+
 function renderUnitDiff(
   unit: UnitView,
   selectedTarget: ReviewCommentTarget | undefined,
@@ -2046,46 +2113,45 @@ function renderUnitDiff(
   const commentsByTarget = new Map(
     comments.map((comment) => [targetKey(comment), comment]),
   );
-  let previousChangeId: FileChange["id"] | undefined;
-  let previousStart = -1;
-  let previousEnd = -1;
 
-  for (const [spanIndex, spanView] of unit.spans.entries()) {
-    const content = textContent(spanView.change);
+  for (const block of groupSpanViewsByFile(unit.spans)) {
+    const content = textContent(block.change);
     if (content === undefined) {
       throw new GuidedReviewUiInvariantError(
-        `Review span references non-text file change ${spanView.change.id}.`,
+        `Review span references non-text file change ${block.change.id}.`,
       );
     }
-    const firstLine = spanView.lines[0];
-    const lastLine = spanView.lines.at(-1);
-    if (firstLine === undefined || lastLine === undefined) continue;
-    const start = content.lines.indexOf(firstLine);
-    const end = content.lines.indexOf(lastLine);
-    if (start < 0 || end < start) {
-      throw new GuidedReviewUiInvariantError(
-        `Review span lines are not part of frozen file change ${spanView.change.id}.`,
-      );
-    }
+    const regions = buildFileDisplayRegions(block, content.lines);
+    const firstSpan = block.spans[0];
+    if (regions.length === 0 || firstSpan === undefined) continue;
 
-    const startsFile = previousChangeId !== spanView.change.id;
-    if (startsFile) {
-      if (rows.length > 0) rows.push({ text: "" });
-      rows.push(
-        ...wrapStyled(renderSpanHeader(spanView, theme), width).map((text) => ({
+    if (rows.length > 0) rows.push({ text: "" });
+    rows.push(
+      ...wrapStyled(renderSpanHeader(firstSpan.spanView, theme), width).map(
+        (text) => ({
           text,
-          spanIndex,
+          spanIndex: firstSpan.spanIndex,
           isSpanHeader: true,
-        })),
-      );
-      previousChangeId = spanView.change.id;
-      previousStart = start;
-      previousEnd = end;
+        }),
+      ),
+    );
+
+    for (const region of regions) {
+      if (region.gapBefore !== undefined) {
+        rows.push(
+          renderOmittedDiffLines(
+            region.gapBefore,
+            firstSpan.spanIndex,
+            theme,
+            width,
+          ),
+        );
+      }
       rows.push(
-        ...renderUnitDiffLines(
-          spanView.lines,
-          spanIndex,
-          spanView.change.id,
+        ...renderUnitDiffRegion(
+          content.lines.slice(region.start, region.end + 1),
+          firstSpan.spanIndex,
+          block.change.id,
           targetsByLine,
           commentsByTarget,
           selectedTarget,
@@ -2093,33 +2159,92 @@ function renderUnitDiff(
           width,
         ),
       );
+    }
+  }
+  return rows;
+}
+
+function groupSpanViewsByFile(
+  spans: readonly SpanView[],
+): readonly FileSpanBlock[] {
+  const blocks: FileSpanBlock[] = [];
+  const blocksByChangeId = new Map<FileChange["id"], FileSpanBlock>();
+  for (const [spanIndex, spanView] of spans.entries()) {
+    let block = blocksByChangeId.get(spanView.change.id);
+    if (block === undefined) {
+      block = { change: spanView.change, spans: [] };
+      blocksByChangeId.set(spanView.change.id, block);
+      blocks.push(block);
+    }
+    block.spans.push({ spanIndex, spanView });
+  }
+  return blocks;
+}
+
+function buildFileDisplayRegions(
+  block: FileSpanBlock,
+  fileLines: readonly DiffLine[],
+): readonly FileDisplayRegion[] {
+  const intervals = block.spans
+    .map(({ spanView }) => {
+      const firstLine = spanView.lines[0];
+      const lastLine = spanView.lines.at(-1);
+      if (firstLine === undefined || lastLine === undefined) return undefined;
+      const start = fileLines.indexOf(firstLine);
+      const end = fileLines.indexOf(lastLine);
+      if (start < 0 || end < start) {
+        throw new GuidedReviewUiInvariantError(
+          `Review span lines are not part of frozen file change ${spanView.change.id}.`,
+        );
+      }
+      return { start, end };
+    })
+    .filter((interval) => interval !== undefined)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const first = intervals[0];
+  if (first === undefined) return [];
+
+  const regions: FileDisplayRegion[] = [];
+  let current: FileDisplayRegion = { ...first };
+  for (const interval of intervals.slice(1)) {
+    const gap = interval.start - current.end - 1;
+    const contextOnlyGap =
+      gap <= INLINE_SPAN_MERGE_GAP &&
+      fileLines
+        .slice(current.end + 1, interval.start)
+        .every((line) => line.type === "context");
+    if (gap <= 0 || contextOnlyGap) {
+      current.end = Math.max(current.end, interval.end);
       continue;
     }
+    regions.push(current);
+    current = { ...interval, gapBefore: gap };
+  }
+  regions.push(current);
+  return regions;
+}
 
-    let lines: readonly DiffLine[];
-    if (start < previousStart) {
-      rows.push(renderOmittedDiffLines(undefined, spanIndex, theme, width));
-      lines = spanView.lines;
-      previousStart = start;
-      previousEnd = end;
-    } else if (end <= previousEnd) {
-      lines = [];
-    } else {
-      const gap = start - previousEnd - 1;
-      if (gap > INLINE_SPAN_MERGE_GAP) {
-        rows.push(renderOmittedDiffLines(gap, spanIndex, theme, width));
-        lines = spanView.lines;
-        previousStart = start;
-      } else {
-        lines = content.lines.slice(previousEnd + 1, end + 1);
-      }
-      previousEnd = end;
-    }
+function renderUnitDiffRegion(
+  lines: readonly DiffLine[],
+  spanIndex: number,
+  fileChangeId: FileChange["id"],
+  targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
+  commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  selectedTarget: ReviewCommentTarget | undefined,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly RenderedRow[] {
+  const rows: RenderedRow[] = [];
+  let visible: DiffLine[] = [];
+  let omitted = 0;
+
+  const flushVisible = (): void => {
+    if (visible.length === 0) return;
     rows.push(
       ...renderUnitDiffLines(
-        lines,
+        visible,
         spanIndex,
-        spanView.change.id,
+        fileChangeId,
         targetsByLine,
         commentsByTarget,
         selectedTarget,
@@ -2127,7 +2252,28 @@ function renderUnitDiff(
         width,
       ),
     );
+    visible = [];
+  };
+  const flushOmitted = (): void => {
+    if (omitted === 0) return;
+    rows.push(renderOmittedDiffLines(omitted, spanIndex, theme, width));
+    omitted = 0;
+  };
+
+  for (const line of lines) {
+    const belongsToUnit =
+      line.type === "context" ||
+      lineTarget(targetsByLine, fileChangeId, line) !== undefined;
+    if (!belongsToUnit) {
+      flushVisible();
+      omitted += 1;
+      continue;
+    }
+    flushOmitted();
+    visible.push(line);
   }
+  flushVisible();
+  flushOmitted();
   return rows;
 }
 
