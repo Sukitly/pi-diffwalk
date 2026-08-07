@@ -5,66 +5,96 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import {
-  loadDiffWalkRules,
+  loadGlobalDiffWalkRules,
+  loadProjectDiffWalkRules,
   MAX_DIFFWALK_RULES_BYTES,
 } from "../src/route-rules.ts";
 
-async function createProject(t: TestContext): Promise<string> {
-  const project = await mkdtemp(join(tmpdir(), "pi-diffwalk-rules-test-"));
-  t.after(() => rm(project, { recursive: true, force: true }));
-  return project;
+async function createRoot(t: TestContext): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "pi-diffwalk-rules-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return root;
 }
 
-function rulesPath(project: string): string {
-  return join(project, CONFIG_DIR_NAME, "diffwalk", "rules.md");
+function globalRulesPath(agentDir: string): string {
+  return join(agentDir, "diffwalk", "rules.md");
+}
+
+function projectRulesPath(repositoryRoot: string): string {
+  return join(repositoryRoot, CONFIG_DIR_NAME, "diffwalk", "rules.md");
 }
 
 async function writeRules(
-  project: string,
+  path: string,
   content: string | Buffer,
 ): Promise<void> {
-  const path = rulesPath(project);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, content);
 }
 
-test("loads and trims trusted project review rules", async (t) => {
-  const project = await createProject(t);
-  await writeRules(project, "\n- Review public contracts first.\n\n");
+test("loads global review rules from the agent directory", async (t) => {
+  const agentDir = await createRoot(t);
+  await writeRules(
+    globalRulesPath(agentDir),
+    "\n- Review public contracts first.\n\n",
+  );
 
-  assert.deepEqual(await loadDiffWalkRules(project, true), {
+  assert.deepEqual(await loadGlobalDiffWalkRules(agentDir), {
     status: "loaded",
-    rules: { content: "- Review public contracts first." },
+    rules: {
+      scope: "global",
+      content: "- Review public contracts first.",
+    },
   });
 });
 
-test("distinguishes absent rules from existing rules ignored by trust", async (t) => {
-  const project = await createProject(t);
+test("loads trusted project review rules from the repository root", async (t) => {
+  const repositoryRoot = await createRoot(t);
+  await writeRules(
+    projectRulesPath(repositoryRoot),
+    "- Keep tests with their implementation.",
+  );
 
-  assert.deepEqual(await loadDiffWalkRules(project, false), {
+  assert.deepEqual(await loadProjectDiffWalkRules(repositoryRoot, true), {
+    status: "loaded",
+    rules: {
+      scope: "project",
+      content: "- Keep tests with their implementation.",
+    },
+  });
+});
+
+test("distinguishes absent project rules from rules ignored by trust", async (t) => {
+  const repositoryRoot = await createRoot(t);
+
+  assert.deepEqual(await loadProjectDiffWalkRules(repositoryRoot, false), {
     status: "absent",
   });
 
-  await writeRules(project, "- Review public contracts first.");
-  assert.deepEqual(await loadDiffWalkRules(project, false), {
+  await writeRules(
+    projectRulesPath(repositoryRoot),
+    "- Review public contracts first.",
+  );
+  assert.deepEqual(await loadProjectDiffWalkRules(repositoryRoot, false), {
     status: "ignored-untrusted",
   });
 });
 
-test("treats blank project rules as absent", async (t) => {
-  const project = await createProject(t);
-  await writeRules(project, " \n\t\n");
+test("treats blank review rules as absent", async (t) => {
+  const agentDir = await createRoot(t);
+  await writeRules(globalRulesPath(agentDir), " \n\t\n");
 
-  assert.deepEqual(await loadDiffWalkRules(project, true), {
+  assert.deepEqual(await loadGlobalDiffWalkRules(agentDir), {
     status: "absent",
   });
 });
 
 test("reports oversized and invalid UTF-8 rules as unavailable", async (t) => {
-  const project = await createProject(t);
-  await writeRules(project, Buffer.alloc(MAX_DIFFWALK_RULES_BYTES + 1, "x"));
+  const agentDir = await createRoot(t);
+  const path = globalRulesPath(agentDir);
+  await writeRules(path, Buffer.alloc(MAX_DIFFWALK_RULES_BYTES + 1, "x"));
 
-  const oversized = await loadDiffWalkRules(project, true);
+  const oversized = await loadGlobalDiffWalkRules(agentDir);
   assert.equal(oversized.status, "unavailable");
   if (oversized.status === "unavailable") {
     assert.match(
@@ -73,8 +103,8 @@ test("reports oversized and invalid UTF-8 rules as unavailable", async (t) => {
     );
   }
 
-  await writeRules(project, Buffer.from([0xc3, 0x28]));
-  const invalid = await loadDiffWalkRules(project, true);
+  await writeRules(path, Buffer.from([0xc3, 0x28]));
+  const invalid = await loadGlobalDiffWalkRules(agentDir);
   assert.equal(invalid.status, "unavailable");
   if (invalid.status === "unavailable") {
     assert.match(invalid.reason, /not valid UTF-8/);
@@ -82,10 +112,10 @@ test("reports oversized and invalid UTF-8 rules as unavailable", async (t) => {
 });
 
 test("reports a non-file rules path as unavailable", async (t) => {
-  const project = await createProject(t);
-  await mkdir(rulesPath(project), { recursive: true });
+  const agentDir = await createRoot(t);
+  await mkdir(globalRulesPath(agentDir), { recursive: true });
 
-  const result = await loadDiffWalkRules(project, true);
+  const result = await loadGlobalDiffWalkRules(agentDir);
   assert.equal(result.status, "unavailable");
   if (result.status === "unavailable") {
     assert.match(result.reason, /must be a regular file/);

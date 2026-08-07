@@ -64,8 +64,10 @@ import {
 import {
   DIFFWALK_RULES_SOURCE,
   type DiffWalkRulesLoadResult,
+  type DiffWalkRulesScope,
   type LoadedDiffWalkRules,
-  loadDiffWalkRules,
+  loadGlobalDiffWalkRules,
+  loadProjectDiffWalkRules,
 } from "./route-rules.ts";
 import { validateReviewRoute } from "./route-validation.ts";
 import {
@@ -130,7 +132,7 @@ interface PendingReview {
   review: InProgressReview;
   series: ReviewSeries;
   inProgress: boolean;
-  /** Rules are captured once so repeated route kickoffs stay deterministic. */
+  /** The selected rules file is captured once so repeated kickoffs stay deterministic. */
   routeRules?: LoadedDiffWalkRules;
   /** Advisory route-quality signals are returned at most once per review. */
   advisoryNudged: boolean;
@@ -184,7 +186,8 @@ export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
   readonly captureRepositoryState: typeof captureRepositoryState;
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
-  readonly loadDiffWalkRules: typeof loadDiffWalkRules;
+  readonly loadGlobalDiffWalkRules: typeof loadGlobalDiffWalkRules;
+  readonly loadProjectDiffWalkRules: typeof loadProjectDiffWalkRules;
   readonly openGuidedReview: typeof openGuidedReview;
   readonly openReviewThreads: typeof openReviewThreads;
 }
@@ -193,7 +196,8 @@ const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   captureReviewSnapshot,
   captureRepositoryState,
   assertReviewSnapshotUnchanged,
-  loadDiffWalkRules,
+  loadGlobalDiffWalkRules,
+  loadProjectDiffWalkRules,
   openGuidedReview,
   openReviewThreads,
 };
@@ -316,33 +320,17 @@ export function registerDiffWalk(
     );
   }
 
-  async function captureRouteRules(
+  async function captureRulesSource(
     ctx: CommandContext,
-    snapshot: ReviewSnapshot,
+    scope: DiffWalkRulesScope,
+    load: () => Promise<DiffWalkRulesLoadResult>,
   ): Promise<LoadedDiffWalkRules | undefined> {
-    if (
-      snapshot.changes.some(
-        (change) =>
-          change.oldPath === DIFFWALK_RULES_SOURCE ||
-          change.newPath === DIFFWALK_RULES_SOURCE,
-      )
-    ) {
-      ctx.ui.notify(
-        `Ignored ${DIFFWALK_RULES_SOURCE} because it is part of snapshot ${snapshot.id}. Project rules cannot shape the review of their own changes.`,
-        "warning",
-      );
-      return undefined;
-    }
-
     let result: DiffWalkRulesLoadResult;
     try {
-      result = await dependencies.loadDiffWalkRules(
-        snapshot.repositoryRoot,
-        ctx.isProjectTrusted(),
-      );
+      result = await load();
     } catch (error: unknown) {
       ctx.ui.notify(
-        `Cannot load DiffWalk rules: ${errorMessage(error)} Continuing with the default route instructions.`,
+        `Cannot load ${scope} DiffWalk rules: ${errorMessage(error)} Continuing without them.`,
         "warning",
       );
       return undefined;
@@ -358,19 +346,49 @@ export function registerDiffWalk(
     }
     if (result.status === "unavailable") {
       ctx.ui.notify(
-        `${result.reason} Continuing with the default route instructions.`,
+        `${result.reason} Continuing without those rules.`,
         "warning",
       );
       return undefined;
     }
-
-    await verifySnapshot(
-      pi,
-      dependencies.assertReviewSnapshotUnchanged,
-      snapshot,
-      new AbortController().signal,
-    );
     return result.rules;
+  }
+
+  async function captureRouteRules(
+    ctx: CommandContext,
+    snapshot: ReviewSnapshot,
+  ): Promise<LoadedDiffWalkRules | undefined> {
+    const projectRulesChanged = snapshot.changes.some(
+      (change) =>
+        change.oldPath === DIFFWALK_RULES_SOURCE ||
+        change.newPath === DIFFWALK_RULES_SOURCE,
+    );
+    if (projectRulesChanged) {
+      ctx.ui.notify(
+        `Ignored ${DIFFWALK_RULES_SOURCE} because it is part of snapshot ${snapshot.id}. Project rules cannot shape the review of their own changes.`,
+        "warning",
+      );
+    } else {
+      const projectRules = await captureRulesSource(ctx, "project", () =>
+        dependencies.loadProjectDiffWalkRules(
+          snapshot.repositoryRoot,
+          ctx.isProjectTrusted(),
+        ),
+      );
+      if (projectRules !== undefined) {
+        await verifySnapshot(
+          pi,
+          dependencies.assertReviewSnapshotUnchanged,
+          snapshot,
+          new AbortController().signal,
+        );
+        return projectRules;
+      }
+    }
+
+    return captureRulesSource(ctx, "global", () =>
+      dependencies.loadGlobalDiffWalkRules(),
+    );
   }
 
   async function startNewReview(

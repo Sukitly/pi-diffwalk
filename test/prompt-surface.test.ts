@@ -134,8 +134,8 @@ function kickoffWithoutMoves(): string {
     snapshot,
     computeReviewDelta(snapshot, baseline),
     {
-      content:
-        "- Review compatibility before internal implementation.\n- Keep behavioral tests with the code they prove.",
+      scope: "project",
+      content: "- Keep behavioral tests with the code they prove.",
     },
   );
 }
@@ -282,7 +282,7 @@ function renderSurface(): string {
   const sections: readonly [string, string][] = [
     ["kickoff prompt: fresh review with moves", kickoffWithMoves()],
     [
-      "kickoff prompt: incremental review with project rules and without moves",
+      "kickoff prompt: incremental review with selected project rules without moves",
       kickoffWithoutMoves(),
     ],
     ["guided_review tool", toolSurface()],

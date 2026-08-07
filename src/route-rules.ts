@@ -1,12 +1,15 @@
 import type { Stats } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const DIFFWALK_RULES_SOURCE = `${CONFIG_DIR_NAME}/diffwalk/rules.md`;
 export const MAX_DIFFWALK_RULES_BYTES = 16 * 1024;
 
+export type DiffWalkRulesScope = "global" | "project";
+
 export interface LoadedDiffWalkRules {
+  readonly scope: DiffWalkRulesScope;
   readonly content: string;
 }
 
@@ -16,18 +19,33 @@ export type DiffWalkRulesLoadResult =
   | { readonly status: "ignored-untrusted" }
   | { readonly status: "unavailable"; readonly reason: string };
 
-/** Inspect or load project-owned review preferences without throwing. */
-export async function loadDiffWalkRules(
+export async function loadGlobalDiffWalkRules(
+  agentDir = getAgentDir(),
+): Promise<DiffWalkRulesLoadResult> {
+  return loadDiffWalkRulesFile(
+    join(agentDir, "diffwalk", "rules.md"),
+    "global",
+    true,
+  );
+}
+
+export async function loadProjectDiffWalkRules(
   repositoryRoot: string,
   projectTrusted: boolean,
 ): Promise<DiffWalkRulesLoadResult> {
-  const rulesPath = join(
-    repositoryRoot,
-    CONFIG_DIR_NAME,
-    "diffwalk",
-    "rules.md",
+  return loadDiffWalkRulesFile(
+    join(repositoryRoot, CONFIG_DIR_NAME, "diffwalk", "rules.md"),
+    "project",
+    projectTrusted,
   );
+}
 
+/** Inspect or load one review-rules file without throwing. */
+async function loadDiffWalkRulesFile(
+  rulesPath: string,
+  scope: DiffWalkRulesScope,
+  allowed: boolean,
+): Promise<DiffWalkRulesLoadResult> {
   let fileInfo: Stats;
   try {
     fileInfo = await lstat(rulesPath);
@@ -40,7 +58,7 @@ export async function loadDiffWalkRules(
         };
   }
 
-  if (!projectTrusted) return { status: "ignored-untrusted" };
+  if (!allowed) return { status: "ignored-untrusted" };
   if (!fileInfo.isFile()) {
     return {
       status: "unavailable",
@@ -77,7 +95,7 @@ export async function loadDiffWalkRules(
 
   return content.length === 0
     ? { status: "absent" }
-    : { status: "loaded", rules: { content } };
+    : { status: "loaded", rules: { scope, content } };
 }
 
 function isMissingFile(error: unknown): boolean {
