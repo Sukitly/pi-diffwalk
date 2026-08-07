@@ -1050,6 +1050,179 @@ function makeSplitSameFileFixture(contextLines: number): UiFixture {
   return { snapshot, delta, routeCandidate, route };
 }
 
+function makeMixedSideOverlapFixture(): UiFixture {
+  const path = "src/mixed-overlap.ts";
+  const snapshot = makeSnapshot("snapshot-mixed-overlap", [
+    {
+      path,
+      lines: [
+        " before",
+        "+early target",
+        "+carried one",
+        "+carried two",
+        "+later target",
+        " replacement context",
+        "-carried removed",
+        "-old target",
+        "+final target",
+        " after",
+      ],
+    },
+  ]);
+  const baseDelta = computeReviewDelta(snapshot);
+  const changeId = fileChangeId("modified", path);
+  const delta: ReviewDelta = {
+    ...baseDelta,
+    lines: baseDelta.lines.map((line) =>
+      line.fileChangeId === changeId &&
+      ((line.side === "new" && (line.line === 3 || line.line === 4)) ||
+        (line.side === "old" && line.line === 3))
+        ? {
+            type: "carried-forward",
+            fileChangeId: line.fileChangeId,
+            side: line.side,
+            line: line.line,
+            reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
+          }
+        : line,
+    ),
+  };
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Mixed-side overlap",
+        whyHere: "The replacement must be reviewed in frozen diff order.",
+        context: "early -> replacement -> final",
+        changeSummary: "Updates both sides of one replacement block.",
+        reviewFocus: ["Can the replacement retain the removed behavior?"],
+        spans: [
+          span(path, { old: [4, 4] }),
+          span(path, { new: [2, 2] }),
+          span(path, { new: [5, 7] }),
+        ],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+function makeSkippedInsideSpanFixture(): UiFixture {
+  const path = "src/skipped-inside.ts";
+  const snapshot = makeSnapshot("snapshot-skipped-inside", [
+    {
+      path,
+      lines: [
+        " before",
+        "+target start",
+        " replacement context",
+        "-generated removed",
+        "+target end",
+        " after",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Visible replacement",
+        whyHere: "The replacement is reviewed before its generated input.",
+        context: "start -> generated input -> end",
+        changeSummary: "Updates both selectable sides of the replacement.",
+        reviewFocus: ["Can the generated removal alter the replacement?"],
+        spans: [span(path, { new: [2, 4] })],
+      },
+    ],
+    skippedSpans: [
+      {
+        span: span(path, { old: [3, 3] }),
+        reason: "Generated output is reviewed at its source.",
+      },
+    ],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+function makeOtherUnitInsideSpanFixture(): UiFixture {
+  const path = "src/other-unit-inside.ts";
+  const snapshot = makeSnapshot("snapshot-other-unit-inside", [
+    {
+      path,
+      lines: [
+        " before",
+        "+outer start",
+        " replacement context",
+        "-inner removal",
+        "+outer end",
+        " after",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Outer behavior",
+        whyHere: "Review the added behavior before the removed fallback.",
+        context: "outer start -> fallback -> outer end",
+        changeSummary: "Adds the replacement behavior.",
+        reviewFocus: ["Can the added behavior bypass the fallback contract?"],
+        spans: [span(path, { new: [2, 4] })],
+      },
+      {
+        title: "Fallback removal",
+        whyHere: "Review the removed fallback after its replacement.",
+        context: "outer behavior -> removed fallback",
+        changeSummary: "Removes the old fallback.",
+        reviewFocus: ["Can callers still depend on the removed fallback?"],
+        spans: [span(path, { old: [3, 3] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+function makeInterleavedFileRouteFixture(): UiFixture {
+  const snapshot = makeSnapshot("snapshot-interleaved-files", [
+    {
+      path: "src/b.ts",
+      lines: [" head", "+caller", " middle", "+return"],
+    },
+    { path: "src/a.ts", lines: [" head", "+callee"] },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Caller, callee, and return",
+        whyHere: "Follow the call path in execution order.",
+        context: "caller -> callee -> return",
+        changeSummary: "Updates all three stages of the call path.",
+        reviewFocus: [
+          "Can the callee return a value the caller cannot handle?",
+        ],
+        spans: [
+          span("src/b.ts", { new: [2, 2] }),
+          span("src/a.ts", { new: [2, 2] }),
+          span("src/b.ts", { new: [4, 4] }),
+        ],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
 test("groups nearby spans from one file under one header without duplicate context", () => {
   const harness = createHarness(80, 30, makeSplitSameFileFixture(3));
   const output = renderText(harness);
@@ -1058,6 +1231,94 @@ test("groups nearby spans from one file under one header without duplicate conte
   assert.equal(output.match(/filler \d/g)?.length, 3);
   assert.doesNotMatch(output, /frozen diff lines not shown/);
   assert.match(output, /\+first edit[\s\S]*\+second edit/);
+});
+
+test("preserves route target order while deduplicating mixed-side overlap", () => {
+  const harness = createHarness(100, 30, makeMixedSideOverlapFixture());
+  let output = renderText(harness);
+
+  assert.equal(output.match(/-old target/g)?.length, 1);
+  assert.match(
+    output,
+    />\s+4\s+-old target[\s\S]*routed region continues elsewhere[\s\S]*\+early target[\s\S]*\+later target[\s\S]*already shown earlier[\s\S]*\+final target/,
+  );
+
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+2\s+\+early target/);
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+5\s+\+later target/);
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+7\s+\+final target/);
+});
+
+test("classifies carried-forward gaps and keeps in-span carried lines visible", () => {
+  const harness = createHarness(100, 30, makeMixedSideOverlapFixture());
+  const output = renderText(harness);
+
+  assert.match(
+    output,
+    /\+early target[\s\S]*2 frozen diff lines not shown; reviewed in an earlier round[\s\S]*\+later target/,
+  );
+  assert.doesNotMatch(output, /carried one|carried two/);
+  assert.match(
+    output,
+    /Reviewed in an earlier round; these changed lines are not selectable here\.[\s\S]*·\s+3\s+-carried removed/,
+  );
+  assert.match(output, /1 frozen diff line already shown earlier in this unit/);
+});
+
+test("keeps explicitly skipped in-span lines visible with their reason", () => {
+  const harness = createHarness(120, 30, makeSkippedInsideSpanFixture());
+  let output = renderText(harness);
+
+  assert.match(
+    output,
+    /\+target start[\s\S]*Skipped from the walkthrough: Generated output is reviewed at its source\.[\s\S]*·\s+3\s+-generated removed[\s\S]*\+target end/,
+  );
+  assert.match(output, />\s+2\s+\+target start/);
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+4\s+\+target end/);
+});
+
+test("keeps other-unit in-span lines visible but non-selectable", () => {
+  const harness = createHarness(120, 30, makeOtherUnitInsideSpanFixture());
+  let output = renderText(harness);
+
+  assert.match(
+    output,
+    /Routed to review unit "Fallback removal"; these changed lines are not selectable here\.[\s\S]*·\s+3\s+-inner removal/,
+  );
+  assert.match(output, />\s+2\s+\+outer start/);
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+4\s+\+outer end/);
+
+  press(harness.component, "l");
+  output = renderText(harness);
+  assert.match(output, /Fallback removal/);
+  assert.match(output, />\s+3\s+-inner removal/);
+});
+
+test("preserves interleaved route blocks and navigation across files", () => {
+  const harness = createHarness(120, 40, makeInterleavedFileRouteFixture());
+  let output = renderText(harness);
+
+  assert.equal(output.match(/src\/b\.ts/g)?.length, 2);
+  assert.match(
+    output,
+    /src\/b\.ts[\s\S]*\+caller[\s\S]*src\/a\.ts[\s\S]*\+callee[\s\S]*src\/b\.ts[\s\S]*\+return/,
+  );
+  assert.match(output, />\s+2\s+\+caller/);
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+2\s+\+callee/);
+  press(harness.component, "j");
+  output = renderText(harness);
+  assert.match(output, />\s+4\s+\+return/);
 });
 
 test("separates distant spans with one omission marker and keeps the file title pinned", () => {

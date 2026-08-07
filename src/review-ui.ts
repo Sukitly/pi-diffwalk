@@ -118,9 +118,53 @@ interface SpanView {
   readonly lines: readonly DiffLine[];
 }
 
+type ChangedLineDisplayOwnership =
+  | {
+      readonly type: "unit";
+      readonly reviewUnitId: ReviewUnit["id"];
+      readonly unitTitle: string;
+      readonly spanIndex: number;
+    }
+  | {
+      readonly type: "skipped";
+      readonly reason: string;
+    }
+  | {
+      readonly type: "carried-forward";
+    };
+
+type DisplayOmissionReason =
+  | { readonly type: "distant" }
+  | { readonly type: "route-jump" }
+  | { readonly type: "carried-forward" }
+  | { readonly type: "skipped"; readonly reason: string }
+  | { readonly type: "other-unit"; readonly unitTitle: string }
+  | { readonly type: "shown-earlier" }
+  | { readonly type: "shown-later" };
+
+interface PlannedDiffLine {
+  readonly type: "line";
+  readonly line: DiffLine;
+  readonly role: "owned" | "context" | "external";
+  readonly externalDetail?: string;
+}
+
+interface PlannedDiffOmission {
+  readonly type: "omission";
+  readonly count: number;
+  readonly reason: DisplayOmissionReason;
+}
+
+type PlannedDiffItem = PlannedDiffLine | PlannedDiffOmission;
+
+interface UnitDisplayBlock {
+  readonly change: FileChange;
+  readonly items: readonly PlannedDiffItem[];
+}
+
 interface UnitView {
   readonly unit: ReviewUnit;
-  readonly spans: readonly SpanView[];
+  readonly displayBlocks: readonly UnitDisplayBlock[];
   readonly targets: readonly ReviewCommentTarget[];
 }
 
@@ -142,14 +186,14 @@ interface RenderedRow {
   readonly text: string;
   readonly targetKey?: string;
   readonly inventoryIndex?: number;
-  readonly spanIndex?: number;
-  readonly isSpanHeader?: boolean;
+  readonly displayBlockIndex?: number;
+  readonly isBlockHeader?: boolean;
 }
 
 interface DiffViewport {
   readonly offset: number;
   readonly contentHeight: number;
-  readonly pinnedSpanIndex?: number;
+  readonly pinnedBlockIndex?: number;
 }
 
 interface GuidedReviewComponentOptions {
@@ -536,14 +580,14 @@ export class GuidedReviewComponent implements Component, Focusable {
       !this.diffFreeScroll,
     );
     this.diffOffset = viewport.offset;
-    const pinnedSpan =
-      viewport.pinnedSpanIndex === undefined
+    const pinnedBlock =
+      viewport.pinnedBlockIndex === undefined
         ? undefined
-        : unitView.spans[viewport.pinnedSpanIndex];
+        : unitView.displayBlocks[viewport.pinnedBlockIndex];
     const pinnedHeader =
-      pinnedSpan === undefined
+      pinnedBlock === undefined
         ? []
-        : [fitLine(renderSpanHeader(pinnedSpan, this.theme), width)];
+        : [fitLine(renderChangeHeader(pinnedBlock.change, this.theme), width)];
     const diffRows = sliceViewport(
       renderedDiff,
       this.diffOffset,
@@ -1746,18 +1790,31 @@ function buildReviewViewModel(
     targetsByUnit.set(target.reviewUnitId, unitTargets);
   }
 
-  const units = route.units.map((unit) => ({
-    unit,
-    spans: unit.spans.map((span) => {
+  const displayOwnership = buildChangedLineDisplayOwnership(
+    snapshot,
+    delta,
+    route,
+  );
+  const units = route.units.map((unit) => {
+    const spans = unit.spans.map((span) => {
       const change = changesById.get(span.fileChangeId);
       assert.ok(
         change,
         `Validated route references missing file change ${span.fileChangeId}.`,
       );
       return { change, span, lines: sliceSpan(change, span) };
-    }),
-    targets: targetsByUnit.get(unit.id) ?? [],
-  }));
+    });
+    const displayBlocks = buildUnitDisplayBlocks(unit, spans, displayOwnership);
+    return {
+      unit,
+      displayBlocks,
+      targets: orderTargetsFromDisplayPlan(
+        unit,
+        displayBlocks,
+        targetsByUnit.get(unit.id) ?? [],
+      ),
+    };
+  });
 
   const requirements = new Map(
     delta.lines.map((requirement) => [
@@ -1843,6 +1900,105 @@ function buildReviewViewModel(
   }
 
   return { units, inventory, unsupportedCount };
+}
+
+function buildChangedLineDisplayOwnership(
+  snapshot: ReviewSnapshot,
+  delta: ReviewDelta,
+  route: ReviewRoute,
+): ReadonlyMap<string, ChangedLineDisplayOwnership> {
+  const ownership = new Map<string, ChangedLineDisplayOwnership>();
+  for (const unit of route.units) {
+    for (const [spanIndex, span] of unit.spans.entries()) {
+      for (const line of resolvedSpanChangedLines(snapshot, span)) {
+        const key = changedLineKey(line);
+        const existing = ownership.get(key);
+        if (existing?.type === "unit" && existing.reviewUnitId === unit.id) {
+          continue;
+        }
+        if (existing !== undefined) {
+          throw new GuidedReviewUiInvariantError(
+            `Changed line ${key} has conflicting walkthrough display ownership.`,
+          );
+        }
+        ownership.set(key, {
+          type: "unit",
+          reviewUnitId: unit.id,
+          unitTitle: unit.title,
+          spanIndex,
+        });
+      }
+    }
+  }
+
+  for (const skip of route.skippedSpans) {
+    for (const line of resolvedSpanChangedLines(snapshot, skip.span)) {
+      const key = changedLineKey(line);
+      if (ownership.has(key)) {
+        throw new GuidedReviewUiInvariantError(
+          `Changed line ${key} is both routed and skipped in the walkthrough display plan.`,
+        );
+      }
+      ownership.set(key, { type: "skipped", reason: skip.reason });
+    }
+  }
+
+  for (const requirement of delta.lines) {
+    const key = changedLineKey(requirement);
+    if (requirement.type === "carried-forward") {
+      if (ownership.has(key)) {
+        throw new GuidedReviewUiInvariantError(
+          `Carried-forward changed line ${key} is also routed or skipped.`,
+        );
+      }
+      ownership.set(key, { type: "carried-forward" });
+    } else if (!ownership.has(key)) {
+      throw new GuidedReviewUiInvariantError(
+        `Changed line ${key} has no walkthrough display ownership.`,
+      );
+    }
+  }
+  return ownership;
+}
+
+function orderTargetsFromDisplayPlan(
+  unit: ReviewUnit,
+  blocks: readonly UnitDisplayBlock[],
+  targets: readonly ReviewCommentTarget[],
+): readonly ReviewCommentTarget[] {
+  const targetsByLine = new Map(
+    targets.map((target) => [
+      fileLineKey(target.fileChangeId, target.side, target.line),
+      target,
+    ]),
+  );
+  const ordered: ReviewCommentTarget[] = [];
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    for (const item of block.items) {
+      if (item.type !== "line" || item.role !== "owned") continue;
+      const key = diffLineKey(block.change.id, item.line);
+      if (key === undefined) continue;
+      const target = targetsByLine.get(key);
+      if (target === undefined) continue;
+      if (seen.has(key)) {
+        throw new GuidedReviewUiInvariantError(
+          `Review target ${key} is rendered more than once in unit ${unit.id}.`,
+        );
+      }
+      seen.add(key);
+      ordered.push(target);
+    }
+  }
+  for (const target of targets) {
+    const key = fileLineKey(target.fileChangeId, target.side, target.line);
+    if (!seen.has(key)) {
+      throw new GuidedReviewUiInvariantError(
+        `Review target ${key} has no rendered row in unit ${unit.id}.`,
+      );
+    }
+  }
+  return ordered;
 }
 
 function renderWalkthroughSummary(
@@ -2029,6 +2185,297 @@ function addLabeledText(
 
 const INLINE_SPAN_MERGE_GAP = 6;
 
+interface IndexedSpanView {
+  readonly spanIndex: number;
+  readonly spanView: SpanView;
+}
+
+interface RouteFileBlock {
+  readonly change: FileChange;
+  readonly spans: IndexedSpanView[];
+}
+
+interface SpanViewBounds {
+  readonly start: number;
+  readonly end: number;
+}
+
+function buildUnitDisplayBlocks(
+  unit: ReviewUnit,
+  spans: readonly SpanView[],
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+): readonly UnitDisplayBlock[] {
+  const routeBlocks: RouteFileBlock[] = [];
+  for (const [spanIndex, spanView] of spans.entries()) {
+    const previous = routeBlocks.at(-1);
+    if (previous?.change.id === spanView.change.id) {
+      previous.spans.push({ spanIndex, spanView });
+    } else {
+      routeBlocks.push({
+        change: spanView.change,
+        spans: [{ spanIndex, spanView }],
+      });
+    }
+  }
+  return routeBlocks.map((block) =>
+    buildRouteFileBlock(unit, block, ownership),
+  );
+}
+
+function buildRouteFileBlock(
+  unit: ReviewUnit,
+  block: RouteFileBlock,
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+): UnitDisplayBlock {
+  const content = textContent(block.change);
+  if (content === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Review span references non-text file change ${block.change.id}.`,
+    );
+  }
+  const items: PlannedDiffItem[] = [];
+  const renderedIndexes = new Set<number>();
+  let previousBounds: SpanViewBounds | undefined;
+
+  for (const { spanIndex, spanView } of block.spans) {
+    const bounds = spanViewBounds(spanView, content.lines);
+    if (previousBounds !== undefined) {
+      if (bounds.start > previousBounds.end + 1) {
+        appendGapItems(
+          items,
+          content.lines,
+          previousBounds.end + 1,
+          bounds.start - 1,
+          spanIndex,
+          unit,
+          block.change.id,
+          ownership,
+          renderedIndexes,
+        );
+      } else if (bounds.start < previousBounds.start) {
+        appendDisplayOmission(items, 0, { type: "route-jump" });
+      }
+    }
+
+    for (let index = bounds.start; index <= bounds.end; index += 1) {
+      const line = content.lines[index];
+      if (line === undefined) continue;
+      appendSpanLine(
+        items,
+        line,
+        index,
+        spanIndex,
+        unit,
+        block.change.id,
+        ownership,
+        renderedIndexes,
+      );
+    }
+    previousBounds = bounds;
+  }
+
+  return { change: block.change, items };
+}
+
+function spanViewBounds(
+  spanView: SpanView,
+  fileLines: readonly DiffLine[],
+): SpanViewBounds {
+  const firstLine = spanView.lines[0];
+  const lastLine = spanView.lines.at(-1);
+  if (firstLine === undefined || lastLine === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Review span for file change ${spanView.change.id} has no frozen lines.`,
+    );
+  }
+  const start = fileLines.indexOf(firstLine);
+  const end = fileLines.indexOf(lastLine);
+  if (start < 0 || end < start) {
+    throw new GuidedReviewUiInvariantError(
+      `Review span lines are not part of frozen file change ${spanView.change.id}.`,
+    );
+  }
+  return { start, end };
+}
+
+function appendGapItems(
+  items: PlannedDiffItem[],
+  fileLines: readonly DiffLine[],
+  start: number,
+  end: number,
+  nextSpanIndex: number,
+  unit: ReviewUnit,
+  fileChangeId: FileChange["id"],
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+  renderedIndexes: Set<number>,
+): void {
+  const showContext = end - start + 1 <= INLINE_SPAN_MERGE_GAP;
+  for (let index = start; index <= end; index += 1) {
+    if (renderedIndexes.has(index)) continue;
+    const line = fileLines[index];
+    if (line === undefined) continue;
+    if (line.type === "context") {
+      if (showContext) {
+        items.push({ type: "line", line, role: "context" });
+      } else {
+        appendDisplayOmission(items, 1, { type: "distant" });
+      }
+      renderedIndexes.add(index);
+      continue;
+    }
+    const lineOwnership = requireDisplayOwnership(
+      ownership,
+      fileChangeId,
+      line,
+    );
+    appendDisplayOmission(
+      items,
+      1,
+      omissionReasonForOwnership(lineOwnership, unit, nextSpanIndex),
+    );
+    if (
+      lineOwnership.type !== "unit" ||
+      lineOwnership.reviewUnitId !== unit.id
+    ) {
+      renderedIndexes.add(index);
+    }
+  }
+}
+
+function appendSpanLine(
+  items: PlannedDiffItem[],
+  line: DiffLine,
+  lineIndex: number,
+  spanIndex: number,
+  unit: ReviewUnit,
+  fileChangeId: FileChange["id"],
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+  renderedIndexes: Set<number>,
+): void {
+  if (line.type === "context") {
+    if (!renderedIndexes.has(lineIndex)) {
+      items.push({ type: "line", line, role: "context" });
+      renderedIndexes.add(lineIndex);
+    }
+    return;
+  }
+
+  const lineOwnership = requireDisplayOwnership(ownership, fileChangeId, line);
+  if (lineOwnership.type === "unit" && lineOwnership.reviewUnitId === unit.id) {
+    if (lineOwnership.spanIndex !== spanIndex) {
+      appendDisplayOmission(
+        items,
+        1,
+        omissionReasonForOwnership(lineOwnership, unit, spanIndex),
+      );
+      return;
+    }
+    if (renderedIndexes.has(lineIndex)) {
+      throw new GuidedReviewUiInvariantError(
+        `Owned changed line ${diffLineKey(fileChangeId, line)} is rendered more than once in unit ${unit.id}.`,
+      );
+    }
+    items.push({ type: "line", line, role: "owned" });
+    renderedIndexes.add(lineIndex);
+    return;
+  }
+
+  if (renderedIndexes.has(lineIndex)) return;
+  items.push({
+    type: "line",
+    line,
+    role: "external",
+    externalDetail: externalLineDetail(lineOwnership),
+  });
+  renderedIndexes.add(lineIndex);
+}
+
+function requireDisplayOwnership(
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+  fileChangeId: FileChange["id"],
+  line: DiffLine,
+): ChangedLineDisplayOwnership {
+  const key = diffLineKey(fileChangeId, line);
+  if (key === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Context line of file change ${fileChangeId} has no changed-line ownership.`,
+    );
+  }
+  const result = ownership.get(key);
+  if (result === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Changed line ${key} has no walkthrough display ownership.`,
+    );
+  }
+  return result;
+}
+
+function omissionReasonForOwnership(
+  ownership: ChangedLineDisplayOwnership,
+  unit: ReviewUnit,
+  spanIndex: number,
+): DisplayOmissionReason {
+  switch (ownership.type) {
+    case "carried-forward":
+      return { type: "carried-forward" };
+    case "skipped":
+      return { type: "skipped", reason: ownership.reason };
+    case "unit":
+      if (ownership.reviewUnitId !== unit.id) {
+        return { type: "other-unit", unitTitle: ownership.unitTitle };
+      }
+      return ownership.spanIndex < spanIndex
+        ? { type: "shown-earlier" }
+        : { type: "shown-later" };
+  }
+}
+
+function externalLineDetail(ownership: ChangedLineDisplayOwnership): string {
+  switch (ownership.type) {
+    case "carried-forward":
+      return "Reviewed in an earlier round; these changed lines are not selectable here.";
+    case "skipped":
+      return `Skipped from the walkthrough: ${ownership.reason}`;
+    case "unit":
+      return `Routed to review unit ${JSON.stringify(ownership.unitTitle)}; these changed lines are not selectable here.`;
+  }
+}
+
+function appendDisplayOmission(
+  items: PlannedDiffItem[],
+  count: number,
+  reason: DisplayOmissionReason,
+): void {
+  const previous = items.at(-1);
+  if (
+    count > 0 &&
+    previous?.type === "omission" &&
+    sameOmissionReason(previous.reason, reason)
+  ) {
+    items[items.length - 1] = {
+      ...previous,
+      count: previous.count + count,
+    };
+    return;
+  }
+  items.push({ type: "omission", count, reason });
+}
+
+function sameOmissionReason(
+  left: DisplayOmissionReason,
+  right: DisplayOmissionReason,
+): boolean {
+  if (left.type !== right.type) return false;
+  switch (left.type) {
+    case "skipped":
+      return right.type === "skipped" && left.reason === right.reason;
+    case "other-unit":
+      return right.type === "other-unit" && left.unitTitle === right.unitTitle;
+    default:
+      return true;
+  }
+}
+
 function renderUnitDiff(
   unit: UnitView,
   selectedTarget: ReviewCommentTarget | undefined,
@@ -2046,80 +2493,20 @@ function renderUnitDiff(
   const commentsByTarget = new Map(
     comments.map((comment) => [targetKey(comment), comment]),
   );
-  let previousChangeId: FileChange["id"] | undefined;
-  let previousStart = -1;
-  let previousEnd = -1;
 
-  for (const [spanIndex, spanView] of unit.spans.entries()) {
-    const content = textContent(spanView.change);
-    if (content === undefined) {
-      throw new GuidedReviewUiInvariantError(
-        `Review span references non-text file change ${spanView.change.id}.`,
-      );
-    }
-    const firstLine = spanView.lines[0];
-    const lastLine = spanView.lines.at(-1);
-    if (firstLine === undefined || lastLine === undefined) continue;
-    const start = content.lines.indexOf(firstLine);
-    const end = content.lines.indexOf(lastLine);
-    if (start < 0 || end < start) {
-      throw new GuidedReviewUiInvariantError(
-        `Review span lines are not part of frozen file change ${spanView.change.id}.`,
-      );
-    }
-
-    const startsFile = previousChangeId !== spanView.change.id;
-    if (startsFile) {
-      if (rows.length > 0) rows.push({ text: "" });
-      rows.push(
-        ...wrapStyled(renderSpanHeader(spanView, theme), width).map((text) => ({
-          text,
-          spanIndex,
-          isSpanHeader: true,
-        })),
-      );
-      previousChangeId = spanView.change.id;
-      previousStart = start;
-      previousEnd = end;
-      rows.push(
-        ...renderUnitDiffLines(
-          spanView.lines,
-          spanIndex,
-          spanView.change.id,
-          targetsByLine,
-          commentsByTarget,
-          selectedTarget,
-          theme,
-          width,
-        ),
-      );
-      continue;
-    }
-
-    let lines: readonly DiffLine[];
-    if (start < previousStart) {
-      rows.push(renderOmittedDiffLines(undefined, spanIndex, theme, width));
-      lines = spanView.lines;
-      previousStart = start;
-      previousEnd = end;
-    } else if (end <= previousEnd) {
-      lines = [];
-    } else {
-      const gap = start - previousEnd - 1;
-      if (gap > INLINE_SPAN_MERGE_GAP) {
-        rows.push(renderOmittedDiffLines(gap, spanIndex, theme, width));
-        lines = spanView.lines;
-        previousStart = start;
-      } else {
-        lines = content.lines.slice(previousEnd + 1, end + 1);
-      }
-      previousEnd = end;
-    }
+  for (const [displayBlockIndex, block] of unit.displayBlocks.entries()) {
+    if (rows.length > 0) rows.push({ text: "" });
     rows.push(
-      ...renderUnitDiffLines(
-        lines,
-        spanIndex,
-        spanView.change.id,
+      ...wrapStyled(renderChangeHeader(block.change, theme), width).map(
+        (text) => ({
+          text,
+          displayBlockIndex,
+          isBlockHeader: true,
+        }),
+      ),
+      ...renderPlannedDiffItems(
+        block,
+        displayBlockIndex,
         targetsByLine,
         commentsByTarget,
         selectedTarget,
@@ -2131,9 +2518,65 @@ function renderUnitDiff(
   return rows;
 }
 
+function renderPlannedDiffItems(
+  block: UnitDisplayBlock,
+  displayBlockIndex: number,
+  targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
+  commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  selectedTarget: ReviewCommentTarget | undefined,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly RenderedRow[] {
+  const rows: RenderedRow[] = [];
+  let buffered: PlannedDiffLine[] = [];
+  let externalDetail: string | undefined;
+  const flush = (): void => {
+    if (buffered.length === 0) return;
+    rows.push(
+      ...renderUnitDiffLines(
+        buffered,
+        displayBlockIndex,
+        block.change.id,
+        targetsByLine,
+        commentsByTarget,
+        selectedTarget,
+        theme,
+        width,
+      ),
+    );
+    buffered = [];
+  };
+
+  for (const item of block.items) {
+    if (item.type === "omission") {
+      flush();
+      externalDetail = undefined;
+      rows.push(renderOmittedDiffLines(item, displayBlockIndex, theme, width));
+      continue;
+    }
+    if (item.externalDetail !== externalDetail) {
+      flush();
+      externalDetail = item.externalDetail;
+      if (externalDetail !== undefined) {
+        rows.push(
+          ...renderExternalLineNotice(
+            externalDetail,
+            displayBlockIndex,
+            theme,
+            width,
+          ),
+        );
+      }
+    }
+    buffered.push(item);
+  }
+  flush();
+  return rows;
+}
+
 function renderUnitDiffLines(
-  lines: readonly DiffLine[],
-  spanIndex: number,
+  lines: readonly PlannedDiffLine[],
+  displayBlockIndex: number,
   fileChangeId: FileChange["id"],
   targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
   commentsByTarget: ReadonlyMap<string, ReviewComment>,
@@ -2142,9 +2585,16 @@ function renderUnitDiffLines(
   width: number,
 ): readonly RenderedRow[] {
   const rows: RenderedRow[] = [];
-  const inlineTextByIndex = buildInlineDiffText(lines, theme);
-  for (const [lineIndex, line] of lines.entries()) {
-    const target = lineTarget(targetsByLine, fileChangeId, line);
+  const inlineTextByIndex = buildInlineDiffText(
+    lines.map(({ line }) => line),
+    theme,
+  );
+  for (const [lineIndex, planned] of lines.entries()) {
+    const line = planned.line;
+    const target =
+      planned.role === "owned"
+        ? lineTarget(targetsByLine, fileChangeId, line)
+        : undefined;
     const isSelected =
       target !== undefined &&
       selectedTarget !== undefined &&
@@ -2158,12 +2608,13 @@ function renderUnitDiffLines(
         line,
         isSelected,
         comment !== undefined,
+        planned.role === "external",
         theme,
         width,
         inlineTextByIndex.get(lineIndex),
       ).map((text) => ({
         text,
-        spanIndex,
+        displayBlockIndex,
         targetKey: target === undefined ? undefined : targetKey(target),
       })),
     );
@@ -2171,7 +2622,7 @@ function renderUnitDiffLines(
       rows.push(
         ...renderInlineDraftComment(comment, theme, width).map((text) => ({
           text,
-          spanIndex,
+          displayBlockIndex,
           targetKey: targetKey(target),
         })),
       );
@@ -2181,27 +2632,57 @@ function renderUnitDiffLines(
 }
 
 function renderOmittedDiffLines(
-  count: number | undefined,
-  spanIndex: number,
+  omission: PlannedDiffOmission,
+  displayBlockIndex: number,
   theme: ReviewUiTheme,
   width: number,
 ): RenderedRow {
-  const detail =
-    count === undefined
-      ? "routed region continues elsewhere in this file"
-      : `${count} frozen diff line${count === 1 ? "" : "s"} not shown`;
+  const detail = omissionDetail(omission);
   return {
     text: fitLine(
-      `${" ".repeat(DIFF_GUTTER_WIDTH)}${theme.fg("dim", `⋯ ${detail}`)}`,
+      `${" ".repeat(DIFF_GUTTER_WIDTH)}${theme.fg("dim", `⋯ ${safeText(detail)}`)}`,
       width,
     ),
-    spanIndex,
+    displayBlockIndex,
   };
 }
 
-/** Highlighted file path shown above a span and pinned when scrolled. */
-function renderSpanHeader(spanView: SpanView, theme: ReviewUiTheme): string {
-  return theme.fg("accent", theme.bold(displayBareChangePath(spanView.change)));
+function omissionDetail(omission: PlannedDiffOmission): string {
+  const lines = `${omission.count} frozen diff line${omission.count === 1 ? "" : "s"}`;
+  switch (omission.reason.type) {
+    case "distant":
+      return `${lines} not shown`;
+    case "route-jump":
+      return "routed region continues elsewhere in this file";
+    case "carried-forward":
+      return `${lines} not shown; reviewed in an earlier round`;
+    case "skipped":
+      return `${lines} not shown; skipped: ${omission.reason.reason}`;
+    case "other-unit":
+      return `${lines} not shown; routed to unit ${JSON.stringify(omission.reason.unitTitle)}`;
+    case "shown-earlier":
+      return `${lines} already shown earlier in this unit`;
+    case "shown-later":
+      return `${lines} shown later in this unit`;
+  }
+}
+
+function renderExternalLineNotice(
+  detail: string,
+  displayBlockIndex: number,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly RenderedRow[] {
+  return wrapWithPrefix(
+    " ".repeat(DIFF_GUTTER_WIDTH),
+    theme.fg("dim", `· ${safeText(detail)}`),
+    width,
+  ).map((text) => ({ text, displayBlockIndex }));
+}
+
+/** Highlighted file path shown above a route-ordered display block. */
+function renderChangeHeader(change: FileChange, theme: ReviewUiTheme): string {
+  return theme.fg("accent", theme.bold(displayBareChangePath(change)));
 }
 
 function lineTarget(
@@ -2209,11 +2690,19 @@ function lineTarget(
   fileChangeId: FileChange["id"],
   line: DiffLine,
 ): ReviewCommentTarget | undefined {
+  const key = diffLineKey(fileChangeId, line);
+  return key === undefined ? undefined : targetsByLine.get(key);
+}
+
+function diffLineKey(
+  fileChangeId: FileChange["id"],
+  line: DiffLine,
+): string | undefined {
   if (line.type === "added" && line.newLine !== undefined) {
-    return targetsByLine.get(fileLineKey(fileChangeId, "new", line.newLine));
+    return fileLineKey(fileChangeId, "new", line.newLine);
   }
   if (line.type === "removed" && line.oldLine !== undefined) {
-    return targetsByLine.get(fileLineKey(fileChangeId, "old", line.oldLine));
+    return fileLineKey(fileChangeId, "old", line.oldLine);
   }
   return undefined;
 }
@@ -2246,6 +2735,7 @@ function renderReadOnlyFile(
       lines.push(
         ...renderDiffLine(
           line,
+          false,
           false,
           false,
           theme,
@@ -2343,13 +2833,14 @@ function renderDiffLine(
   line: DiffLine,
   selected: boolean,
   hasComment: boolean,
+  external: boolean,
   theme: ReviewUiTheme,
   width: number,
   inlineText?: string,
 ): readonly string[] {
   const oldLine = line.oldLine === undefined ? "" : String(line.oldLine);
   const newLine = line.newLine === undefined ? "" : String(line.newLine);
-  const marker = selected ? ">" : hasComment ? "●" : " ";
+  const marker = selected ? ">" : hasComment ? "●" : external ? "·" : " ";
   const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
   const raw = theme.fg(
     diffColor(line),
@@ -2768,9 +3259,9 @@ function lastTargetKey(rows: readonly RenderedRow[]): string | undefined {
 const MIN_PINNED_HEADER_VIEWPORT = 5;
 
 /**
- * Scroll offset and pinned span header for the walkthrough diff viewport.
+ * Scroll offset and pinned display-block header for the walkthrough diff viewport.
  *
- * When the file header of the span at the top of the viewport has scrolled
+ * When the file header of the block at the top of the viewport has scrolled
  * away, one viewport line is reserved to pin that header so the file name
  * stays visible, and the offset is recomputed so the selected line remains
  * inside the smaller viewport. Viewports shorter than
@@ -2792,36 +3283,36 @@ function resolveDiffViewport(
     : clampOffset(offset, rows.length, height);
   let pinned =
     height >= MIN_PINNED_HEADER_VIEWPORT
-      ? stickySpanIndex(rows, next)
+      ? stickyBlockIndex(rows, next)
       : undefined;
   if (pinned !== undefined) {
     next = anchorToTarget
       ? ensureTargetVisible(rows, target, next, height - 1)
       : clampOffset(next, rows.length, height - 1);
-    pinned = stickySpanIndex(rows, next);
+    pinned = stickyBlockIndex(rows, next);
   }
   return {
     offset: next,
     contentHeight: pinned === undefined ? height : height - 1,
-    ...(pinned === undefined ? {} : { pinnedSpanIndex: pinned }),
+    ...(pinned === undefined ? {} : { pinnedBlockIndex: pinned }),
   };
 }
 
 /**
- * Index of the span whose header must be pinned for the given scroll offset.
+ * Index of the display block whose header must be pinned for the given scroll offset.
  *
- * Returns undefined when the top of the viewport already shows a span header,
+ * Returns undefined when the top of the viewport already shows a block header,
  * so the pinned line never duplicates a visible header.
  */
-function stickySpanIndex(
+function stickyBlockIndex(
   rows: readonly RenderedRow[],
   offset: number,
 ): number | undefined {
   if (offset <= 0) return undefined;
   for (let index = offset; index < rows.length; index += 1) {
     const row = rows[index];
-    if (row?.spanIndex === undefined) continue;
-    return row.isSpanHeader ? undefined : row.spanIndex;
+    if (row?.displayBlockIndex === undefined) continue;
+    return row.isBlockHeader ? undefined : row.displayBlockIndex;
   }
   return undefined;
 }
