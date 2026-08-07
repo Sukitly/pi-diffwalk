@@ -39,15 +39,22 @@ import {
   parseReviewThreadBatchEntry,
   serializeReviewThreadBatchEntry,
 } from "./review-thread-persistence.ts";
-import { openReviewThreads } from "./review-thread-ui.ts";
+import {
+  openReviewThreads,
+  type ReviewThreadUiResult,
+} from "./review-thread-ui.ts";
 import {
   attachReviewThreadResponses,
   createReviewThreadBatch,
+  isReviewThreadBatchAnswered,
+  pendingReviewThreadTurn,
   REVIEW_RESPONSES_TOOL_DESCRIPTION,
   REVIEW_RESPONSES_TOOL_NAME,
   REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  type ReviewResponseCandidate,
   ReviewResponseCandidateSchema,
   resolvedCommentLines,
+  reviewThreadConversation,
 } from "./review-threads.ts";
 import { openGuidedReview } from "./review-ui.ts";
 import {
@@ -72,6 +79,7 @@ import {
   type ReviewSubmissionMode,
   type ReviewThreadBatch,
   type ReviewThreadBatchId,
+  type ReviewThreadTurnId,
   type SubmittedGuidedReviewResult,
 } from "./types.ts";
 
@@ -85,6 +93,8 @@ const THREADS_OPTION = "--threads";
  */
 export const DIFFWALK_KICKOFF_MESSAGE_TYPE = "diffwalk-kickoff";
 export const DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE = "diffwalk-review-result";
+export const DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE =
+  "diffwalk-thread-follow-up";
 
 export interface KickoffAdditionalChangeDetails {
   readonly path: string;
@@ -104,6 +114,11 @@ export interface KickoffMessageDetails {
 export interface SubmittedReviewMessageDetails {
   readonly submissionMode: ReviewSubmissionMode;
   readonly commentCount: number;
+}
+
+export interface ThreadFollowUpMessageDetails {
+  readonly submissionMode: ReviewSubmissionMode;
+  readonly replyCount: number;
 }
 
 type CommandContext = Pick<
@@ -221,6 +236,10 @@ export function registerDiffWalk(
     DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
     renderSubmittedReviewMessage,
   );
+  pi.registerMessageRenderer<ThreadFollowUpMessageDetails>(
+    DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
+    renderThreadFollowUpMessage,
+  );
 
   function persistThreadBatch(batch: ReviewThreadBatch): void {
     threadBatchesById.set(batch.id, batch);
@@ -255,16 +274,33 @@ export function registerDiffWalk(
   async function openThreadBatch(
     ctx: Pick<ExtensionContext, "mode" | "ui">,
     batch: ReviewThreadBatch,
-  ): Promise<ReviewThreadBatch> {
+  ): Promise<ReviewThreadUiResult> {
     assertThreadBatchCanChange(batch);
     const result = await dependencies.openReviewThreads(ctx, {
       snapshot: snapshotForThreadBatch(batch),
       batch,
       onBatchChange: persistThreadBatch,
     });
-    threadBatchesById.set(result.id, result);
-    latestThreadBatchId = result.id;
+    threadBatchesById.set(result.batch.id, result.batch);
+    latestThreadBatchId = result.batch.id;
     return result;
+  }
+
+  function sendThreadFollowUp(result: ReviewThreadUiResult): void {
+    if (result.status !== "follow-up-submitted") return;
+    const turn = requireThreadTurn(result.batch, result.turnId);
+    pi.sendMessage(
+      {
+        customType: DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
+        content: formatReviewThreadFollowUp(result.batch, result.turnId),
+        display: true,
+        details: {
+          submissionMode: turn.submissionMode,
+          replyCount: turn.items.length,
+        },
+      },
+      { triggerTurn: true },
+    );
   }
 
   function sendKickoffPrompt(pending: PendingReview): void {
@@ -362,6 +398,17 @@ export function registerDiffWalk(
         : [...threadBatchesById.values()].find(
             (batch) => batch.roundId === baseline.id,
           );
+    if (
+      baselineThreads !== undefined &&
+      (!isReviewThreadBatchAnswered(baselineThreads) ||
+        baselineThreads.threads.some(
+          (thread) => thread.draftReply !== undefined,
+        ))
+    ) {
+      throw new Error(
+        `DiffWalk thread batch ${baselineThreads.id} has an unfinished reviewer turn or draft reply. Finish or delete it before starting another review.`,
+      );
+    }
     const delta = computeReviewDelta(snapshot, baseline, {
       resolvedCommentLines:
         baselineThreads === undefined
@@ -434,14 +481,23 @@ export function registerDiffWalk(
             comments: review.comments,
           });
     if (commentBatch !== undefined) persistThreadBatch(commentBatch);
+    const initialCommentTurn = commentBatch?.turns[0];
+    if (commentBatch !== undefined && initialCommentTurn === undefined) {
+      throw new Error(
+        `DiffWalk thread batch ${commentBatch.id} has no initial turn.`,
+      );
+    }
     return {
       status: "submitted",
       snapshotId: review.snapshot.id,
       submissionMode: review.submissionMode,
       comments: review.comments,
-      ...(commentBatch === undefined
+      ...(commentBatch === undefined || initialCommentTurn === undefined
         ? {}
-        : { commentBatchId: commentBatch.id }),
+        : {
+            commentBatchId: commentBatch.id,
+            commentTurnId: initialCommentTurn.id,
+          }),
     };
   }
 
@@ -513,7 +569,8 @@ export function registerDiffWalk(
           ctx.ui.notify("No DiffWalk comment threads are available.", "info");
           return;
         }
-        await openThreadBatch(ctx, batch);
+        const result = await openThreadBatch(ctx, batch);
+        sendThreadFollowUp(result);
         return;
       }
 
@@ -612,13 +669,46 @@ export function registerDiffWalk(
     },
   });
 
-  pi.registerTool<typeof ReviewResponseCandidateSchema, ReviewThreadBatch>({
+  pi.registerTool<typeof ReviewResponseCandidateSchema, ReviewThreadUiResult>({
     name: REVIEW_RESPONSES_TOOL_NAME,
     label: "DiffWalk Responses",
     description: REVIEW_RESPONSES_TOOL_DESCRIPTION,
     promptSnippet: REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
     parameters: ReviewResponseCandidateSchema,
     executionMode: "sequential",
+    prepareArguments(args): ReviewResponseCandidate {
+      const original = args as ReviewResponseCandidate;
+      if (args === null || typeof args !== "object") return original;
+      const input = args as Record<string, unknown>;
+      if (
+        typeof input.batchId !== "string" ||
+        !Array.isArray(input.responses)
+      ) {
+        return original;
+      }
+      const batch = threadBatchesById.get(input.batchId as ReviewThreadBatchId);
+      const turnId =
+        typeof input.turnId === "string"
+          ? input.turnId
+          : batch === undefined
+            ? undefined
+            : pendingReviewThreadTurn(batch)?.id;
+      if (turnId === undefined) return original;
+      const responses: ReviewResponseCandidate["responses"] = [];
+      for (const response of input.responses) {
+        if (response === null || typeof response !== "object") return original;
+        const fields = response as Record<string, unknown>;
+        const threadId =
+          typeof fields.threadId === "string"
+            ? fields.threadId
+            : fields.commentId;
+        if (typeof threadId !== "string" || typeof fields.body !== "string") {
+          return original;
+        }
+        responses.push({ threadId, body: fields.body });
+      }
+      return { batchId: input.batchId, turnId, responses };
+    },
     async execute(_toolCallId, candidate, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const batch = threadBatchesById.get(
@@ -626,7 +716,7 @@ export function registerDiffWalk(
       );
       if (batch === undefined) {
         throw new Error(
-          `No pending DiffWalk comment batch matches ${candidate.batchId}. Use the batchId from the submitted review result.`,
+          `No pending DiffWalk thread batch matches ${candidate.batchId}. Use the batchId from the pending reviewer turn.`,
         );
       }
       assertThreadBatchCanChange(batch);
@@ -634,22 +724,25 @@ export function registerDiffWalk(
       persistThreadBatch(answered);
       signal?.throwIfAborted();
       const reviewed = await openThreadBatch(ctx, answered);
+      const followUp = reviewed.status === "follow-up-submitted";
       return {
         content: [
           {
             type: "text",
-            text: `Recorded ${reviewed.threads.length} structured DiffWalk responses. The reviewer inspected the anchored threads.`,
+            text: followUp
+              ? formatReviewThreadFollowUp(reviewed.batch, reviewed.turnId)
+              : `Recorded structured DiffWalk responses for turn ${candidate.turnId}. The reviewer inspected the anchored conversations and submitted no follow-up.`,
           },
         ],
         details: reviewed,
-        terminate: true,
+        terminate: !followUp,
       };
     },
     renderCall(args, theme) {
       return new Text(
         theme.fg(
           "toolTitle",
-          `DiffWalk responses (${args.responses?.length ?? 0})`,
+          `DiffWalk ${args.turnId ?? "responses"} (${args.responses?.length ?? 0})`,
         ),
         0,
         0,
@@ -669,19 +762,32 @@ export function registerDiffWalk(
           0,
         );
       }
-      const batch = result.details;
-      if (batch === undefined) {
+      const outcome = result.details;
+      if (outcome === undefined) {
         return new Text(
           theme.fg("success", "DiffWalk responses recorded"),
           0,
           0,
         );
       }
-      const resolved = batch.threads.filter((thread) => thread.resolved).length;
+      if (outcome.status === "follow-up-submitted") {
+        const turn = requireThreadTurn(outcome.batch, outcome.turnId);
+        return new Text(
+          theme.fg(
+            "warning",
+            `${turn.items.length} reviewer follow-up${turn.items.length === 1 ? "" : "s"} sent to the Agent`,
+          ),
+          0,
+          0,
+        );
+      }
+      const resolved = outcome.batch.threads.filter(
+        (thread) => thread.resolved,
+      ).length;
       return new Text(
         theme.fg(
           "success",
-          `${batch.threads.length} responses reviewed • ${resolved} resolved`,
+          `${outcome.batch.threads.length} conversations reviewed • ${resolved} resolved`,
         ),
         0,
         0,
@@ -944,6 +1050,20 @@ export const renderSubmittedReviewMessage: MessageRenderer<
   return new Text(lines.join("\n"), options.outputPad, 0);
 };
 
+export const renderThreadFollowUpMessage: MessageRenderer<
+  ThreadFollowUpMessageDetails
+> = (message, options, theme) => {
+  const details = message.details;
+  const lines = [theme.fg("accent", "DiffWalk follow-up")];
+  if (details !== undefined) {
+    lines.push(
+      `${countNoun(details.replyCount, "reply")} sent to the agent.`,
+      `Next step: ${submissionNextStep(details.submissionMode)}`,
+    );
+  }
+  return new Text(lines.join("\n"), options.outputPad, 0);
+};
+
 function renderGuidedReviewToolResult(
   result: GuidedReviewResult,
   theme: Theme,
@@ -1047,6 +1167,49 @@ function countNoun(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+function requireThreadTurn(
+  batch: ReviewThreadBatch,
+  turnId: ReviewThreadTurnId,
+): ReviewThreadBatch["turns"][number] {
+  const turn = batch.turns.find((candidate) => candidate.id === turnId);
+  if (turn === undefined) {
+    throw new Error(`DiffWalk batch ${batch.id} has no turn ${turnId}.`);
+  }
+  return turn;
+}
+
+export function formatReviewThreadFollowUp(
+  batch: ReviewThreadBatch,
+  turnId: ReviewThreadTurnId,
+): string {
+  const turn = requireThreadTurn(batch, turnId);
+  return JSON.stringify({
+    status: "review-thread-follow-up",
+    commentBatchId: batch.id,
+    turnId: turn.id,
+    submissionMode: turn.submissionMode,
+    threads: turn.items.map((item) => {
+      const thread = batch.threads.find(
+        (candidate) => candidate.id === item.threadId,
+      );
+      if (thread === undefined) {
+        throw new Error(
+          `DiffWalk turn ${turn.id} references missing thread ${item.threadId}.`,
+        );
+      }
+      return {
+        threadId: thread.id,
+        anchor: thread.anchor,
+        conversation: reviewThreadConversation(batch, thread.id),
+      };
+    }),
+    instruction:
+      turn.submissionMode === "discuss-first"
+        ? `Investigate every pending reviewer follow-up without modifying files. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId. The tool reopens the anchored conversations for the reviewer.`
+        : `Apply direct change requests and investigate questions or disagreements in every pending reviewer follow-up. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId, explaining any applied change, uncertainty, or disagreement. The tool reopens the anchored conversations for the reviewer.`,
+  });
+}
+
 export function formatGuidedReviewResult(result: GuidedReviewResult): string {
   if (result.status === "paused") {
     return JSON.stringify({
@@ -1064,22 +1227,23 @@ export function formatGuidedReviewResult(result: GuidedReviewResult): string {
         "The user discarded the review without submitting comments. Wait for the user's direction before acting on the change.",
     });
   }
+  const turnId = result.commentTurnId ?? ("T1" as ReviewThreadTurnId);
   return JSON.stringify({
     status: result.status,
     snapshotId: result.snapshotId,
     submissionMode: result.submissionMode,
     ...(result.commentBatchId === undefined
       ? {}
-      : { commentBatchId: result.commentBatchId }),
+      : { commentBatchId: result.commentBatchId, turnId }),
     comments: result.comments.map((comment, index) => ({
-      commentId: `C${index + 1}`,
+      threadId: `C${index + 1}`,
       ...comment,
     })),
     instruction:
       result.comments.length === 0
         ? "No comments require an Agent response."
         : result.submissionMode === "discuss-first"
-          ? `Investigate every comment without modifying files. Do not answer in ordinary assistant text. After investigation is complete, call ${REVIEW_RESPONSES_TOOL_NAME} as the only tool call in your final assistant response, with this commentBatchId and exactly one direct response for every commentId. The tool opens the responses at their frozen diff anchors for the reviewer.`
-          : `Apply direct change requests and investigate questions or disagreements. Do not provide the final comment answers in ordinary assistant text. After all investigation and edits are complete, call ${REVIEW_RESPONSES_TOOL_NAME} as the only tool call in your final assistant response, with this commentBatchId and exactly one direct response for every commentId, explaining any applied change, uncertainty, or disagreement. The tool opens the responses at their frozen diff anchors for the reviewer.`,
+          ? `Investigate every comment without modifying files. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId. The tool opens the anchored conversations for the reviewer.`
+          : `Apply direct change requests and investigate questions or disagreements. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId, explaining any applied change, uncertainty, or disagreement. The tool opens the anchored conversations for the reviewer.`,
   });
 }

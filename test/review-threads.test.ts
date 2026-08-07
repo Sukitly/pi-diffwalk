@@ -3,11 +3,16 @@ import test from "node:test";
 import { ReviewSession } from "../src/review-comments.ts";
 import { computeReviewDelta } from "../src/review-delta.ts";
 import {
+  appendReviewThreadTurn,
   attachReviewThreadResponses,
+  clearReviewThreadDraft,
   createReviewThreadBatch,
   isReviewThreadBatchAnswered,
+  pendingReviewThreadTurn,
   ReviewThreadError,
   resolvedCommentLines,
+  reviewThreadConversation,
+  setReviewThreadDraft,
   setReviewThreadResolved,
 } from "../src/review-threads.ts";
 import { validateReviewRoute } from "../src/route-validation.ts";
@@ -65,7 +70,19 @@ function makeBatch() {
   });
 }
 
-test("creates deterministic batch-local comment IDs", () => {
+function answerInitialTurn() {
+  const batch = makeBatch();
+  return attachReviewThreadResponses(batch, {
+    batchId: batch.id,
+    turnId: "T1",
+    responses: [
+      { threadId: "C2", body: "Second answer." },
+      { threadId: "C1", body: "First answer." },
+    ],
+  });
+}
+
+test("creates deterministic threads and an initial pending turn", () => {
   const first = makeBatch();
   const second = makeBatch();
 
@@ -74,51 +91,63 @@ test("creates deterministic batch-local comment IDs", () => {
     first.threads.map((thread) => thread.id),
     ["C1", "C2"],
   );
-  assert.equal(
-    first.threads.every((thread) => !thread.resolved),
-    true,
+  assert.deepEqual(
+    first.turns.map((turn) => [turn.id, turn.sequence, turn.submissionMode]),
+    [["T1", 1, "discuss-first"]],
   );
+  assert.deepEqual(
+    first.turns[0]?.items.map((item) => [item.threadId, item.reviewerBody]),
+    [
+      ["C1", "Explain the first value."],
+      ["C2", "Explain the second value."],
+    ],
+  );
+  assert.equal(pendingReviewThreadTurn(first)?.id, "T1");
   assert.equal(isReviewThreadBatchAnswered(first), false);
 });
 
-test("attaches exactly one structured response to every comment", () => {
+test("attaches exactly one structured response to every thread in a turn", () => {
   const batch = makeBatch();
-  const answered = attachReviewThreadResponses(batch, {
-    batchId: batch.id,
-    responses: [
-      { commentId: "C2", body: "Second answer." },
-      { commentId: "C1", body: "First answer." },
-    ],
-  });
+  const answered = answerInitialTurn();
 
   assert.deepEqual(
-    answered.threads.map((thread) => thread.response?.body),
+    answered.turns[0]?.items.map((item) => item.agentResponse?.body),
     ["First answer.", "Second answer."],
   );
   assert.equal(isReviewThreadBatchAnswered(answered), true);
-  assert.equal(batch.threads[0]?.response, undefined);
+  assert.equal(batch.turns[0]?.items[0]?.agentResponse, undefined);
 });
 
-test("rejects mismatched, missing, duplicate, unknown, blank, and repeated responses", () => {
+test("rejects mismatched, missing, duplicate, unknown, blank, stale, and repeated responses", () => {
   const batch = makeBatch();
   const cases: readonly [
     Parameters<typeof attachReviewThreadResponses>[1],
     ReviewThreadError["code"],
   ][] = [
-    [{ batchId: "other", responses: [] }, "batch-mismatch"],
+    [{ batchId: "other", turnId: "T1", responses: [] }, "batch-mismatch"],
     [
       {
         batchId: batch.id,
-        responses: [{ commentId: "C1", body: "Only one." }],
+        turnId: "T9",
+        responses: [],
+      },
+      "turn-mismatch",
+    ],
+    [
+      {
+        batchId: batch.id,
+        turnId: "T1",
+        responses: [{ threadId: "C1", body: "Only one." }],
       },
       "missing-response",
     ],
     [
       {
         batchId: batch.id,
+        turnId: "T1",
         responses: [
-          { commentId: "C1", body: "One." },
-          { commentId: "C1", body: "Again." },
+          { threadId: "C1", body: "One." },
+          { threadId: "C1", body: "Again." },
         ],
       },
       "duplicate-response",
@@ -126,9 +155,10 @@ test("rejects mismatched, missing, duplicate, unknown, blank, and repeated respo
     [
       {
         batchId: batch.id,
+        turnId: "T1",
         responses: [
-          { commentId: "C1", body: "One." },
-          { commentId: "C9", body: "Unknown." },
+          { threadId: "C1", body: "One." },
+          { threadId: "C9", body: "Unknown." },
         ],
       },
       "unknown-comment",
@@ -136,9 +166,10 @@ test("rejects mismatched, missing, duplicate, unknown, blank, and repeated respo
     [
       {
         batchId: batch.id,
+        turnId: "T1",
         responses: [
-          { commentId: "C1", body: " " },
-          { commentId: "C2", body: "Two." },
+          { threadId: "C1", body: " " },
+          { threadId: "C2", body: "Two." },
         ],
       },
       "blank-response",
@@ -156,20 +187,15 @@ test("rejects mismatched, missing, duplicate, unknown, blank, and repeated respo
     );
   }
 
-  const answered = attachReviewThreadResponses(batch, {
-    batchId: batch.id,
-    responses: [
-      { commentId: "C1", body: "One." },
-      { commentId: "C2", body: "Two." },
-    ],
-  });
+  const answered = answerInitialTurn();
   assert.throws(
     () =>
       attachReviewThreadResponses(answered, {
         batchId: batch.id,
+        turnId: "T1",
         responses: [
-          { commentId: "C1", body: "Replacement." },
-          { commentId: "C2", body: "Replacement." },
+          { threadId: "C1", body: "Replacement." },
+          { threadId: "C2", body: "Replacement." },
         ],
       }),
     (error: unknown) =>
@@ -177,7 +203,81 @@ test("rejects mismatched, missing, duplicate, unknown, blank, and repeated respo
   );
 });
 
-test("only the reviewer can resolve an answered thread", () => {
+test("persists drafts and appends repeated linear conversation turns", () => {
+  const answered = answerInitialTurn();
+  const withDraft = setReviewThreadDraft(
+    answered,
+    "C1" as ReviewCommentId,
+    "Why is validation needed here?",
+  );
+  assert.equal(
+    withDraft.threads[0]?.draftReply,
+    "Why is validation needed here?",
+  );
+
+  const pending = appendReviewThreadTurn(withDraft, {
+    submissionMode: "apply-change-requests",
+    replies: [
+      {
+        threadId: "C1" as ReviewCommentId,
+        body: withDraft.threads[0]?.draftReply ?? "",
+      },
+    ],
+  });
+  assert.equal(pending.threads[0]?.draftReply, undefined);
+  assert.deepEqual(
+    pending.turns.map((turn) => [turn.id, turn.submissionMode]),
+    [
+      ["T1", "discuss-first"],
+      ["T2", "apply-change-requests"],
+    ],
+  );
+  assert.equal(pendingReviewThreadTurn(pending)?.id, "T2");
+  assert.throws(
+    () =>
+      appendReviewThreadTurn(pending, {
+        submissionMode: "discuss-first",
+        replies: [
+          {
+            threadId: "C2" as ReviewCommentId,
+            body: "Another question.",
+          },
+        ],
+      }),
+    (error: unknown) =>
+      error instanceof ReviewThreadError && error.code === "pending-turn",
+  );
+
+  const answeredAgain = attachReviewThreadResponses(pending, {
+    batchId: pending.id,
+    turnId: "T2",
+    responses: [{ threadId: "C1", body: "It rejects malformed input." }],
+  });
+  assert.deepEqual(
+    reviewThreadConversation(answeredAgain, "C1" as ReviewCommentId).map(
+      (entry) => [entry.turnId, entry.author, entry.body],
+    ),
+    [
+      ["T1", "reviewer", "Explain the first value."],
+      ["T1", "agent", "First answer."],
+      ["T2", "reviewer", "Why is validation needed here?"],
+      ["T2", "agent", "It rejects malformed input."],
+    ],
+  );
+
+  const draftAgain = setReviewThreadDraft(
+    answeredAgain,
+    "C2" as ReviewCommentId,
+    "Draft",
+  );
+  assert.equal(
+    clearReviewThreadDraft(draftAgain, "C2" as ReviewCommentId).threads[1]
+      ?.draftReply,
+    undefined,
+  );
+});
+
+test("only the reviewer can resolve an answered thread without a draft", () => {
   const batch = makeBatch();
   assert.throws(
     () => setReviewThreadResolved(batch, "C1" as ReviewCommentId, true),
@@ -185,19 +285,23 @@ test("only the reviewer can resolve an answered thread", () => {
       error instanceof ReviewThreadError && error.code === "response-required",
   );
 
-  const answered = attachReviewThreadResponses(batch, {
-    batchId: batch.id,
-    responses: [
-      { commentId: "C1", body: "One." },
-      { commentId: "C2", body: "Two." },
-    ],
-  });
+  const answered = answerInitialTurn();
+  const withDraft = setReviewThreadDraft(
+    answered,
+    "C1" as ReviewCommentId,
+    "Follow up.",
+  );
+  assert.throws(
+    () => setReviewThreadResolved(withDraft, "C1" as ReviewCommentId, true),
+    (error: unknown) =>
+      error instanceof ReviewThreadError && error.code === "draft-reply",
+  );
+
   const resolved = setReviewThreadResolved(
     answered,
     "C1" as ReviewCommentId,
     true,
   );
-
   assert.deepEqual(
     resolved.threads.map((thread) => thread.resolved),
     [true, false],
@@ -209,6 +313,16 @@ test("only the reviewer can resolve an answered thread", () => {
       line: 2,
     },
   ]);
+  assert.throws(
+    () =>
+      setReviewThreadDraft(
+        resolved,
+        "C1" as ReviewCommentId,
+        "Cannot reply yet.",
+      ),
+    (error: unknown) =>
+      error instanceof ReviewThreadError && error.code === "resolved-thread",
+  );
   assert.equal(
     setReviewThreadResolved(resolved, "C1" as ReviewCommentId, true),
     resolved,
