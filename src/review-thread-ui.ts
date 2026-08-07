@@ -31,6 +31,16 @@ import type {
   ReviewThreadBatch,
   ReviewThreadTurnId,
 } from "./types.ts";
+import {
+  countNoun,
+  fitColumns,
+  fitLine,
+  MEDIUM_HEADER_WIDTH,
+  type PrioritizedLineGroup,
+  packStatusParts,
+  selectHeaderGroups,
+  WIDE_HEADER_WIDTH,
+} from "./ui-layout.ts";
 
 export interface ReviewThreadUiInput {
   readonly snapshot: ReviewSnapshot;
@@ -208,7 +218,7 @@ export class ReviewThreadComponent implements Component, Focusable {
   }
 
   private renderThreads(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = [
       fitLine(
         this.theme.fg(
@@ -254,18 +264,14 @@ export class ReviewThreadComponent implements Component, Focusable {
 
   private renderReplyEditor(width: number, rows: number): readonly string[] {
     const thread = this.currentThread();
-    const header = [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk reply • ${thread?.id ?? "no thread"} • frozen snapshot ${this.batch.snapshotId}`,
-          ),
-        ),
-        width,
-      ),
-      "",
-    ];
+    const header = renderScreenHeader(
+      "Reply",
+      "Reviewer follow-up",
+      thread?.id,
+      this.theme,
+      width,
+      rows,
+    );
     const footer = [
       fitLine(
         this.theme.fg(
@@ -276,59 +282,48 @@ export class ReviewThreadComponent implements Component, Focusable {
       ),
     ];
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
-    const body: string[] = [
-      this.theme.fg("accent", this.theme.bold("Reviewer follow-up")),
+    const metadata = [
+      ...wrapStyled(
+        this.theme.fg("muted", `Frozen snapshot ${this.batch.snapshotId}`),
+        width,
+      ),
+      ...(thread === undefined
+        ? []
+        : wrapStyled(
+            this.theme.fg(
+              "muted",
+              `${displayBarePath(thread.anchor.filePath)} ${thread.anchor.side} line ${thread.anchor.line}`,
+            ),
+            width,
+          )),
+      ...(this.replyInputError === undefined
+        ? []
+        : wrapStyled(
+            this.theme.fg("warning", safeText(this.replyInputError)),
+            width,
+          )),
     ];
-    if (thread !== undefined) {
-      body.push(
-        ...wrapStyled(
-          this.theme.fg(
-            "muted",
-            `${displayBarePath(thread.anchor.filePath)} ${thread.anchor.side} line ${thread.anchor.line}`,
-          ),
-          width,
-        ),
-      );
-    }
-    if (this.replyInputError !== undefined) {
-      body.push(
-        ...wrapStyled(
-          this.theme.fg("warning", safeText(this.replyInputError)),
-          width,
-        ),
-      );
-    }
-    const remaining = Math.max(0, bodyHeight - body.length);
     const editorLines = this.editor.render(width);
-    body.push(
-      ...(editorLines.length <= remaining
-        ? editorLines
-        : editorLines.slice(Math.max(0, editorLines.length - remaining))),
+    const metadataHeight = Math.max(
+      0,
+      bodyHeight - Math.min(1, editorLines.length),
     );
+    const body = metadata.slice(0, metadataHeight);
+    const remaining = Math.max(0, bodyHeight - body.length);
+    body.push(...editorViewport(editorLines, remaining));
     return [...header, ...body.slice(0, bodyHeight), ...footer];
   }
 
   private renderSubmission(width: number, rows: number): readonly string[] {
     const drafts = this.draftThreads();
-    const header = [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk follow-up • ${drafts.length} repl${drafts.length === 1 ? "y" : "ies"}`,
-          ),
-        ),
-        width,
-      ),
-      fitLine(
-        this.theme.fg(
-          "muted",
-          `Anchored to frozen snapshot ${this.batch.snapshotId}. New code requires another /diffwalk review.`,
-        ),
-        width,
-      ),
-      "",
-    ];
+    const header = renderScreenHeader(
+      "Follow-up",
+      `${countNoun(drafts.length, "reply")} ready`,
+      undefined,
+      this.theme,
+      width,
+      rows,
+    );
     const footer = [
       fitLine(
         this.theme.fg(
@@ -339,6 +334,14 @@ export class ReviewThreadComponent implements Component, Focusable {
       ),
     ];
     const content = [
+      ...wrapStyled(
+        this.theme.fg(
+          "muted",
+          `Anchored to frozen snapshot ${this.batch.snapshotId}. New code requires another /diffwalk review.`,
+        ),
+        width,
+      ),
+      "",
       renderMode(
         "discuss-first",
         "Discuss first",
@@ -373,7 +376,7 @@ export class ReviewThreadComponent implements Component, Focusable {
     return [...header, ...content.slice(0, bodyHeight), ...footer];
   }
 
-  private renderHeader(width: number): readonly string[] {
+  private renderHeader(width: number, rows: number): readonly string[] {
     const total = this.batch.threads.length;
     const visible = this.visibleThreads().length;
     const answered = this.batch.threads.filter((thread) =>
@@ -383,27 +386,88 @@ export class ReviewThreadComponent implements Component, Focusable {
       (thread) => thread.resolved,
     ).length;
     const drafts = this.draftThreads().length;
-    return [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk threads • ${visible === 0 ? 0 : this.threadIndex + 1}/${visible} visible • answered ${answered}/${total} • resolved ${resolved}/${total} • drafts ${drafts}`,
-          ),
-        ),
-        width,
-      ),
-      fitLine(
-        this.theme.fg(
-          "text",
-          this.currentThread() === undefined
-            ? "All conversations resolved • Enter complete"
-            : `${this.currentThread()?.id} • ${this.currentThread()?.resolved ? "resolved" : "open"} • frozen snapshot`,
-        ),
-        width,
-      ),
-      "",
+    const current = this.currentThread();
+    const position =
+      visible === 0
+        ? "No open threads"
+        : `Thread ${this.threadIndex + 1}/${visible}`;
+    const title =
+      current === undefined
+        ? "All conversations resolved"
+        : `${current.id} · ${current.resolved ? "Resolved" : "Open"}`;
+    const statusParts = [
+      `${answered}/${total} answered`,
+      `${resolved}/${total} resolved`,
+      countNoun(drafts, "draft"),
     ];
+    const brand = this.theme.fg(
+      "accent",
+      this.theme.bold("DiffWalk / Threads"),
+    );
+    const groups: PrioritizedLineGroup[] = [];
+
+    if (width >= WIDE_HEADER_WIDTH) {
+      groups.push(
+        {
+          lines: [fitColumns(brand, this.theme.fg("muted", position), width)],
+          priority: 90,
+        },
+        {
+          lines: [
+            fitColumns(
+              this.theme.fg("text", this.theme.bold(title)),
+              this.theme.fg("muted", statusParts.join(" · ")),
+              width,
+            ),
+          ],
+          priority: 80,
+        },
+      );
+    } else if (width >= MEDIUM_HEADER_WIDTH) {
+      groups.push(
+        {
+          lines: [
+            fitLine(`${brand}${this.theme.fg("dim", ` · ${position}`)}`, width),
+          ],
+          priority: 90,
+        },
+        {
+          lines: [
+            fitLine(this.theme.fg("text", this.theme.bold(title)), width),
+          ],
+          priority: 80,
+        },
+        {
+          lines: packStatusParts(statusParts, width).map((line) =>
+            fitLine(this.theme.fg("muted", line), width),
+          ),
+          priority: 40,
+          minimumRows: 6,
+        },
+      );
+    } else {
+      groups.push(
+        { lines: [fitLine(brand, width)], priority: 90 },
+        {
+          lines: [fitLine(this.theme.fg("muted", position), width)],
+          priority: 70,
+        },
+        {
+          lines: [
+            fitLine(this.theme.fg("text", this.theme.bold(title)), width),
+          ],
+          priority: 80,
+        },
+        {
+          lines: packStatusParts(statusParts, width).map((line) =>
+            fitLine(this.theme.fg("muted", line), width),
+          ),
+          priority: 40,
+          minimumRows: 10,
+        },
+      );
+    }
+    return selectHeaderGroups(groups, rows, 2);
   }
 
   private handleThreadsInput(data: string): void {
@@ -505,10 +569,15 @@ export class ReviewThreadComponent implements Component, Focusable {
   }
 
   private page(direction: -1 | 1): void {
-    const viewportHeight = Math.max(1, this.tui.terminal.rows - 4);
+    this.feedback = undefined;
+    const width = Math.max(1, this.tui.terminal.columns);
+    const rows = Math.max(1, this.tui.terminal.rows);
+    const viewportHeight = Math.max(
+      1,
+      rows - this.renderHeader(width, rows).length - 1,
+    );
     this.offset = Math.max(0, this.offset + direction * viewportHeight);
     this.freeScroll = true;
-    this.feedback = undefined;
     this.refresh();
   }
 
@@ -795,30 +864,28 @@ function renderThread(
     );
     if (item === undefined) continue;
     const selectionMarker = selected && first ? "▌" : " ";
+    const turnLabel = `Turn ${turn.sequence}`;
     const reviewerMetadata = first
-      ? `${thread.id} • ${turn.id} • ${status} • You`
-      : `${thread.id} • ${turn.id} • You`;
+      ? `${thread.id} · ${status === "open" ? "Open" : "Resolved"} · ${turnLabel}`
+      : `${thread.id} · ${turnLabel}`;
     const reviewerRows = [
       ...wrapStyled(
         theme.fg(
           "accent",
-          theme.bold(`${selectionMarker} [${reviewerMetadata}]`),
+          theme.bold(`${selectionMarker} ${reviewerMetadata}`),
         ),
         contentWidth,
       ),
+      theme.fg("muted", theme.bold("  You")),
       ...wrapWithPrefix(
         "  ",
         theme.fg("text", safeText(item.reviewerBody)),
         contentWidth,
       ),
     ];
-    const response =
-      item.agentResponse?.body ?? "Awaiting structured Agent response.";
+    const response = item.agentResponse?.body ?? "Awaiting Agent response.";
     const agentRows = [
-      ...wrapStyled(
-        theme.fg("muted", `  [${turn.id} • Agent response]`),
-        contentWidth,
-      ),
+      theme.fg("muted", theme.bold("  Agent")),
       ...wrapWithPrefix(
         "  ",
         theme.fg(
@@ -851,7 +918,7 @@ function renderThread(
   if (thread.draftReply !== undefined) {
     const draftRows = [
       ...wrapStyled(
-        theme.fg("accent", theme.bold("  [Draft follow-up]")),
+        theme.fg("accent", theme.bold("  Draft follow-up")),
         contentWidth,
       ),
       ...wrapWithPrefix(
@@ -971,6 +1038,18 @@ function diffColor(line: DiffLine): Parameters<ThreadUiTheme["fg"]>[0] {
   }
 }
 
+function editorViewport(
+  lines: readonly string[],
+  height: number,
+): readonly string[] {
+  if (height <= 0) return [];
+  if (lines.length <= height) return lines;
+  const content = lines.slice(0, -1);
+  if (content.length === 0) return lines.slice(0, height);
+  if (height === 1) return content.slice(-1);
+  return [...content.slice(-(height - 1)), lines.at(-1) ?? ""];
+}
+
 function wrapWithPrefix(prefix: string, text: string, width: number): string[] {
   const prefixWidth = visibleWidth(prefix);
   if (prefixWidth >= width) return wrapStyled(`${prefix}${text}`, width);
@@ -987,8 +1066,33 @@ function wrapStyled(text: string, width: number): string[] {
   );
 }
 
-function fitLine(line: string, width: number): string {
-  return truncateToWidth(line, Math.max(1, width), "");
+function renderScreenHeader(
+  screen: string,
+  title: string,
+  right: string | undefined,
+  theme: ThreadUiTheme,
+  width: number,
+  rows: number,
+): readonly string[] {
+  const brand = theme.fg("accent", theme.bold(`DiffWalk / ${screen}`));
+  return selectHeaderGroups(
+    [
+      {
+        lines: [
+          right === undefined
+            ? fitLine(brand, width)
+            : fitColumns(brand, theme.fg("muted", right), width),
+        ],
+        priority: 90,
+      },
+      {
+        lines: [fitLine(theme.fg("text", theme.bold(title)), width)],
+        priority: 80,
+      },
+    ],
+    rows,
+    2,
+  );
 }
 
 function fillLine(line: string, width: number): string {

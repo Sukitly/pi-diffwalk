@@ -309,20 +309,26 @@ const ReviewSpanCandidateSchema = Type.Object(
 
 const ReviewUnitCandidateSchema = Type.Object(
   {
-    title: Type.String({ description: "Short title for this review unit" }),
+    title: Type.String({
+      description: "Concise phrase naming this review unit",
+    }),
     whyHere: Type.String({
-      description: "Why this unit belongs at this point in the review order",
+      description:
+        "One concise sentence explaining why this unit belongs here in the review order",
     }),
     context: Type.String({
       description:
-        "Call path, contract, or invariant needed to review this unit",
+        "One to three concise sentences covering only the call path, contract, or invariant needed for this unit",
     }),
     changeSummary: Type.String({
-      description: "Direct description of the change represented by this unit",
+      description:
+        "One or two direct sentences describing the behavior change without patch text",
     }),
     reviewFocus: Type.Array(Type.String(), {
-      description: "Questions naming specific ways this change could be wrong",
+      description:
+        "One to three distinct questions naming specific ways this change could be wrong",
       minItems: 1,
+      maxItems: 3,
     }),
     spans: Type.Array(ReviewSpanCandidateSchema, {
       description:

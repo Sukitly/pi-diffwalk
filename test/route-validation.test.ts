@@ -100,6 +100,41 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
     }),
     false,
   );
+  assert.equal(
+    Value.Check(ReviewRouteCandidateSchema, {
+      ...valid,
+      units: [
+        {
+          ...valid.units[0],
+          reviewFocus: ["One?", "Two?", "Three?", "Four?"],
+        },
+      ],
+    }),
+    false,
+  );
+});
+
+test("rejects more than three review focus questions", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [
+          unit(
+            [
+              span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+              span("src/contract.ts", { new: [2, 2] }),
+            ],
+            { reviewFocus: ["One?", "Two?", "Three?", "Four?"] },
+          ),
+        ]),
+      ),
+    (error: unknown) => codesOf(error).includes("review-focus-limit"),
+  );
 });
 
 test("accepts a route whose units cover every changed line once", () => {
