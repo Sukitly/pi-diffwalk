@@ -91,9 +91,11 @@ A trusted project can add route-planning preferences in:
 .pi/diffwalk/rules.md
 ```
 
-The file contains Markdown instructions for review order, grouping, explanations, and review focus. DiffWalk reads it for every route-planning kickoff, so changes apply the next time `/diffwalk` requests or repeats a route. A missing or blank file preserves the default behavior. The file is limited to 16 KiB to protect the model context.
+The file contains Markdown instructions for review order, grouping, explanations, and review focus. DiffWalk resolves it from the repository root and captures its content once when starting a new review. Repeating route preparation for the same frozen snapshot reuses that content. To apply a local rule change to an existing route request, discard the pending review and start a new one.
 
-Project review rules customize how the agent presents the review. They cannot change the frozen snapshot, route schema, changed-line coverage requirements, read-only preparation rule, or `guided_review` tool contract. DiffWalk ignores the file when the project is not trusted.
+A missing or blank file preserves the default behavior. The file is limited to 16 KiB and must contain valid UTF-8. DiffWalk warns and continues with the default route instructions when the file is unavailable or invalid. An existing file is ignored with a warning when the project is not trusted. If the rules file itself is part of the change under review, DiffWalk ignores it with a warning so unreviewed instructions cannot shape their own review.
+
+Project review rules customize how the agent presents the review. They cannot change the frozen snapshot, route schema, changed-line coverage requirements, read-only preparation rule, or `guided_review` tool contract.
 
 ## Review Units
 
@@ -346,7 +348,8 @@ The current version includes:
 - tracked and untracked file support
 - changed-line addressing with whole-file reconstruction
 - agent-planned review routes with semantic, possibly cross-file, review units
-- an inventory-only agent prompt that carries no file content
+- an inventory-only agent prompt that carries no reviewed source content
+- trusted project review preferences from `.pi/diffwalk/rules.md`
 - complete changed-line coverage validation
 - line-oriented diff navigation
 - inline comment editing and anchored draft display

@@ -21,7 +21,6 @@ import {
   assessRouteQuality,
   formatAdvisoryNudge,
 } from "../src/route-advisory.ts";
-import { DIFFWALK_RULES_SOURCE } from "../src/route-rules.ts";
 import { validateReviewRoute } from "../src/route-validation.ts";
 import type {
   FileChange,
@@ -127,7 +126,6 @@ function kickoffWithoutMoves(): string {
     snapshot,
     computeReviewDelta(snapshot, baseline),
     {
-      source: DIFFWALK_RULES_SOURCE,
       content:
         "- Review compatibility before internal implementation.\n- Keep behavioral tests with the code they prove.",
     },
