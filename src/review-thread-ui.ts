@@ -795,13 +795,14 @@ function renderThread(
     );
     if (item === undefined) continue;
     const selectionMarker = selected && first ? "▌" : " ";
+    const reviewerMetadata = first
+      ? `${thread.id} • ${turn.id} • ${status} • You`
+      : `${thread.id} • ${turn.id} • You`;
     const reviewerRows = [
       ...wrapStyled(
         theme.fg(
           "accent",
-          theme.bold(
-            `${selectionMarker} [${thread.id} • ${turn.id} • ${status} • You]`,
-          ),
+          theme.bold(`${selectionMarker} [${reviewerMetadata}]`),
         ),
         contentWidth,
       ),

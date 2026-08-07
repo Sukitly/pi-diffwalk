@@ -173,6 +173,33 @@ function press(component: ReviewThreadComponent, ...keys: string[]): void {
   for (const key of keys) component.handleInput(key);
 }
 
+function attachAnsweredFollowUp(
+  batch: ReviewThreadBatch,
+  items: readonly {
+    readonly threadId: ReviewCommentId;
+    readonly reviewerBody: string;
+    readonly agentBody: string;
+  }[],
+): ReviewThreadBatch {
+  const pending = appendReviewThreadTurn(batch, {
+    submissionMode: "discuss-first",
+    replies: items.map((item) => ({
+      threadId: item.threadId,
+      body: item.reviewerBody,
+    })),
+  });
+  const turn = pending.turns.at(-1);
+  assert.ok(turn);
+  return attachReviewThreadResponses(pending, {
+    batchId: pending.id,
+    turnId: turn.id,
+    responses: items.map((item) => ({
+      threadId: item.threadId,
+      body: item.agentBody,
+    })),
+  });
+}
+
 test("renders Agent responses at frozen anchors and omits unrelated lines", () => {
   const { answered } = fixture();
   const { component } = createComponent(answered, 40);
@@ -190,29 +217,69 @@ test("renders Agent responses at frozen anchors and omits unrelated lines", () =
 
 test("renders multiple turns in order under the same inline thread", () => {
   const { answered } = fixture();
-  const pendingFollowUp = appendReviewThreadTurn(answered, {
-    submissionMode: "discuss-first",
-    replies: [
-      {
-        threadId: "C1" as ReviewCommentId,
-        body: "Why is that validation sufficient?",
-      },
-    ],
-  });
-  const multiTurn = attachReviewThreadResponses(pendingFollowUp, {
-    batchId: pendingFollowUp.id,
-    turnId: "T2",
-    responses: [
-      { threadId: "C1", body: "The parser rejects every other shape." },
-    ],
-  });
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "Why is that validation sufficient?",
+      agentBody: "The parser rejects every other shape.",
+    },
+  ]);
   const { component } = createComponent(multiTurn, 40);
   const output = component.render(100).join("\n");
 
   assert.match(
     output,
-    /T1 • Agent response[\s\S]*T2 • open • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
+    /C1 • T1 • open • You[\s\S]*T1 • Agent response[\s\S]*C1 • T2 • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
   );
+});
+
+test("renders thread status only on the first turn header", () => {
+  const { answered } = fixture();
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "Why is that validation sufficient?",
+      agentBody: "The parser rejects every other shape.",
+    },
+  ]);
+  const { component } = createComponent(multiTurn, 40);
+  const output = component.render(100).join("\n");
+
+  assert.equal(output.match(/\[C1 • T\d+ • open • You\]/g)?.length, 1);
+  assert.match(output, /\[C1 • T1 • open • You\]/);
+  assert.match(output, /\[C1 • T2 • You\]/);
+});
+
+test("keeps thread ownership visible when paging through later turns", () => {
+  const { answered } = fixture();
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "First follow-up.",
+      agentBody: "First follow-up response.",
+    },
+    {
+      threadId: "C2" as ReviewCommentId,
+      reviewerBody: "Second follow-up.",
+      agentBody: "Second follow-up response.",
+    },
+  ]);
+  const { component } = createComponent(multiTurn, 8);
+
+  press(component, "j");
+  let output = component.render(100).join("\n");
+  for (
+    let attempt = 0;
+    attempt < 10 && !/\[C1 • T2 • You\]/.test(output);
+    attempt += 1
+  ) {
+    press(component, "\u001b[5~");
+    output = component.render(100).join("\n");
+  }
+
+  assert.match(output, /C2 • open • frozen snapshot/);
+  assert.doesNotMatch(output, /\[C1 • T1 • open • You\]/);
+  assert.match(output, /\[C1 • T2 • You\]/);
 });
 
 test("renders full-width reviewer and Agent cards with readable wrapping", () => {
