@@ -1,31 +1,56 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
+  Editor,
+  type EditorTheme,
   type Focusable,
   Key,
   matchesKey,
+  type TUI,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { REVIEW_COMMENT_CONTEXT_RADIUS } from "./review-comments.ts";
-import { setReviewThreadResolved } from "./review-threads.ts";
+import {
+  appendReviewThreadTurn,
+  clearReviewThreadDraft,
+  isReviewThreadAnswered,
+  pendingReviewThreadTurn,
+  ReviewThreadError,
+  setReviewThreadDraft,
+  setReviewThreadResolved,
+} from "./review-threads.ts";
 import type {
   DiffLine,
   FileChange,
   ReviewCommentId,
   ReviewCommentThread,
   ReviewSnapshot,
+  ReviewSubmissionMode,
   ReviewThreadBatch,
+  ReviewThreadTurnId,
 } from "./types.ts";
 
-interface ReviewThreadUiInput {
+export interface ReviewThreadUiInput {
   readonly snapshot: ReviewSnapshot;
   readonly batch: ReviewThreadBatch;
   readonly onBatchChange: (batch: ReviewThreadBatch) => void;
 }
 
+export type ReviewThreadUiResult =
+  | {
+      readonly status: "closed";
+      readonly batch: ReviewThreadBatch;
+    }
+  | {
+      readonly status: "follow-up-submitted";
+      readonly batch: ReviewThreadBatch;
+      readonly turnId: ReviewThreadTurnId;
+    };
+
 type ThreadUiTheme = Pick<Theme, "fg" | "bg" | "bold">;
+type ThreadScreen = "threads" | "reply-editor" | "submission";
 
 interface ThreadRegion {
   readonly change: FileChange;
@@ -40,10 +65,9 @@ interface RenderedThreadRow {
 }
 
 interface ReviewThreadComponentOptions extends ReviewThreadUiInput {
+  readonly tui: TUI;
   readonly theme: ThreadUiTheme;
-  readonly getRows: () => number;
-  readonly requestRender: () => void;
-  readonly onClose: (batch: ReviewThreadBatch) => void;
+  readonly onClose: (result: ReviewThreadUiResult) => void;
 }
 
 export class ReviewThreadUiError extends Error {
@@ -56,7 +80,7 @@ export class ReviewThreadUiError extends Error {
 export async function openReviewThreads(
   ctx: Pick<ExtensionContext, "mode" | "ui">,
   input: ReviewThreadUiInput,
-): Promise<ReviewThreadBatch> {
+): Promise<ReviewThreadUiResult> {
   if (ctx.mode !== "tui") {
     throw new ReviewThreadUiError(
       `DiffWalk comment threads require interactive TUI mode; current mode is ${ctx.mode}.`,
@@ -64,13 +88,12 @@ export async function openReviewThreads(
   }
   assertBatchMatchesSnapshot(input.batch, input.snapshot);
 
-  return ctx.ui.custom<ReviewThreadBatch>(
+  return ctx.ui.custom<ReviewThreadUiResult>(
     (tui, theme, _keybindings, done) =>
       new ReviewThreadComponent({
         ...input,
+        tui,
         theme,
-        getRows: () => tui.terminal.rows,
-        requestRender: () => tui.requestRender(),
         onClose: done,
       }),
     {
@@ -88,36 +111,61 @@ export async function openReviewThreads(
 export class ReviewThreadComponent implements Component, Focusable {
   private readonly snapshot: ReviewSnapshot;
   private batch: ReviewThreadBatch;
+  private readonly tui: TUI;
   private readonly theme: ThreadUiTheme;
-  private readonly getRows: () => number;
-  private readonly requestRender: () => void;
   private readonly onBatchChange: (batch: ReviewThreadBatch) => void;
-  private readonly onClose: (batch: ReviewThreadBatch) => void;
+  private readonly onClose: (result: ReviewThreadUiResult) => void;
+  private readonly hiddenResolvedThreadIds: ReadonlySet<ReviewCommentId>;
   private readonly regions: readonly ThreadRegion[];
+  private readonly editor: Editor;
+  private screen: ThreadScreen = "threads";
+  private submissionMode: ReviewSubmissionMode;
   private threadIndex = 0;
   private offset = 0;
   private freeScroll = false;
   private feedback?: string;
+  private replyInputError?: string;
   private cachedWidth?: number;
   private cachedRows?: number;
   private cachedLines?: readonly string[];
-  focused = false;
+  private _focused = false;
 
   constructor(options: ReviewThreadComponentOptions) {
     assertBatchMatchesSnapshot(options.batch, options.snapshot);
     this.snapshot = structuredClone(options.snapshot);
     this.batch = structuredClone(options.batch);
+    this.hiddenResolvedThreadIds = new Set(
+      this.batch.threads
+        .filter((thread) => thread.resolved)
+        .map((thread) => thread.id),
+    );
+    this.tui = options.tui;
     this.theme = options.theme;
-    this.getRows = options.getRows;
-    this.requestRender = options.requestRender;
     this.onBatchChange = options.onBatchChange;
     this.onClose = options.onClose;
     this.regions = buildThreadRegions(this.snapshot, this.batch);
+    this.submissionMode =
+      this.batch.turns.at(-1)?.submissionMode ?? "discuss-first";
+    this.editor = new Editor(this.tui, createEditorTheme(this.theme), {
+      paddingX: 0,
+    });
+    this.editor.onSubmit = (body) => this.saveDraftReply(body);
+  }
+
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    if (this._focused === value) return;
+    this._focused = value;
+    this.syncEditorFocus();
+    this.refresh();
   }
 
   render(width: number): string[] {
     const renderWidth = Math.max(1, Math.floor(width));
-    const terminalRows = Math.max(1, this.getRows());
+    const terminalRows = Math.max(1, this.tui.terminal.rows);
     if (
       this.cachedWidth === renderWidth &&
       this.cachedRows === terminalRows &&
@@ -125,53 +173,15 @@ export class ReviewThreadComponent implements Component, Focusable {
     ) {
       return [...this.cachedLines];
     }
-    const header = this.renderHeader(renderWidth);
-    const footer = [
-      fitLine(
-        this.theme.fg(
-          "dim",
-          "j/k thread • PgUp/PgDn scroll • r resolve/reopen • Esc close",
-        ),
-        renderWidth,
-      ),
-    ];
-    const feedback =
-      this.feedback === undefined
-        ? []
-        : wrapStyled(
-            this.theme.fg("warning", safeText(this.feedback)),
-            renderWidth,
-          );
-    const viewportHeight = Math.max(
-      0,
-      terminalRows - header.length - feedback.length - footer.length,
+    const lines =
+      this.screen === "threads"
+        ? this.renderThreads(renderWidth, terminalRows)
+        : this.screen === "reply-editor"
+          ? this.renderReplyEditor(renderWidth, terminalRows)
+          : this.renderSubmission(renderWidth, terminalRows);
+    const screen = fillScreenHeight(lines, terminalRows).map((line) =>
+      fillLine(oneTerminalLine(line), renderWidth),
     );
-    const rows = renderThreadRows(
-      this.regions,
-      this.batch,
-      this.currentThread()?.id,
-      this.theme,
-      renderWidth,
-    );
-    this.offset = this.freeScroll
-      ? clampOffset(this.offset, rows.length, viewportHeight)
-      : ensureThreadVisible(
-          rows,
-          this.currentThread()?.id,
-          this.offset,
-          viewportHeight,
-        );
-    const screen = fillScreenHeight(
-      [
-        ...header,
-        ...feedback,
-        ...rows
-          .slice(this.offset, this.offset + viewportHeight)
-          .map((row) => row.text),
-        ...footer,
-      ],
-      terminalRows,
-    ).map((line) => fillLine(oneTerminalLine(line), renderWidth));
     this.cachedWidth = renderWidth;
     this.cachedRows = terminalRows;
     this.cachedLines = screen;
@@ -179,8 +189,226 @@ export class ReviewThreadComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    switch (this.screen) {
+      case "threads":
+        this.handleThreadsInput(data);
+        break;
+      case "reply-editor":
+        this.handleReplyEditorInput(data);
+        break;
+      case "submission":
+        this.handleSubmissionInput(data);
+        break;
+    }
+  }
+
+  invalidate(): void {
+    this.clearCache();
+    this.editor.invalidate();
+  }
+
+  private renderThreads(width: number, rows: number): readonly string[] {
+    const header = this.renderHeader(width);
+    const footer = [
+      fitLine(
+        this.theme.fg(
+          "dim",
+          "j/k thread • PgUp/PgDn scroll • c reply • d delete draft • Enter complete • r resolve/reopen • Esc close",
+        ),
+        width,
+      ),
+    ];
+    const feedback =
+      this.feedback === undefined
+        ? []
+        : wrapStyled(this.theme.fg("warning", safeText(this.feedback)), width);
+    const viewportHeight = Math.max(
+      0,
+      rows - header.length - feedback.length - footer.length,
+    );
+    const renderedRows = renderThreadRows(
+      this.regions,
+      this.batch,
+      this.currentThread()?.id,
+      this.hiddenResolvedThreadIds,
+      this.theme,
+      width,
+    );
+    this.offset = this.freeScroll
+      ? clampOffset(this.offset, renderedRows.length, viewportHeight)
+      : ensureThreadVisible(
+          renderedRows,
+          this.currentThread()?.id,
+          this.offset,
+          viewportHeight,
+        );
+    return [
+      ...header,
+      ...feedback,
+      ...renderedRows
+        .slice(this.offset, this.offset + viewportHeight)
+        .map((row) => row.text),
+      ...footer,
+    ];
+  }
+
+  private renderReplyEditor(width: number, rows: number): readonly string[] {
+    const thread = this.currentThread();
+    const header = [
+      fitLine(
+        this.theme.fg(
+          "accent",
+          this.theme.bold(
+            `DiffWalk reply • ${thread?.id ?? "no thread"} • frozen snapshot ${this.batch.snapshotId}`,
+          ),
+        ),
+        width,
+      ),
+      "",
+    ];
+    const footer = [
+      fitLine(
+        this.theme.fg(
+          "dim",
+          "Enter save draft • Shift+Enter newline • Esc discard edit",
+        ),
+        width,
+      ),
+    ];
+    const bodyHeight = Math.max(0, rows - header.length - footer.length);
+    const body: string[] = [
+      this.theme.fg("accent", this.theme.bold("Reviewer follow-up")),
+    ];
+    if (thread !== undefined) {
+      body.push(
+        ...wrapStyled(
+          this.theme.fg(
+            "muted",
+            `${displayBarePath(thread.anchor.filePath)} ${thread.anchor.side} line ${thread.anchor.line}`,
+          ),
+          width,
+        ),
+      );
+    }
+    if (this.replyInputError !== undefined) {
+      body.push(
+        ...wrapStyled(
+          this.theme.fg("warning", safeText(this.replyInputError)),
+          width,
+        ),
+      );
+    }
+    const remaining = Math.max(0, bodyHeight - body.length);
+    const editorLines = this.editor.render(width);
+    body.push(
+      ...(editorLines.length <= remaining
+        ? editorLines
+        : editorLines.slice(Math.max(0, editorLines.length - remaining))),
+    );
+    return [...header, ...body.slice(0, bodyHeight), ...footer];
+  }
+
+  private renderSubmission(width: number, rows: number): readonly string[] {
+    const drafts = this.draftThreads();
+    const header = [
+      fitLine(
+        this.theme.fg(
+          "accent",
+          this.theme.bold(
+            `DiffWalk follow-up • ${drafts.length} repl${drafts.length === 1 ? "y" : "ies"}`,
+          ),
+        ),
+        width,
+      ),
+      fitLine(
+        this.theme.fg(
+          "muted",
+          `Anchored to frozen snapshot ${this.batch.snapshotId}. New code requires another /diffwalk review.`,
+        ),
+        width,
+      ),
+      "",
+    ];
+    const footer = [
+      fitLine(
+        this.theme.fg(
+          "dim",
+          "←/→ or h/l mode • Enter send to Agent • Esc return",
+        ),
+        width,
+      ),
+    ];
+    const content = [
+      renderMode(
+        "discuss-first",
+        "Discuss first",
+        "Agent investigates and responds without editing files.",
+        this.submissionMode,
+        this.theme,
+        width,
+      ),
+      renderMode(
+        "apply-change-requests",
+        "Apply change requests",
+        "Agent may apply direct requests before responding.",
+        this.submissionMode,
+        this.theme,
+        width,
+      ),
+      "",
+      ...drafts.flatMap((thread) => [
+        ...wrapStyled(
+          this.theme.fg("accent", this.theme.bold(`[${thread.id}]`)),
+          width,
+        ),
+        ...wrapWithPrefix(
+          "  ",
+          this.theme.fg("text", safeText(thread.draftReply ?? "")),
+          width,
+        ),
+        "",
+      ]),
+    ];
+    const bodyHeight = Math.max(0, rows - header.length - footer.length);
+    return [...header, ...content.slice(0, bodyHeight), ...footer];
+  }
+
+  private renderHeader(width: number): readonly string[] {
+    const total = this.batch.threads.length;
+    const visible = this.visibleThreads().length;
+    const answered = this.batch.threads.filter((thread) =>
+      isReviewThreadAnswered(this.batch, thread.id),
+    ).length;
+    const resolved = this.batch.threads.filter(
+      (thread) => thread.resolved,
+    ).length;
+    const drafts = this.draftThreads().length;
+    return [
+      fitLine(
+        this.theme.fg(
+          "accent",
+          this.theme.bold(
+            `DiffWalk threads • ${visible === 0 ? 0 : this.threadIndex + 1}/${visible} visible • answered ${answered}/${total} • resolved ${resolved}/${total} • drafts ${drafts}`,
+          ),
+        ),
+        width,
+      ),
+      fitLine(
+        this.theme.fg(
+          "text",
+          this.currentThread() === undefined
+            ? "All conversations resolved • Enter complete"
+            : `${this.currentThread()?.id} • ${this.currentThread()?.resolved ? "resolved" : "open"} • frozen snapshot`,
+        ),
+        width,
+      ),
+      "",
+    ];
+  }
+
+  private handleThreadsInput(data: string): void {
     if (matchesKey(data, Key.escape)) {
-      this.onClose(structuredClone(this.batch));
+      this.onClose({ status: "closed", batch: structuredClone(this.batch) });
       return;
     }
     if (matchesKey(data, "k") || matchesKey(data, Key.up)) {
@@ -199,53 +427,77 @@ export class ReviewThreadComponent implements Component, Focusable {
       this.page(1);
       return;
     }
+    if (matchesKey(data, "c")) {
+      this.openReplyEditor();
+      return;
+    }
+    if (matchesKey(data, "d")) {
+      this.deleteDraft();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.completeReview();
+      return;
+    }
     if (matchesKey(data, "r")) this.toggleResolved();
   }
 
-  invalidate(): void {
-    this.clearCache();
+  private handleReplyEditorInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      this.editor.setText("");
+      this.replyInputError = undefined;
+      this.openScreen("threads");
+      return;
+    }
+    this.replyInputError = undefined;
+    this.editor.handleInput(data);
+    this.refresh();
   }
 
-  private renderHeader(width: number): readonly string[] {
-    const total = this.batch.threads.length;
-    const answered = this.batch.threads.filter(
-      (thread) => thread.response !== undefined,
-    ).length;
-    const resolved = this.batch.threads.filter(
-      (thread) => thread.resolved,
-    ).length;
-    return [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk threads • ${this.threadIndex + 1}/${total} • answered ${answered}/${total} • resolved ${resolved}/${total}`,
-          ),
-        ),
-        width,
-      ),
-      fitLine(
-        this.theme.fg(
-          "text",
-          this.currentThread() === undefined
-            ? "Comment responses"
-            : `${this.currentThread()?.id} • ${this.currentThread()?.resolved ? "resolved" : "open"}`,
-        ),
-        width,
-      ),
-      "",
-    ];
+  private handleSubmissionInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      this.openScreen("threads");
+      return;
+    }
+    if (
+      matchesKey(data, Key.left) ||
+      matchesKey(data, Key.right) ||
+      matchesKey(data, "h") ||
+      matchesKey(data, "l") ||
+      matchesKey(data, "j") ||
+      matchesKey(data, "k")
+    ) {
+      this.submissionMode =
+        this.submissionMode === "discuss-first"
+          ? "apply-change-requests"
+          : "discuss-first";
+      this.refresh();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) this.submitFollowUps();
   }
 
   private currentThread(): ReviewCommentThread | undefined {
-    return this.batch.threads[this.threadIndex];
+    return this.visibleThreads()[this.threadIndex];
+  }
+
+  private visibleThreads(): readonly ReviewCommentThread[] {
+    return this.batch.threads.filter(
+      (thread) => !this.hiddenResolvedThreadIds.has(thread.id),
+    );
+  }
+
+  private draftThreads(): readonly ReviewCommentThread[] {
+    return this.batch.threads.filter(
+      (thread) => thread.draftReply !== undefined,
+    );
   }
 
   private moveThread(delta: number): void {
     this.threadIndex = clamp(
       this.threadIndex + delta,
       0,
-      this.batch.threads.length - 1,
+      this.visibleThreads().length - 1,
     );
     this.freeScroll = false;
     this.feedback = undefined;
@@ -253,29 +505,132 @@ export class ReviewThreadComponent implements Component, Focusable {
   }
 
   private page(direction: -1 | 1): void {
-    const viewportHeight = Math.max(1, this.getRows() - 4);
+    const viewportHeight = Math.max(1, this.tui.terminal.rows - 4);
     this.offset = Math.max(0, this.offset + direction * viewportHeight);
     this.freeScroll = true;
     this.feedback = undefined;
     this.refresh();
   }
 
-  private toggleResolved(): void {
+  private openReplyEditor(): void {
     const thread = this.currentThread();
     if (thread === undefined) return;
-    if (thread.response === undefined) {
-      this.feedback = "The Agent has not answered this comment yet.";
+    if (thread.resolved) {
+      this.feedback = `Thread ${thread.id} must be reopened before replying.`;
       this.refresh();
       return;
     }
-    this.batch = setReviewThreadResolved(
-      this.batch,
-      thread.id,
-      !thread.resolved,
-    );
-    this.onBatchChange(structuredClone(this.batch));
+    const pending = pendingReviewThreadTurn(this.batch);
+    if (pending !== undefined) {
+      this.feedback = `Turn ${pending.id} is still awaiting Agent responses.`;
+      this.refresh();
+      return;
+    }
+    this.editor.setText(thread.draftReply ?? "");
+    this.replyInputError = undefined;
     this.feedback = undefined;
+    this.openScreen("reply-editor");
+  }
+
+  private saveDraftReply(body: string): void {
+    const thread = this.currentThread();
+    if (thread === undefined) return;
+    try {
+      this.updateBatch(setReviewThreadDraft(this.batch, thread.id, body));
+      this.editor.setText("");
+      this.replyInputError = undefined;
+      this.openScreen("threads");
+    } catch (error: unknown) {
+      if (error instanceof ReviewThreadError) {
+        this.replyInputError = error.message;
+        this.syncEditorFocus();
+        this.refresh();
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private deleteDraft(): void {
+    const thread = this.currentThread();
+    if (thread === undefined) return;
+    const next = clearReviewThreadDraft(this.batch, thread.id);
+    if (next === this.batch) {
+      this.feedback = `Thread ${thread.id} has no draft reply.`;
+    } else {
+      this.updateBatch(next);
+      this.feedback = `Deleted the draft reply for ${thread.id}.`;
+    }
     this.refresh();
+  }
+
+  private completeReview(): void {
+    if (this.draftThreads().length === 0) {
+      this.onClose({ status: "closed", batch: structuredClone(this.batch) });
+      return;
+    }
+    this.feedback = undefined;
+    this.openScreen("submission");
+  }
+
+  private submitFollowUps(): void {
+    const drafts = this.draftThreads();
+    if (drafts.length === 0) {
+      this.openScreen("threads");
+      return;
+    }
+    const submitted = appendReviewThreadTurn(this.batch, {
+      submissionMode: this.submissionMode,
+      replies: drafts.map((thread) => ({
+        threadId: thread.id,
+        body: thread.draftReply ?? "",
+      })),
+    });
+    this.updateBatch(submitted);
+    const turn = submitted.turns.at(-1);
+    if (turn === undefined) {
+      throw new ReviewThreadUiError(
+        `Batch ${submitted.id} has no submitted follow-up turn.`,
+      );
+    }
+    this.onClose({
+      status: "follow-up-submitted",
+      batch: structuredClone(submitted),
+      turnId: turn.id,
+    });
+  }
+
+  private toggleResolved(): void {
+    const thread = this.currentThread();
+    if (thread === undefined) return;
+    try {
+      this.updateBatch(
+        setReviewThreadResolved(this.batch, thread.id, !thread.resolved),
+      );
+      this.feedback = undefined;
+    } catch (error: unknown) {
+      if (error instanceof ReviewThreadError) {
+        this.feedback = error.message;
+      } else {
+        throw error;
+      }
+    }
+    this.refresh();
+  }
+
+  private updateBatch(batch: ReviewThreadBatch): void {
+    this.batch = batch;
+    this.onBatchChange(structuredClone(batch));
+  }
+
+  private openScreen(screen: ThreadScreen): void {
+    this.screen = screen;
+    this.syncEditorFocus();
+    this.refresh();
+  }
+
+  private syncEditorFocus(): void {
+    this.editor.focused = this._focused && this.screen === "reply-editor";
   }
 
   private clearCache(): void {
@@ -286,7 +641,7 @@ export class ReviewThreadComponent implements Component, Focusable {
 
   private refresh(): void {
     this.clearCache();
-    this.requestRender();
+    this.tui.requestRender();
   }
 }
 
@@ -299,7 +654,7 @@ function assertBatchMatchesSnapshot(
       `Thread batch ${batch.id} references snapshot ${batch.snapshotId}, not ${snapshot.id}.`,
     );
   }
-  if (batch.threads.length === 0) {
+  if (batch.threads.length === 0 || batch.turns.length === 0) {
     throw new ReviewThreadUiError(`Thread batch ${batch.id} is empty.`);
   }
 }
@@ -314,10 +669,10 @@ function buildThreadRegions(
   const regions: ThreadRegion[] = [];
 
   for (const thread of batch.threads) {
-    const change = changes.get(thread.comment.fileChangeId);
+    const change = changes.get(thread.anchor.fileChangeId);
     if (change === undefined) {
       throw new ReviewThreadUiError(
-        `Thread ${thread.id} references missing file change ${thread.comment.fileChangeId}.`,
+        `Thread ${thread.id} references missing file change ${thread.anchor.fileChangeId}.`,
       );
     }
     if (change.content.type !== "text") {
@@ -326,9 +681,9 @@ function buildThreadRegions(
       );
     }
     const anchorIndex = change.content.lines.findIndex((line) =>
-      thread.comment.side === "new"
-        ? line.newLine === thread.comment.line && line.type === "added"
-        : line.oldLine === thread.comment.line && line.type === "removed",
+      thread.anchor.side === "new"
+        ? line.newLine === thread.anchor.line && line.type === "added"
+        : line.oldLine === thread.anchor.line && line.type === "removed",
     );
     if (anchorIndex < 0) {
       throw new ReviewThreadUiError(
@@ -359,6 +714,7 @@ function renderThreadRows(
   regions: readonly ThreadRegion[],
   batch: ReviewThreadBatch,
   selectedId: ReviewCommentId | undefined,
+  hiddenResolvedThreadIds: ReadonlySet<ReviewCommentId>,
   theme: ThreadUiTheme,
   width: number,
 ): readonly RenderedThreadRow[] {
@@ -366,8 +722,12 @@ function renderThreadRows(
     batch.threads.map((thread) => [thread.id, thread]),
   );
   const rows: RenderedThreadRow[] = [];
-  for (const [regionIndex, region] of regions.entries()) {
-    if (regionIndex > 0) rows.push({ text: "" });
+  for (const region of regions) {
+    const visibleRegionThreads = region.threads.filter(
+      (thread) => !hiddenResolvedThreadIds.has(thread.id),
+    );
+    if (visibleRegionThreads.length === 0) continue;
+    if (rows.length > 0) rows.push({ text: "" });
     rows.push(
       ...wrapStyled(
         theme.fg("accent", theme.bold(displayChangePath(region.change))),
@@ -380,12 +740,12 @@ function renderThreadRows(
       );
     }
     const threadsByAnchor = new Map<number, ReviewCommentThread[]>();
-    for (const original of region.threads) {
+    for (const original of visibleRegionThreads) {
       const thread = currentThreads.get(original.id) ?? original;
       const anchorIndex = region.change.content.lines.findIndex((line) =>
-        thread.comment.side === "new"
-          ? line.newLine === thread.comment.line && line.type === "added"
-          : line.oldLine === thread.comment.line && line.type === "removed",
+        thread.anchor.side === "new"
+          ? line.newLine === thread.anchor.line && line.type === "added"
+          : line.oldLine === thread.anchor.line && line.type === "removed",
       );
       const list = threadsByAnchor.get(anchorIndex) ?? [];
       list.push(thread);
@@ -399,7 +759,13 @@ function renderThreadRows(
       );
       for (const thread of threadsByAnchor.get(index) ?? []) {
         rows.push(
-          ...renderThread(thread, thread.id === selectedId, theme, width),
+          ...renderThread(
+            thread,
+            batch,
+            thread.id === selectedId,
+            theme,
+            width,
+          ),
         );
       }
     }
@@ -412,57 +778,99 @@ const THREAD_CARD_MAX_WIDTH = 120;
 
 function renderThread(
   thread: ReviewCommentThread,
+  batch: ReviewThreadBatch,
   selected: boolean,
   theme: ThreadUiTheme,
   width: number,
 ): readonly RenderedThreadRow[] {
+  const rows: RenderedThreadRow[] = [];
   const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
   const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
   const status = thread.resolved ? "resolved" : "open";
-  const selectionMarker = selected ? "▌" : " ";
-  const reviewerRows = [
-    ...wrapStyled(
-      theme.fg(
-        "accent",
-        theme.bold(`${selectionMarker} [${thread.id} • ${status} • You]`),
+  let first = true;
+
+  for (const turn of batch.turns) {
+    const item = turn.items.find(
+      (candidate) => candidate.threadId === thread.id,
+    );
+    if (item === undefined) continue;
+    const selectionMarker = selected && first ? "▌" : " ";
+    const reviewerRows = [
+      ...wrapStyled(
+        theme.fg(
+          "accent",
+          theme.bold(
+            `${selectionMarker} [${thread.id} • ${turn.id} • ${status} • You]`,
+          ),
+        ),
+        contentWidth,
       ),
-      contentWidth,
-    ),
-    ...wrapWithPrefix(
-      "  ",
-      theme.fg("text", safeText(thread.comment.body)),
-      contentWidth,
-    ),
-  ];
-  const response = thread.response?.body ?? "Awaiting structured response.";
-  const agentRows = [
-    ...wrapStyled(theme.fg("muted", "  [Agent response]"), contentWidth),
-    ...wrapWithPrefix(
-      "  ",
-      theme.fg(
-        thread.response === undefined ? "warning" : "text",
-        safeText(response),
+      ...wrapWithPrefix(
+        "  ",
+        theme.fg("text", safeText(item.reviewerBody)),
+        contentWidth,
       ),
-      contentWidth,
-    ),
-  ];
-  return [
-    ...renderBackgroundBlock(
-      reviewerRows,
-      "userMessageBg",
-      theme,
-      width,
-      DIFF_GUTTER_WIDTH,
-    ).map((text) => ({ text, commentId: thread.id })),
-    ...renderBackgroundBlock(
-      agentRows,
-      "customMessageBg",
-      theme,
-      width,
-      DIFF_GUTTER_WIDTH,
-    ).map((text) => ({ text, commentId: thread.id })),
-    { text: "" },
-  ];
+    ];
+    const response =
+      item.agentResponse?.body ?? "Awaiting structured Agent response.";
+    const agentRows = [
+      ...wrapStyled(
+        theme.fg("muted", `  [${turn.id} • Agent response]`),
+        contentWidth,
+      ),
+      ...wrapWithPrefix(
+        "  ",
+        theme.fg(
+          item.agentResponse === undefined ? "warning" : "text",
+          safeText(response),
+        ),
+        contentWidth,
+      ),
+    ];
+    rows.push(
+      ...renderBackgroundBlock(
+        reviewerRows,
+        "userMessageBg",
+        theme,
+        width,
+        DIFF_GUTTER_WIDTH,
+      ).map((text) => ({ text, commentId: thread.id })),
+      ...renderBackgroundBlock(
+        agentRows,
+        "customMessageBg",
+        theme,
+        width,
+        DIFF_GUTTER_WIDTH,
+      ).map((text) => ({ text, commentId: thread.id })),
+      { text: "", commentId: thread.id },
+    );
+    first = false;
+  }
+
+  if (thread.draftReply !== undefined) {
+    const draftRows = [
+      ...wrapStyled(
+        theme.fg("accent", theme.bold("  [Draft follow-up]")),
+        contentWidth,
+      ),
+      ...wrapWithPrefix(
+        "  ",
+        theme.fg("text", safeText(thread.draftReply)),
+        contentWidth,
+      ),
+    ];
+    rows.push(
+      ...renderBackgroundBlock(
+        draftRows,
+        "userMessageBg",
+        theme,
+        width,
+        DIFF_GUTTER_WIDTH,
+      ).map((text) => ({ text, commentId: thread.id })),
+      { text: "", commentId: thread.id },
+    );
+  }
+  return rows;
 }
 
 function renderDiffLine(
@@ -480,6 +888,35 @@ function renderDiffLine(
     theme.fg(diffColor(line), `${marker}${safeText(line.text)}`),
     width,
   );
+}
+
+function renderMode(
+  value: ReviewSubmissionMode,
+  title: string,
+  description: string,
+  selectedMode: ReviewSubmissionMode,
+  theme: ThreadUiTheme,
+  width: number,
+): string {
+  const selected = value === selectedMode;
+  const text = `${selected ? ">" : " "} ${title}: ${description}`;
+  const fitted = truncateToWidth(safeText(text), width, "", true);
+  return selected
+    ? theme.bg("selectedBg", theme.fg("text", fitted))
+    : theme.fg("dim", fitted);
+}
+
+function createEditorTheme(theme: ThreadUiTheme): EditorTheme {
+  return {
+    borderColor: (text) => theme.fg("accent", text),
+    selectList: {
+      selectedPrefix: (text) => theme.fg("accent", text),
+      selectedText: (text) => theme.fg("accent", text),
+      description: (text) => theme.fg("muted", text),
+      scrollInfo: (text) => theme.fg("dim", text),
+      noMatch: (text) => theme.fg("warning", text),
+    },
+  };
 }
 
 function ensureThreadVisible(

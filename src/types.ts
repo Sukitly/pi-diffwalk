@@ -14,6 +14,7 @@ export type FileChangeId = Brand<string, "FileChangeId">;
 export type NoticeId = Brand<string, "NoticeId">;
 export type ReviewUnitId = Brand<string, "ReviewUnitId">;
 export type ReviewThreadBatchId = Brand<string, "ReviewThreadBatchId">;
+export type ReviewThreadTurnId = Brand<string, "ReviewThreadTurnId">;
 export type ReviewCommentId = Brand<string, "ReviewCommentId">;
 export type GitObjectId = Brand<string, "GitObjectId">;
 export type StateFingerprint = Brand<string, "StateFingerprint">;
@@ -409,11 +410,26 @@ export interface AgentReviewResponse {
   readonly body: string;
 }
 
+export type ReviewThreadAnchor = Omit<ReviewComment, "body">;
+
 export interface ReviewCommentThread {
   readonly id: ReviewCommentId;
-  readonly comment: ReviewComment;
-  readonly response?: AgentReviewResponse;
+  readonly anchor: ReviewThreadAnchor;
   readonly resolved: boolean;
+  readonly draftReply?: string;
+}
+
+export interface ReviewThreadTurnItem {
+  readonly threadId: ReviewCommentId;
+  readonly reviewerBody: string;
+  readonly agentResponse?: AgentReviewResponse;
+}
+
+export interface ReviewThreadTurn {
+  readonly id: ReviewThreadTurnId;
+  readonly sequence: number;
+  readonly submissionMode: ReviewSubmissionMode;
+  readonly items: readonly ReviewThreadTurnItem[];
 }
 
 export interface ReviewThreadBatch {
@@ -421,8 +437,8 @@ export interface ReviewThreadBatch {
   readonly seriesId: ReviewSeriesId;
   readonly roundId: ReviewRoundId;
   readonly snapshotId: SnapshotId;
-  readonly submissionMode: ReviewSubmissionMode;
   readonly threads: readonly ReviewCommentThread[];
+  readonly turns: readonly ReviewThreadTurn[];
 }
 
 export interface SubmittedGuidedReviewResult {
@@ -431,6 +447,7 @@ export interface SubmittedGuidedReviewResult {
   readonly submissionMode: ReviewSubmissionMode;
   readonly comments: readonly ReviewComment[];
   readonly commentBatchId?: ReviewThreadBatchId;
+  readonly commentTurnId?: ReviewThreadTurnId;
 }
 
 export interface PausedGuidedReviewResult {

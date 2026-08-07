@@ -1,24 +1,57 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+  CURSOR_MARKER,
+  type Terminal,
+  TuiMainScreen,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { ReviewSession } from "../src/review-comments.ts";
 import { computeReviewDelta } from "../src/review-delta.ts";
 import {
   ReviewThreadComponent,
   ReviewThreadUiError,
+  type ReviewThreadUiResult,
 } from "../src/review-thread-ui.ts";
 import {
+  appendReviewThreadTurn,
   attachReviewThreadResponses,
   createReviewThreadBatch,
+  setReviewThreadResolved,
 } from "../src/review-threads.ts";
 import { validateReviewRoute } from "../src/route-validation.ts";
 import type {
+  ReviewCommentId,
   ReviewRoundId,
   ReviewSeriesId,
   ReviewThreadBatch,
 } from "../src/types.ts";
 import { fileChangeId, makeSnapshot, span } from "./domain-fixtures.ts";
+
+class FakeTerminal implements Terminal {
+  columns: number;
+  rows: number;
+  readonly kittyProtocolActive = false;
+
+  constructor(columns = 80, rows = 24) {
+    this.columns = columns;
+    this.rows = rows;
+  }
+
+  start(_onInput: (data: string) => void, _onResize: () => void): void {}
+  stop(): void {}
+  async drainInput(): Promise<void> {}
+  write(_data: string): void {}
+  moveBy(_lines: number): void {}
+  hideCursor(): void {}
+  showCursor(): void {}
+  clearLine(): void {}
+  clearFromCursor(): void {}
+  clearScreen(): void {}
+  setTitle(_title: string): void {}
+  setProgress(_active: boolean): void {}
+}
 
 const plainTheme = {
   fg: (_color: ThemeColor, text: string) => text,
@@ -104,9 +137,10 @@ function fixture(): {
   });
   const answered = attachReviewThreadResponses(pending, {
     batchId: pending.id,
+    turnId: "T1",
     responses: [
-      { commentId: "C1", body: "The first line validates the input." },
-      { commentId: "C2", body: "The contract test guarantees the second." },
+      { threadId: "C1", body: "The first line validates the input." },
+      { threadId: "C2", body: "The contract test guarantees the second." },
     ],
   });
   return { snapshot, pending, answered };
@@ -118,47 +152,84 @@ function createComponent(
   theme: Pick<Theme, "fg" | "bg" | "bold"> = plainTheme,
 ) {
   const { snapshot } = fixture();
+  const terminal = new FakeTerminal(100, rows);
+  const tui = new TuiMainScreen(terminal, false);
   const changes: ReviewThreadBatch[] = [];
-  const closed: ReviewThreadBatch[] = [];
+  const outcomes: ReviewThreadUiResult[] = [];
   const component = new ReviewThreadComponent({
     snapshot,
     batch,
+    tui,
     theme,
-    getRows: () => rows,
-    requestRender() {},
     onBatchChange: (next) => changes.push(next),
-    onClose: (next) => closed.push(next),
+    onClose: (result) => outcomes.push(result),
   });
-  return { component, changes, closed };
+  tui.addChild(component);
+  tui.setFocus(component);
+  return { component, terminal, changes, outcomes };
 }
 
-test("renders Agent responses at comment anchors and omits unrelated route lines", () => {
+function press(component: ReviewThreadComponent, ...keys: string[]): void {
+  for (const key of keys) component.handleInput(key);
+}
+
+test("renders Agent responses at frozen anchors and omits unrelated lines", () => {
   const { answered } = fixture();
   const { component } = createComponent(answered, 40);
   const output = component.render(100).join("\n");
 
-  assert.match(output, /\+first changed[\s\S]*\[C1 • open • You\]/);
+  assert.match(output, /\+first changed[\s\S]*\[C1 • T1 • open • You\]/);
   assert.match(
     output,
-    /Why is the first line needed\?[\s\S]*\[Agent response\][\s\S]*first line validates/,
+    /Why is the first line needed\?[\s\S]*\[T1 • Agent response\][\s\S]*first line validates/,
   );
-  assert.match(output, /\+second changed[\s\S]*\[C2 • open • You\]/);
+  assert.match(output, /\+second changed[\s\S]*\[C2 • T1 • open • You\]/);
   assert.match(output, /contract test guarantees the second/);
   assert.doesNotMatch(output, /outside start|outside end|unrelated 10/);
 });
 
+test("renders multiple turns in order under the same inline thread", () => {
+  const { answered } = fixture();
+  const pendingFollowUp = appendReviewThreadTurn(answered, {
+    submissionMode: "discuss-first",
+    replies: [
+      {
+        threadId: "C1" as ReviewCommentId,
+        body: "Why is that validation sufficient?",
+      },
+    ],
+  });
+  const multiTurn = attachReviewThreadResponses(pendingFollowUp, {
+    batchId: pendingFollowUp.id,
+    turnId: "T2",
+    responses: [
+      { threadId: "C1", body: "The parser rejects every other shape." },
+    ],
+  });
+  const { component } = createComponent(multiTurn, 40);
+  const output = component.render(100).join("\n");
+
+  assert.match(
+    output,
+    /T1 • Agent response[\s\S]*T2 • open • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
+  );
+});
+
 test("renders full-width reviewer and Agent cards with readable wrapping", () => {
   const { answered } = fixture();
-  const longAnswer = {
+  const longAnswer: ReviewThreadBatch = {
     ...answered,
-    threads: answered.threads.map((thread, index) =>
-      index === 0
-        ? {
-            ...thread,
-            response: { body: "Long grounded response ".repeat(20) },
-          }
-        : thread,
-    ),
+    turns: answered.turns.map((turn) => ({
+      ...turn,
+      items: turn.items.map((item, index) =>
+        index === 0
+          ? {
+              ...item,
+              agentResponse: { body: "Long grounded response ".repeat(20) },
+            }
+          : item,
+      ),
+    })),
   };
   const width = 160;
   const { component } = createComponent(longAnswer, 50, cardTheme);
@@ -171,17 +242,15 @@ test("renders full-width reviewer and Agent cards with readable wrapping", () =>
   );
   const agentRows = lines.filter((line) => line.startsWith(agentBackground));
 
-  assert.ok(reviewerRows.some((line) => line.includes("▌ [C1 • open • You]")));
   assert.ok(
-    reviewerRows.some((line) => line.startsWith(`${reviewerBackground}  Why`)),
+    reviewerRows.some((line) => line.includes("▌ [C1 • T1 • open • You]")),
   );
-  assert.ok(agentRows.some((line) => line.includes("[Agent response]")));
+  assert.ok(agentRows.some((line) => line.includes("[T1 • Agent response]")));
   assert.ok(
     agentRows.some((line) =>
       line.startsWith(`${agentBackground}  Long grounded response`),
     ),
   );
-  assert.ok(agentRows.length > answered.threads.length * 2);
   assert.equal(
     [...reviewerRows, ...agentRows].every(
       (line) => visibleWidth(line) === width && line.endsWith("\u001b[49m"),
@@ -190,34 +259,120 @@ test("renders full-width reviewer and Agent cards with readable wrapping", () =>
   );
 });
 
-test("lets only the reviewer resolve and reopen answered threads", () => {
+test("uses the embedded Editor for multiline Chinese follow-up drafts", () => {
   const { answered } = fixture();
-  const { component, changes, closed } = createComponent(answered, 30);
+  const { component, changes } = createComponent(answered, 28);
 
-  component.handleInput("r");
-  assert.equal(changes.at(-1)?.threads[0]?.resolved, true);
-  assert.match(component.render(90).join("\n"), /C1 • resolved/);
+  press(component, "c");
+  assert.match(component.render(100).join("\n"), /Reviewer follow-up/);
+  assert.ok(component.render(100).join("\n").includes(CURSOR_MARKER));
+  press(component, "请", "解", "释", "\n", "失", "败", "路", "径", "\r");
 
-  component.handleInput("r");
-  assert.equal(changes.at(-1)?.threads[0]?.resolved, false);
-
-  component.handleInput("j");
-  component.handleInput("r");
-  assert.equal(changes.at(-1)?.threads[1]?.resolved, true);
-
-  component.handleInput("\u001b");
-  assert.equal(closed[0]?.threads[1]?.resolved, true);
+  assert.equal(changes.at(-1)?.threads[0]?.draftReply, "请解释\n失败路径");
+  assert.match(
+    component.render(100).join("\n"),
+    /\[Draft follow-up\][\s\S]*请解释[\s\S]*失败路径/,
+  );
 });
 
-test("keeps unanswered threads open and explains why resolve is blocked", () => {
+test("submits saved drafts as a new pending turn with a selectable mode", () => {
+  const { answered } = fixture();
+  const { component, changes, outcomes } = createComponent(answered, 28);
+
+  press(component, "c", "F", "i", "x", " ", "t", "h", "i", "s", "\r");
+  press(component, "\r");
+  assert.match(component.render(100).join("\n"), /DiffWalk follow-up/);
+  press(component, "l", "\r");
+
+  const outcome = outcomes[0];
+  assert.equal(outcome?.status, "follow-up-submitted");
+  if (outcome?.status !== "follow-up-submitted") {
+    throw new Error("Expected a submitted follow-up.");
+  }
+  assert.equal(outcome.turnId, "T2");
+  assert.equal(outcome.batch.turns[1]?.submissionMode, "apply-change-requests");
+  assert.equal(outcome.batch.turns[1]?.items[0]?.reviewerBody, "Fix this");
+  assert.equal(outcome.batch.threads[0]?.draftReply, undefined);
+  assert.equal(changes.at(-1)?.turns.length, 2);
+});
+
+test("completes with Enter when there are no draft follow-ups", () => {
+  const { answered } = fixture();
+  const { component, outcomes } = createComponent(answered, 24);
+
+  press(component, "\r");
+
+  assert.equal(outcomes[0]?.status, "closed");
+  assert.deepEqual(outcomes[0]?.batch, answered);
+});
+
+test("hides previously resolved threads in later follow-up views", () => {
+  const { answered } = fixture();
+  const resolvedFirst = setReviewThreadResolved(
+    answered,
+    "C1" as ReviewCommentId,
+    true,
+  );
+  const firstView = createComponent(resolvedFirst, 30);
+  const firstOutput = firstView.component.render(100).join("\n");
+
+  assert.doesNotMatch(firstOutput, /C1|Why is the first line needed/);
+  assert.match(firstOutput, /C2 • T1 • open/);
+
+  press(firstView.component, "r");
+  assert.match(
+    firstView.component.render(100).join("\n"),
+    /C2 • T1 • resolved/,
+  );
+  press(firstView.component, "\r");
+
+  const completed = firstView.outcomes[0];
+  assert.equal(completed?.status, "closed");
+  if (completed === undefined) throw new Error("Expected a completed view.");
+
+  const laterView = createComponent(completed.batch, 30);
+  const laterOutput = laterView.component.render(100).join("\n");
+  assert.match(laterOutput, /All conversations resolved • Enter complete/);
+  assert.doesNotMatch(laterOutput, /C1|C2|first changed|second changed/);
+});
+
+test("lets only the reviewer resolve answered threads without drafts", () => {
+  const { answered } = fixture();
+  const { component, changes, outcomes } = createComponent(answered, 30);
+
+  press(component, "r");
+  assert.equal(changes.at(-1)?.threads[0]?.resolved, true);
+  assert.match(component.render(90).join("\n"), /C1 • T1 • resolved/);
+
+  press(component, "c");
+  assert.match(component.render(90).join("\n"), /must be reopened/);
+  press(component, "r", "c", "D", "r", "a", "f", "t", "\r", "r");
+  assert.match(
+    component.render(90).join("\n"),
+    /draft reply.*submitted or deleted/,
+  );
+
+  press(component, "d", "r", "\r");
+  assert.equal(outcomes[0]?.status, "closed");
+  assert.equal(outcomes[0]?.batch.threads[0]?.resolved, true);
+});
+
+test("keeps unanswered turns open and blocks another reply", () => {
   const { pending } = fixture();
   const { component, changes } = createComponent(pending, 24);
 
-  component.handleInput("r");
-
+  press(component, "r");
   assert.deepEqual(changes, []);
-  assert.match(component.render(80).join("\n"), /has not answered/);
-  assert.match(component.render(80).join("\n"), /Awaiting structured response/);
+  assert.match(component.render(80).join("\n"), /cannot be resolved/);
+  press(component, "c");
+  assert.match(
+    component.render(80).join("\n"),
+    /still awaiting Agent responses/,
+  );
+  assert.match(
+    component.render(80).join("\n"),
+    /Awaiting structured Agent response/,
+  );
 });
 
 test("bounds every thread UI row on narrow terminals", () => {
@@ -238,15 +393,16 @@ test("bounds every thread UI row on narrow terminals", () => {
 test("rejects a thread batch for another frozen snapshot", () => {
   const { answered } = fixture();
   const other = makeSnapshot("other-snapshot", []);
+  const terminal = new FakeTerminal();
+  const tui = new TuiMainScreen(terminal, false);
 
   assert.throws(
     () =>
       new ReviewThreadComponent({
         snapshot: other,
         batch: answered,
+        tui,
         theme: plainTheme,
-        getRows: () => 24,
-        requestRender() {},
         onBatchChange() {},
         onClose() {},
       }),

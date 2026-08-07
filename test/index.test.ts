@@ -18,6 +18,7 @@ import {
   createPiGitRunner,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+  DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
   type DiffWalkDependencies,
   formatGuidedReviewResult,
   type KickoffMessageDetails,
@@ -31,7 +32,9 @@ import {
 import { computeReviewDelta } from "../src/review-delta.ts";
 import { DIFFWALK_SERIES_ENTRY_TYPE } from "../src/review-persistence.ts";
 import { DIFFWALK_THREAD_BATCH_ENTRY_TYPE } from "../src/review-thread-persistence.ts";
+import type { ReviewThreadUiResult } from "../src/review-thread-ui.ts";
 import {
+  appendReviewThreadTurn,
   REVIEW_RESPONSES_TOOL_NAME,
   type ReviewResponseCandidateSchema,
   setReviewThreadResolved,
@@ -58,7 +61,7 @@ type GuidedToolDefinition = ToolDefinition<
 
 type ResponseToolDefinition = ToolDefinition<
   typeof ReviewResponseCandidateSchema,
-  ReviewThreadBatch
+  ReviewThreadUiResult
 >;
 
 interface HarnessBehavior {
@@ -69,6 +72,7 @@ interface HarnessBehavior {
   markProgressOnOpen: boolean;
   submissionDrift: boolean;
   resolveThreadOnOpen: boolean;
+  submitFollowUpOnThreadOpen: boolean;
   rulesResult: DiffWalkRulesLoadResult;
   rulesError?: Error;
   snapshot: ReviewSnapshot;
@@ -120,6 +124,7 @@ function createHarness(
     markProgressOnOpen: false,
     submissionDrift: false,
     resolveThreadOnOpen: false,
+    submitFollowUpOnThreadOpen: false,
     rulesResult: { status: "absent" },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
@@ -217,19 +222,37 @@ function createHarness(
     },
     async openReviewThreads(_ctx, input) {
       openedThreadBatches.push(input.batch.id);
-      if (
-        behavior.resolveThreadOnOpen &&
-        input.batch.threads[0]?.response !== undefined
-      ) {
+      const firstThread = input.batch.threads[0];
+      assert.ok(firstThread);
+      if (behavior.resolveThreadOnOpen && input.batch.turns[0] !== undefined) {
         const resolved = setReviewThreadResolved(
           input.batch,
-          input.batch.threads[0].id,
+          firstThread.id,
           true,
         );
         input.onBatchChange(resolved);
-        return resolved;
+        return { status: "closed", batch: resolved };
       }
-      return input.batch;
+      if (behavior.submitFollowUpOnThreadOpen) {
+        const followedUp = appendReviewThreadTurn(input.batch, {
+          submissionMode: "discuss-first",
+          replies: [
+            {
+              threadId: firstThread.id,
+              body: "Explain that answer further.",
+            },
+          ],
+        });
+        input.onBatchChange(followedUp);
+        const turn = followedUp.turns.at(-1);
+        assert.ok(turn);
+        return {
+          status: "follow-up-submitted",
+          batch: followedUp,
+          turnId: turn.id,
+        };
+      }
+      return { status: "closed", batch: input.batch };
     },
     async openGuidedReview(_ctx, input) {
       openedSnapshots.push(input.review.snapshot.id);
@@ -792,12 +815,25 @@ test("accepts complete structured responses and opens anchored threads", async (
   assert.equal(result.status, "submitted");
   if (result.status !== "submitted") throw new Error("Expected submission.");
   assert.ok(result.commentBatchId);
+  assert.ok(harness.responseTool.prepareArguments);
+  assert.deepEqual(
+    harness.responseTool.prepareArguments({
+      batchId: result.commentBatchId,
+      responses: [{ commentId: "C1", body: "Legacy response." }],
+    }),
+    {
+      batchId: result.commentBatchId,
+      turnId: "T1",
+      responses: [{ threadId: "C1", body: "Legacy response." }],
+    },
+  );
 
   const responses = await harness.responseTool.execute(
     "call-responses",
     {
       batchId: result.commentBatchId,
-      responses: [{ commentId: "C1", body: "The behavior is intentional." }],
+      turnId: result.commentTurnId ?? "T1",
+      responses: [{ threadId: "C1", body: "The behavior is intentional." }],
     },
     undefined,
     undefined,
@@ -806,7 +842,7 @@ test("accepts complete structured responses and opens anchored threads", async (
 
   assert.equal(responses.terminate, true);
   assert.equal(
-    responses.details?.threads[0]?.response?.body,
+    responses.details?.batch.turns[0]?.items[0]?.agentResponse?.body,
     "The behavior is intentional.",
   );
   assert.deepEqual(harness.openedThreadBatches, [result.commentBatchId]);
@@ -815,6 +851,78 @@ test("accepts complete structured responses and opens anchored threads", async (
       (entry) => entry.customType === DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
     ).length,
     2,
+  );
+});
+
+test("continues the Agent turn when the reviewer submits an inline follow-up", async () => {
+  const harness = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+    submitFollowUpOnThreadOpen: true,
+  });
+  await harness.command("", commandContext());
+  const submitted = await harness.tool.execute(
+    "call-review",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const result = submitted.details;
+  if (
+    result.status !== "submitted" ||
+    result.commentBatchId === undefined ||
+    result.commentTurnId === undefined
+  ) {
+    throw new Error("Expected a submitted comment turn.");
+  }
+
+  const firstResponse = await harness.responseTool.execute(
+    "call-responses-1",
+    {
+      batchId: result.commentBatchId,
+      turnId: result.commentTurnId,
+      responses: [{ threadId: "C1", body: "Initial answer." }],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  assert.equal(firstResponse.terminate, false);
+  assert.equal(firstResponse.details?.status, "follow-up-submitted");
+  assert.equal(
+    firstResponse.details?.status === "follow-up-submitted"
+      ? firstResponse.details.turnId
+      : undefined,
+    "T2",
+  );
+  const followUpPayload = firstResponse.content.find(
+    (item) => item.type === "text",
+  );
+  assert.equal(followUpPayload?.type, "text");
+  if (followUpPayload?.type !== "text") throw new Error("Expected text.");
+  assert.match(followUpPayload.text, /"turnId":"T2"/);
+  assert.match(followUpPayload.text, /Explain that answer further/);
+  assert.match(followUpPayload.text, /Initial answer/);
+
+  harness.behavior.submitFollowUpOnThreadOpen = false;
+  const secondResponse = await harness.responseTool.execute(
+    "call-responses-2",
+    {
+      batchId: result.commentBatchId,
+      turnId: "T2",
+      responses: [{ threadId: "C1", body: "Further explanation." }],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(secondResponse.terminate, true);
+  assert.equal(secondResponse.details?.status, "closed");
+  assert.equal(
+    secondResponse.details?.batch.turns[1]?.items[0]?.agentResponse?.body,
+    "Further explanation.",
   );
 });
 
@@ -841,7 +949,8 @@ test("carries a reviewer-resolved comment forward in the next round", async () =
     "call-responses",
     {
       batchId: result.commentBatchId,
-      responses: [{ commentId: "C1", body: "Answered." }],
+      turnId: result.commentTurnId ?? "T1",
+      responses: [{ threadId: "C1", body: "Answered." }],
     },
     undefined,
     undefined,
@@ -859,7 +968,7 @@ test("carries a reviewer-resolved comment forward in the next round", async () =
   assert.doesNotMatch(kickoff, /"unresolvedComment"[\s\S]*"2"/);
 });
 
-test("does not change thread state under a later pending review delta", async () => {
+test("finishes thread turns before freezing a later review delta", async () => {
   const harness = createHarness({
     submitOnOpen: true,
     commentOnSubmit: true,
@@ -874,26 +983,36 @@ test("does not change thread state under a later pending review delta", async ()
   );
   const result = submitted.details;
   assert.equal(result.status, "submitted");
-  if (result.status !== "submitted" || result.commentBatchId === undefined) {
-    throw new Error("Expected a submitted comment batch.");
+  if (
+    result.status !== "submitted" ||
+    result.commentBatchId === undefined ||
+    result.commentTurnId === undefined
+  ) {
+    throw new Error("Expected a submitted comment turn.");
   }
 
   harness.behavior.snapshot = makeSnapshot("snapshot-round-2", [
     { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
   ]);
-  await harness.command("", commandContext());
-
   await assert.rejects(
-    harness.responseTool.execute(
-      "call-responses",
-      {
-        batchId: result.commentBatchId,
-        responses: [{ commentId: "C1", body: "Too late." }],
-      },
-      undefined,
-      undefined,
-      toolContext(),
-    ),
+    harness.command("", commandContext()),
+    /unfinished reviewer turn or draft reply/,
+  );
+
+  await harness.responseTool.execute(
+    "call-responses",
+    {
+      batchId: result.commentBatchId,
+      turnId: result.commentTurnId,
+      responses: [{ threadId: "C1", body: "Answered." }],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  await harness.command("", commandContext());
+  await assert.rejects(
+    harness.command("--threads", commandContext()),
     /baseline of pending review.*Finish or discard/,
   );
 });
@@ -917,6 +1036,53 @@ test("reopens the latest persisted comment threads", async () => {
   await second.command("--threads", commandContext());
 
   assert.equal(second.openedThreadBatches.length, 1);
+});
+
+test("starts an Agent turn for a follow-up submitted from /diffwalk --threads", async () => {
+  const first = createHarness({
+    submitOnOpen: true,
+    commentOnSubmit: true,
+  });
+  await first.command("", commandContext());
+  const submitted = await first.tool.execute(
+    "call-review",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const result = submitted.details;
+  if (
+    result.status !== "submitted" ||
+    result.commentBatchId === undefined ||
+    result.commentTurnId === undefined
+  ) {
+    throw new Error("Expected a submitted comment turn.");
+  }
+  await first.responseTool.execute(
+    "call-response",
+    {
+      batchId: result.commentBatchId,
+      turnId: result.commentTurnId,
+      responses: [{ threadId: "C1", body: "Initial answer." }],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  const second = createHarness({ submitFollowUpOnThreadOpen: true });
+  await second.restoreSession(first.appendedEntries);
+  await second.command("--threads", commandContext());
+
+  const meta = second.sentMessageMeta.at(-1);
+  assert.deepEqual(meta, {
+    customType: DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
+    display: true,
+    triggerTurn: true,
+  });
+  assert.match(second.sentMessages.at(-1) ?? "", /"turnId":"T2"/);
+  assert.match(second.sentMessages.at(-1) ?? "", /Explain that answer further/);
 });
 
 test("renders every successful guided-review outcome", async () => {
@@ -1588,6 +1754,7 @@ test("registers compact TUI renderers for the kickoff and result messages", () =
   assert.deepEqual(harness.registeredRenderers, [
     DIFFWALK_KICKOFF_MESSAGE_TYPE,
     DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+    DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
   ]);
 });
 
@@ -1768,11 +1935,13 @@ test("formats structured pause, discard, and submission instructions", () => {
   };
   const formatted = JSON.parse(formatGuidedReviewResult(submitted)) as {
     readonly commentBatchId: string;
-    readonly comments: readonly { readonly commentId: string }[];
+    readonly turnId: string;
+    readonly comments: readonly { readonly threadId: string }[];
     readonly instruction: string;
   };
   assert.equal(formatted.commentBatchId, "batch-index");
-  assert.equal(formatted.comments[0]?.commentId, "C1");
+  assert.equal(formatted.turnId, "T1");
+  assert.equal(formatted.comments[0]?.threadId, "C1");
   assert.match(formatted.instruction, /without modifying files/);
   assert.match(formatted.instruction, new RegExp(REVIEW_RESPONSES_TOOL_NAME));
   assert.match(

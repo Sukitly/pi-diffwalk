@@ -12,6 +12,7 @@ import type {
   ReviewSeriesId,
   ReviewThreadBatch,
   ReviewThreadBatchId,
+  ReviewThreadTurnId,
   ReviewUnitId,
   SnapshotId,
 } from "../src/types.ts";
@@ -22,13 +23,11 @@ function batch(): ReviewThreadBatch {
     seriesId: "series-1" as ReviewSeriesId,
     roundId: "round-1" as ReviewRoundId,
     snapshotId: "snapshot-1" as SnapshotId,
-    submissionMode: "discuss-first",
     threads: [
       {
         id: "C1" as ReviewThreadBatch["threads"][number]["id"],
         resolved: true,
-        response: { body: "Agent answer." },
-        comment: {
+        anchor: {
           snapshotId: "snapshot-1" as SnapshotId,
           reviewUnitId: "unit-1" as ReviewUnitId,
           fileChangeId: "file-1" as FileChangeId,
@@ -43,23 +42,90 @@ function batch(): ReviewThreadBatch {
             { type: "context", oldLine: 1, newLine: 1, text: "head" },
             { type: "added", newLine: 2, text: "changed" },
           ],
-          body: "Reviewer comment.",
         },
+      },
+    ],
+    turns: [
+      {
+        id: "T1" as ReviewThreadTurnId,
+        sequence: 1,
+        submissionMode: "discuss-first",
+        items: [
+          {
+            threadId: "C1" as ReviewThreadBatch["threads"][number]["id"],
+            reviewerBody: "Reviewer comment.",
+            agentResponse: { body: "Agent answer." },
+          },
+        ],
+      },
+      {
+        id: "T2" as ReviewThreadTurnId,
+        sequence: 2,
+        submissionMode: "apply-change-requests",
+        items: [
+          {
+            threadId: "C1" as ReviewThreadBatch["threads"][number]["id"],
+            reviewerBody: "Please update it.",
+            agentResponse: { body: "Updated." },
+          },
+        ],
       },
     ],
   };
 }
 
-test("round-trips a thread batch through a versioned session entry", () => {
+function obsoleteSingleTurnEntry() {
+  return {
+    formatVersion: 1,
+    batch: {
+      id: "batch-legacy",
+      seriesId: "series-1",
+      roundId: "round-1",
+      snapshotId: "snapshot-1",
+      submissionMode: "discuss-first",
+      threads: [
+        {
+          id: "C1",
+          resolved: true,
+          response: { body: "Legacy answer." },
+          comment: {
+            snapshotId: "snapshot-1",
+            reviewUnitId: "unit-1",
+            fileChangeId: "file-1",
+            side: "new",
+            line: 2,
+            filePath: "src/a.ts",
+            oldPath: "src/a.ts",
+            newPath: "src/a.ts",
+            newLine: 2,
+            selectedText: "changed",
+            nearbyContext: [{ type: "added", newLine: 2, text: "changed" }],
+            body: "Legacy comment.",
+          },
+        },
+      ],
+    },
+  } as const;
+}
+
+test("round-trips a multi-turn batch through a versioned session entry", () => {
   const value = batch();
   const entry = serializeReviewThreadBatchEntry(value);
 
   assert.equal(entry.formatVersion, REVIEW_THREAD_BATCH_ENTRY_FORMAT_VERSION);
+  assert.equal(REVIEW_THREAD_BATCH_ENTRY_FORMAT_VERSION, 1);
   assert.deepEqual(parseReviewThreadBatchEntry(entry), value);
   assert.equal(DIFFWALK_THREAD_BATCH_ENTRY_TYPE, "diffwalk-thread-batch");
 });
 
-test("rejects incompatible and structurally invalid thread entries", () => {
+test("rejects the obsolete pre-release single-turn shape", () => {
+  assert.equal(
+    parseReviewThreadBatchEntry(obsoleteSingleTurnEntry()),
+    undefined,
+  );
+});
+
+test("rejects incompatible, partial, out-of-order, and structurally invalid entries", () => {
   assert.equal(
     parseReviewThreadBatchEntry({
       ...serializeReviewThreadBatchEntry(batch()),
@@ -75,17 +141,68 @@ test("rejects incompatible and structurally invalid thread entries", () => {
     }),
     undefined,
   );
+
+  const value = batch();
+  assert.equal(
+    parseReviewThreadBatchEntry({
+      formatVersion: REVIEW_THREAD_BATCH_ENTRY_FORMAT_VERSION,
+      batch: {
+        ...value,
+        threads: value.threads.map((thread) => ({
+          ...thread,
+          draftReply: "Cannot coexist with resolved.",
+        })),
+      },
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseReviewThreadBatchEntry({
+      formatVersion: REVIEW_THREAD_BATCH_ENTRY_FORMAT_VERSION,
+      batch: {
+        ...value,
+        turns: value.turns.map((turn, index) =>
+          index === 0
+            ? {
+                ...turn,
+                items: turn.items.map(
+                  ({ agentResponse: _agentResponse, ...item }) => item,
+                ),
+              }
+            : turn,
+        ),
+      },
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseReviewThreadBatchEntry({
+      formatVersion: REVIEW_THREAD_BATCH_ENTRY_FORMAT_VERSION,
+      batch: {
+        ...value,
+        turns: value.turns.map((turn, index) =>
+          index === 1 ? { ...turn, id: "T9" } : turn,
+        ),
+      },
+    }),
+    undefined,
+  );
+
   const unresolved = batch();
   assert.equal(
     parseReviewThreadBatchEntry({
       formatVersion: REVIEW_THREAD_BATCH_ENTRY_FORMAT_VERSION,
       batch: {
         ...unresolved,
-        threads: unresolved.threads.map(
-          ({ response: _response, ...thread }) => ({
-            ...thread,
-            resolved: true,
-          }),
+        turns: unresolved.turns.map((turn, index) =>
+          index === unresolved.turns.length - 1
+            ? {
+                ...turn,
+                items: turn.items.map(
+                  ({ agentResponse: _agentResponse, ...item }) => item,
+                ),
+              }
+            : turn,
         ),
       },
     }),

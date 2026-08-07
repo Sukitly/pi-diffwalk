@@ -62,10 +62,11 @@ The review flow is:
 6. The TUI walks the reviewer through the route one review unit at a time.
 7. The reviewer adds comments that render directly below their diff anchors.
 8. A final page shows every comment before submission.
-9. DiffWalk returns an immutable comment batch with batch-local IDs such as `C1`.
-10. The agent explains, investigates, or modifies the code according to the selected submission mode, then submits exactly one structured response per comment.
-11. DiffWalk automatically opens a follow-up diff containing only the commented regions, with each agent response pinned below its comment.
-12. The reviewer resolves or reopens each thread explicitly.
+9. DiffWalk returns an anchored thread batch with batch-local IDs such as `C1` and an initial conversation turn `T1`.
+10. The agent explains, investigates, or modifies the code according to the selected submission mode, then submits exactly one structured response per thread in the pending turn.
+11. DiffWalk automatically opens a follow-up diff containing only the commented regions, with each conversation pinned below its original comment.
+12. The reviewer can reply in any open thread. Submitted replies form the next turn and return to the agent.
+13. The conversation repeats until the reviewer explicitly resolves each thread.
 
 ## Review Order
 
@@ -200,7 +201,7 @@ The final page supports two submission modes:
 
 The comments are returned only after the reviewer explicitly completes every planned review unit and submits the batch. An incomplete summary sends Enter back to the first pending unit. This keeps the review uninterrupted and prevents the agent from changing later regions while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
 
-The agent must finish by calling `submit_diffwalk_responses` with the batch ID and exactly one non-empty response for every comment ID. Missing, duplicate, unknown, blank, repeated, or cross-batch responses are rejected. The tool opens a full-screen follow-up view before ending the agent turn. The follow-up view derives compact context windows from the frozen snapshot and merges adjacent windows, so unrelated route regions are not shown.
+The agent must call `submit_diffwalk_responses` with the batch ID, pending turn ID, and exactly one non-empty response for every thread in that turn. Missing, duplicate, unknown, blank, repeated, stale-turn, or cross-batch responses are rejected. The tool opens a full-screen follow-up view. If the reviewer submits more replies, the tool continues the agent turn with the new conversation turn instead of ending it. The follow-up view derives compact context windows from the frozen snapshot and merges adjacent windows, so unrelated route regions are not shown.
 
 Follow-up controls:
 
@@ -208,10 +209,15 @@ Follow-up controls:
 |---|---|
 | `j`, `k`, `Up`, `Down` | Select the next or previous comment thread |
 | `PageUp`, `PageDown`, `Ctrl+f`, `Ctrl+b` | Scroll long thread content by a viewport |
-| `r` | Resolve an answered thread or reopen a resolved thread |
+| `c` | Create or edit a draft follow-up in the selected open thread |
+| `d` | Delete the selected thread's draft follow-up |
+| `Enter` | Complete the follow-up review; when drafts exist, choose a mode and press Enter again to send them |
+| `r` | Resolve an answered thread or reopen a thread resolved in the current view |
 | `Esc` | Close the follow-up view; use `/diffwalk --threads` to reopen it |
 
-An agent response marks a thread answered, not resolved. Only the reviewer can change the resolved state. Unresolved comments remain `unresolved-comment` work in the next incremental review; resolved comments are carried forward. Resolution cannot change while a later walkthrough based on that thread batch is pending, because doing so would invalidate its frozen review delta.
+Each follow-up submission can independently select **Discuss first** or **Apply change requests**. Drafts and completed conversation turns persist with the thread batch. Enter completes the view immediately when there are no drafts. A thread resolved in the current view remains visible and can be reopened until the view closes; later follow-up views omit it. A thread with an unanswered reviewer message or draft cannot be resolved.
+
+An agent response marks a turn answered, not resolved. Only the reviewer can change the resolved state. Conversations remain anchored to their original frozen snapshot even if the agent changes the worktree. Run `/diffwalk` again to inspect newer code. A new review cannot start while its baseline thread batch has a pending reviewer turn or saved draft. Unresolved comments remain `unresolved-comment` work in the next incremental review; resolved comments are carried forward. Resolution cannot change while a later walkthrough based on that thread batch is pending, because doing so would invalidate its frozen review delta.
 
 ## Grounding and Coverage
 
@@ -248,6 +254,8 @@ These rules do not make the agent's explanation correct. They prevent the explan
     -> agent investigation or implementation
     -> submit_diffwalk_responses tool call
     -> filtered comment-thread TUI
+    -> optional reviewer follow-up turn
+    -> agent response loop
     -> reviewer resolution
 ```
 
@@ -268,10 +276,10 @@ src/
   review-series.ts      Completed review round lifecycle
   review-persistence.ts        Session-entry serialization of completed rounds
   review-comments.ts           Comment anchors and drafts
-  review-threads.ts            Comment batches, structured responses, and resolution
-  review-thread-persistence.ts Session-entry serialization of comment threads
+  review-threads.ts            Anchored conversations, turns, responses, drafts, and resolution
+  review-thread-persistence.ts Session-entry serialization and migration of conversations
   review-ui.ts                 Interactive walkthrough TUI
-  review-thread-ui.ts          Filtered anchored response TUI
+  review-thread-ui.ts          Filtered multi-turn conversation TUI
   prompts.ts                   Agent instructions for route construction
   types.ts               Shared data structures and schemas
 test/
@@ -307,7 +315,7 @@ Run `/diffwalk` from a Git worktree in interactive TUI mode. Pressing Esc can pa
 
 A paused review does not lock the repository. Users and agents may continue modifying files or Git state. If the worktree changed while a routed review was paused, the next `/diffwalk` reports the drift, discards the stale review together with its draft comments, and starts a new review. Running `/diffwalk` with a different base while a routed review holds draft comments or reviewed units fails with instructions instead of silently discarding that work; the message points at `/diffwalk --discard`. A pending review with no recorded work, and a pending review that has no route yet, are replaced when the base changes or the worktree drifts. Inside the walkthrough, discard remains a separate explicit action.
 
-Completed review rounds and submitted comment-thread batches persist as custom entries in the pi session, so the carried-forward baseline, structured responses, and reviewer resolution survive pi restarts, `/reload`, and session resume. The next `/diffwalk` against the same repository, branch, and base classifies unchanged reviewed lines and resolved comments as carried-forward. Entries with an unknown format version or a broken structure are ignored on restore. A paused in-progress walkthrough is still extension memory only: it does not survive a reload, and the next `/diffwalk` starts over from a fresh snapshot.
+Completed review rounds and submitted comment-thread batches persist as version 1 custom entries in the pi session, so the carried-forward baseline, conversation turns, draft follow-ups, structured responses, and reviewer resolution survive pi restarts, `/reload`, and session resume. The next `/diffwalk` against the same repository, branch, and base classifies unchanged reviewed lines and resolved comments as carried-forward. Entries with an unknown format version or a broken structure are ignored on restore. A paused in-progress walkthrough is still extension memory only: it does not survive a reload, and the next `/diffwalk` starts over from a fresh snapshot.
 
 ## Review Lifecycle Domain
 
@@ -357,8 +365,9 @@ The current version includes:
 - line-oriented diff navigation
 - inline comment editing and anchored draft display
 - comment summary and batch submission
-- structured agent responses in an automatically opened filtered thread UI
-- reviewer-owned thread resolution and persisted thread reopening
+- multi-turn inline reviewer and agent conversations in an automatically opened filtered thread UI
+- per-turn discussion or change-request submission modes
+- persisted draft follow-ups and reviewer-owned thread resolution
 - worktree drift detection
 - explicit pause and in-process resume of an interrupted review
 - incremental review rounds with carried-forward classification, persisted across restarts as session entries

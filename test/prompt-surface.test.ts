@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { formatGuidedReviewResult } from "../src/index.ts";
+import {
+  formatGuidedReviewResult,
+  formatReviewThreadFollowUp,
+} from "../src/index.ts";
 import {
   buildReviewKickoffPrompt,
   GUIDED_REVIEW_TOOL_DESCRIPTION,
@@ -12,6 +15,9 @@ import {
 import { computeReviewDelta } from "../src/review-delta.ts";
 import { detectExactMoves } from "../src/review-moves.ts";
 import {
+  appendReviewThreadTurn,
+  attachReviewThreadResponses,
+  createReviewThreadBatch,
   REVIEW_RESPONSES_TOOL_DESCRIPTION,
   REVIEW_RESPONSES_TOOL_NAME,
   REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
@@ -26,7 +32,9 @@ import type {
   FileChange,
   NoticeId,
   ReviewComment,
+  ReviewRoundId,
   ReviewRouteCandidate,
+  ReviewSeriesId,
   ReviewThreadBatchId,
   SnapshotId,
 } from "../src/types.ts";
@@ -240,6 +248,36 @@ function resultSurface(): string {
   ].join("\n");
 }
 
+function followUpSurface(): string {
+  const snapshotId = "snapshot-surface" as SnapshotId;
+  const pending = createReviewThreadBatch({
+    seriesId: "series-surface" as ReviewSeriesId,
+    roundId: "round-surface" as ReviewRoundId,
+    snapshotId,
+    submissionMode: "discuss-first",
+    comments: [surfaceComment(snapshotId)],
+  });
+  const answered = attachReviewThreadResponses(pending, {
+    batchId: pending.id,
+    turnId: "T1",
+    responses: [{ threadId: "C1", body: "The guard prevents stale writes." }],
+  });
+  const thread = answered.threads[0];
+  assert.ok(thread);
+  const followUp = appendReviewThreadTurn(answered, {
+    submissionMode: "apply-change-requests",
+    replies: [
+      {
+        threadId: thread.id,
+        body: "Please add a regression test for that guard.",
+      },
+    ],
+  });
+  const turn = followUp.turns.at(-1);
+  assert.ok(turn);
+  return formatReviewThreadFollowUp(followUp, turn.id);
+}
+
 function renderSurface(): string {
   const sections: readonly [string, string][] = [
     ["kickoff prompt: fresh review with moves", kickoffWithMoves()],
@@ -250,6 +288,7 @@ function renderSurface(): string {
     ["guided_review tool", toolSurface()],
     ["submit_diffwalk_responses tool", responseToolSurface()],
     ["tool results", resultSurface()],
+    ["reviewer follow-up tool result", followUpSurface()],
     ["advisory nudge", advisoryNudge()],
   ];
   return sections
