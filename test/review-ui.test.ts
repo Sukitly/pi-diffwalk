@@ -298,7 +298,7 @@ function makeLongExplanationFixture(): UiFixture {
   const firstUnit = routeCandidate.units[0];
   assert.ok(firstUnit);
   firstUnit.whyHere = Array.from(
-    { length: 12 },
+    { length: 20 },
     (_, index) => `Explanation line ${index + 1}`,
   ).join("\n");
   return {
@@ -491,7 +491,7 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   assert.doesNotMatch(explanation, /src\/entry 文\\nfile\.ts/);
 });
 
-test("groups responsive header information by priority", () => {
+test("shows complete responsive header information when height permits", () => {
   const harness = createHarness(120, 30);
 
   let lines = harness.component.render(120).map((line) => line.trimEnd());
@@ -542,6 +542,19 @@ test("keeps core workflow actions in the responsive walkthrough footer", () => {
   assert.equal(footerAt(18), "c comment • ? help");
 });
 
+test("short narrow walkthrough keeps its footer and selected diff line", () => {
+  const harness = createHarness(30, 8);
+
+  for (const rows of [4, 5, 8]) {
+    harness.terminal.rows = rows;
+    harness.component.invalidate();
+    const output = renderText(harness);
+    assert.match(output.split("\n").at(-1) ?? "", /\?/);
+    assert.match(output, />\s+5\s+.*-const value/);
+    assert.doesNotMatch(output, /comments|skipped|unsupported/);
+  }
+});
+
 test("opens full keyboard help and returns without moving the review", () => {
   const harness = createHarness(100, 60);
   press(harness.component, "j", "?");
@@ -551,6 +564,9 @@ test("opens full keyboard help and returns without moving the review", () => {
   assert.match(help, /p\/h\/←\s+Open the previous unit/);
   assert.match(help, /c\s+Add or edit a comment/);
   assert.match(help, /n\s+Mark the current unit reviewed/);
+  assert.match(help, /e\s+Open the complete unit details/);
+  assert.match(help, /Details: e\/h\/←\/Esc/);
+  assert.doesNotMatch(help, /agent explanation|Explanation:/);
   assert.match(help, /1-9 \+ move/);
   assert.match(help, /Summary: Enter/);
 
@@ -986,6 +1002,23 @@ test("scrolls the walkthrough diff by half a viewport with ctrl+d and ctrl+u", (
   assert.match(renderText(harness), />\s+5\s+-const value/);
 });
 
+test("pages details by the rendered viewport without skipping lines", () => {
+  const harness = createHarness(40, 8, makeLongExplanationFixture());
+  const numbers = (output: string): number[] =>
+    [...output.matchAll(/Explanation line (\d+)/g)].map((match) =>
+      Number(match[1]),
+    );
+
+  press(harness.component, "e");
+  const firstPage = numbers(renderText(harness));
+  press(harness.component, "\u001b[6~");
+  const secondPage = numbers(renderText(harness));
+
+  assert.ok(firstPage.length > 0);
+  assert.ok(secondPage.length > 0);
+  assert.equal(secondPage[0], (firstPage.at(-1) ?? 0) + 1);
+});
+
 test("scrolls the explanation with vim keys", () => {
   const harness = createHarness(50, 8, makeLongExplanationFixture());
   press(harness.component, "e");
@@ -1380,7 +1413,7 @@ test("half-page scrolling continues through context without snapping back", () =
   const deeper = renderText(harness);
   assert.notEqual(deeper, scrolled, "the second half page keeps scrolling");
 
-  for (let index = 0; index < 12; index += 1) {
+  for (let index = 0; index < 20; index += 1) {
     press(harness.component, "\u0004");
   }
   assert.match(
@@ -1497,6 +1530,7 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
 
   press(harness.component, "c");
   assert.match(renderText(harness), /Review comment/);
+  assert.equal(renderText(harness).match(/Review comment/g)?.length, 1);
   assert.ok(renderText(harness).includes(CURSOR_MARKER));
 
   press(
@@ -1918,6 +1952,10 @@ test("supports an empty walkthrough when no hunk requires review", async () => {
   });
 
   assert.match(renderText(harness), /No review units were planned/);
+  press(harness.component, "e");
+  assert.match(renderText(harness), /No unit details are available/);
+  assert.doesNotMatch(renderText(harness), /agent explanation/i);
+  press(harness.component, "e");
   press(harness.component, "s", "\r");
   assert.deepEqual(harness.submittedModes, ["discuss-first"]);
   await waitForImmediate();

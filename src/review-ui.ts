@@ -54,6 +54,17 @@ import type {
   ReviewUnit,
   SubmittedGuidedReviewResult,
 } from "./types.ts";
+import {
+  countNoun,
+  fitColumns,
+  fitLine,
+  MEDIUM_HEADER_WIDTH,
+  type PrioritizedLineGroup,
+  packStatusParts,
+  progressBarSegments,
+  selectHeaderGroups,
+  WIDE_HEADER_WIDTH,
+} from "./ui-layout.ts";
 
 export interface GuidedReviewUiInput {
   readonly review: InProgressReview;
@@ -521,7 +532,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderWalkthrough(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(width, walkthroughFooterText(width));
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
@@ -539,15 +550,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     }
 
     const summary = renderWalkthroughSummary(unitView.unit, this.theme, width);
-    const summaryBudget =
-      bodyHeight >= 12
-        ? Math.min(
-            summary.length,
-            8,
-            Math.max(6, Math.floor(bodyHeight * 0.25)),
-          )
-        : 0;
-    const preview = summary.slice(0, summaryBudget);
+    const previewHeight = walkthroughPreviewHeight(summary.length, bodyHeight);
+    const preview = summary.slice(0, previewHeight);
     if (preview.length > 0 && preview.length < summary.length) {
       preview[preview.length - 1] = fitLine(
         this.theme.fg("dim", "… press e for complete context and questions"),
@@ -607,14 +611,13 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private renderCommentEditor(width: number, rows: number): readonly string[] {
     const target = this.currentTarget();
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       "Enter save • Shift+Enter newline • Esc discard edit",
     );
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
     const body: string[] = [];
-    body.push(this.theme.fg("accent", this.theme.bold("Review comment")));
     if (target !== undefined) {
       body.push(
         ...wrapStyled(
@@ -643,7 +646,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderExplanation(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       "j/k or ↑/↓ scroll • PgUp/PgDn page • e/Esc return • ? help",
@@ -666,7 +669,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderInventory(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       "j/k or ↑/↓ select • Enter inspect frozen hunk • i/Esc return • ? help",
@@ -703,7 +706,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderInventoryDiff(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       "j/k or ↑/↓ scroll • PgUp/PgDn page • Esc return to inventory • ? help",
@@ -737,7 +740,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderSummary(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       this.submissionStatus === "checking"
@@ -772,7 +775,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderHelp(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       "j/k scroll • PgUp/PgDn page • ?/Esc return",
@@ -795,7 +798,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     width: number,
     rows: number,
   ): readonly string[] {
-    const header = this.renderHeader(width);
+    const header = this.renderHeader(width, rows);
     const footer = this.renderFooter(
       width,
       "Enter pause and resume later • d discard review • Esc continue • ? help",
@@ -815,7 +818,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     return [...header, ...content.slice(0, bodyHeight), ...footer];
   }
 
-  private renderHeader(width: number): readonly string[] {
+  private renderHeader(width: number, rows: number): readonly string[] {
     const unitCount = this.units.length;
     const currentUnit = unitCount === 0 ? 0 : this.unitIndex + 1;
     const reviewed = this.reviewedUnitCount();
@@ -835,54 +838,89 @@ export class GuidedReviewComponent implements Component, Focusable {
       "text",
       this.theme.bold(safeText(this.screenTitle())),
     );
-    const status = this.theme.fg("muted", statusParts.join(" · "));
-    let header: string[];
+    const groups: PrioritizedLineGroup[] = [];
 
-    if (width >= 88) {
+    if (width >= WIDE_HEADER_WIDTH) {
       const progressBar = renderProgressBar(reviewed, unitCount, this.theme);
-      header = [
-        fitColumns(brand, this.theme.fg("muted", position), width),
-        fitLine(title, width),
-        fitLine(
-          `${progressBar}  ${this.theme.fg("muted", progress)}    ${status}`,
-          width,
-        ),
-      ];
-    } else if (width >= 48) {
-      header = [
-        fitLine(`${brand}${this.theme.fg("dim", ` · ${position}`)}`, width),
-        fitLine(title, width),
-        ...packStatusParts([progress, ...statusParts], width).map((line) =>
-          fitLine(this.theme.fg("muted", line), width),
-        ),
-      ];
+      groups.push(
+        {
+          lines: [fitColumns(brand, this.theme.fg("muted", position), width)],
+          priority: 90,
+        },
+        { lines: [fitLine(title, width)], priority: 80 },
+        {
+          lines: [
+            fitLine(
+              `${progressBar}  ${this.theme.fg("muted", progress)}    ${this.theme.fg("muted", statusParts.join(" · "))}`,
+              width,
+            ),
+          ],
+          priority: 50,
+          minimumRows: 5,
+        },
+      );
+    } else if (width >= MEDIUM_HEADER_WIDTH) {
+      groups.push(
+        {
+          lines: [
+            fitLine(`${brand}${this.theme.fg("dim", ` · ${position}`)}`, width),
+          ],
+          priority: 90,
+        },
+        { lines: [fitLine(title, width)], priority: 80 },
+        {
+          lines: packStatusParts([progress, ...statusParts], width).map(
+            (line) => fitLine(this.theme.fg("muted", line), width),
+          ),
+          priority: 40,
+          minimumRows: 6,
+        },
+      );
     } else {
       const narrowBrand =
         width >= 28
           ? brand
           : this.theme.fg("accent", this.theme.bold("DiffWalk"));
-      header = [
-        fitLine(
-          `${narrowBrand}${this.theme.fg("dim", ` · ${currentUnit}/${unitCount}`)}`,
-          width,
-        ),
-        fitLine(title, width),
-        fitLine(
-          this.theme.fg("muted", `Reviewed ${reviewed}/${unitCount}`),
-          width,
-        ),
-        ...packStatusParts(statusParts, width).map((line) =>
-          fitLine(this.theme.fg("muted", line), width),
-        ),
-      ];
+      groups.push(
+        {
+          lines: [
+            fitLine(
+              `${narrowBrand}${this.theme.fg("dim", ` · ${currentUnit}/${unitCount}`)}`,
+              width,
+            ),
+          ],
+          priority: 90,
+        },
+        { lines: [fitLine(title, width)], priority: 80 },
+        {
+          lines: [
+            fitLine(
+              this.theme.fg("muted", `Reviewed ${reviewed}/${unitCount}`),
+              width,
+            ),
+          ],
+          priority: 50,
+          minimumRows: 6,
+        },
+        {
+          lines: packStatusParts(statusParts, width).map((line) =>
+            fitLine(this.theme.fg("muted", line), width),
+          ),
+          priority: 40,
+          minimumRows: 10,
+        },
+      );
     }
 
-    const snapshotAlert = renderSnapshotHeaderAlert(
-      this.submissionStatus,
-      this.theme,
-      width,
-    );
-    return [...header, ...snapshotAlert];
+    groups.push({
+      lines: renderSnapshotHeaderAlert(
+        this.submissionStatus,
+        this.theme,
+        width,
+      ),
+      priority: 100,
+    });
+    return selectHeaderGroups(groups, rows, 2);
   }
 
   private renderFooter(width: number, text: string): readonly string[] {
@@ -1470,7 +1508,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   private explanationContent(width: number): readonly string[] {
     const unit = this.currentUnit()?.unit;
     return unit === undefined
-      ? [this.theme.fg("muted", "No agent explanation is available.")]
+      ? [this.theme.fg("muted", "No unit details are available.")]
       : renderExplanationLines(unit, this.theme, width);
   }
 
@@ -1567,10 +1605,8 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   /** Rows between the header and the one-row footer, as render lays out. */
   private bodyHeight(width: number): number {
-    return Math.max(
-      0,
-      Math.max(1, this.tui.terminal.rows) - this.renderHeader(width).length - 1,
-    );
+    const rows = Math.max(1, this.tui.terminal.rows);
+    return Math.max(0, rows - this.renderHeader(width, rows).length - 1);
   }
 
   private startSubmission(): void {
@@ -1659,7 +1695,8 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private secondaryViewportHeight(): number {
-    return Math.max(1, this.tui.terminal.rows - 3);
+    const width = Math.max(1, this.tui.terminal.columns);
+    return Math.max(1, this.bodyHeight(width));
   }
 
   /**
@@ -1714,7 +1751,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private summaryViewportHeight(): number {
     const width = Math.max(1, this.tui.terminal.columns);
-    const availableHeight = Math.max(0, this.tui.terminal.rows - 3);
+    const availableHeight = this.bodyHeight(width);
     const noticeHeight = renderSubmissionNotice(
       this.submissionStatus,
       this.submissionFailure,
@@ -1725,24 +1762,24 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private walkthroughDiffViewportHeight(width: number, rows: number): number {
-    const bodyHeight = Math.max(0, rows - 3);
+    const bodyHeight = Math.max(
+      0,
+      rows - this.renderHeader(width, rows).length - 1,
+    );
     const unit = this.currentUnit();
-    if (unit === undefined) return Math.max(0, bodyHeight - 1);
+    if (unit === undefined) return bodyHeight;
     const summary = renderWalkthroughSummary(unit.unit, this.theme, width);
-    const previewHeight =
-      bodyHeight >= 8
-        ? Math.min(
-            summary.length,
-            8,
-            Math.max(3, Math.floor(bodyHeight * 0.25)),
-          )
-        : 0;
+    const previewHeight = walkthroughPreviewHeight(summary.length, bodyHeight);
     const feedbackHeight = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     ).length;
-    return Math.max(0, bodyHeight - previewHeight - feedbackHeight - 1);
+    const separatorHeight = previewHeight > 0 ? 1 : 0;
+    return Math.max(
+      0,
+      bodyHeight - previewHeight - separatorHeight - feedbackHeight,
+    );
   }
 
   private toggleHelp(): void {
@@ -2068,6 +2105,15 @@ function orderTargetsFromDisplayPlan(
   return ordered;
 }
 
+function walkthroughPreviewHeight(
+  summaryLength: number,
+  bodyHeight: number,
+): number {
+  return bodyHeight >= 12
+    ? Math.min(summaryLength, 8, Math.max(6, Math.floor(bodyHeight * 0.25)))
+    : 0;
+}
+
 function renderWalkthroughSummary(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
@@ -2127,7 +2173,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
       { keys: "c", action: "Add or edit a comment on the selected line." },
       { keys: "d", action: "Delete the comment on the selected line." },
       { keys: "n", action: "Mark the current unit reviewed and continue." },
-      { keys: "e", action: "Open the complete agent explanation." },
+      { keys: "e", action: "Open the complete unit details." },
       { keys: "i", action: "Open the frozen snapshot inventory." },
       { keys: "s", action: "Open the submission summary." },
       { keys: "Esc", action: "Open the pause and discard screen." },
@@ -2153,7 +2199,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     title: "Other screens",
     entries: [
       {
-        keys: "Explanation: e/h/←/Esc",
+        keys: "Details: e/h/←/Esc",
         action: "Return to the walkthrough.",
       },
       {
@@ -3486,52 +3532,15 @@ function wrapStyled(text: string, width: number): string[] {
   );
 }
 
-function fitLine(line: string, width: number): string {
-  return truncateToWidth(line, Math.max(1, width), "");
-}
-
-function fitColumns(left: string, right: string, width: number): string {
-  const available = Math.max(1, width);
-  const rightWidth = visibleWidth(right);
-  if (rightWidth + 2 >= available) return fitLine(left, available);
-  const leftWidth = available - rightWidth - 2;
-  const fittedLeft = truncateToWidth(left, leftWidth, "…", true);
-  const gap = " ".repeat(
-    Math.max(2, available - visibleWidth(fittedLeft) - rightWidth),
-  );
-  return fitLine(`${fittedLeft}${gap}${right}`, available);
-}
-
-function packStatusParts(
-  parts: readonly string[],
-  width: number,
-): readonly string[] {
-  const lines: string[] = [];
-  let current = "";
-  for (const part of parts) {
-    const candidate = current.length === 0 ? part : `${current} · ${part}`;
-    if (current.length > 0 && visibleWidth(candidate) > width) {
-      lines.push(current);
-      current = part;
-    } else {
-      current = candidate;
-    }
-  }
-  if (current.length > 0) lines.push(current);
-  return lines;
-}
-
 function renderProgressBar(
   reviewed: number,
   total: number,
   theme: ReviewUiTheme,
 ): string {
-  const width = 12;
-  const completed =
-    total === 0 ? 0 : Math.round((Math.min(reviewed, total) / total) * width);
-  return `${theme.fg("accent", "█".repeat(completed))}${theme.fg(
+  const segments = progressBarSegments(reviewed, total);
+  return `${theme.fg("accent", "█".repeat(segments.completed))}${theme.fg(
     "borderMuted",
-    "░".repeat(width - completed),
+    "░".repeat(segments.remaining),
   )}`;
 }
 
@@ -3562,10 +3571,6 @@ function renderSnapshotHeaderAlert(
         ),
       ];
   }
-}
-
-function countNoun(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 const WALKTHROUGH_FOOTERS = [

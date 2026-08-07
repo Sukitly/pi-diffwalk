@@ -26,6 +26,7 @@ import type {
   ReviewRoundId,
   ReviewSeriesId,
   ReviewThreadBatch,
+  ReviewThreadTurnId,
 } from "../src/types.ts";
 import { fileChangeId, makeSnapshot, span } from "./domain-fixtures.ts";
 
@@ -215,7 +216,7 @@ test("renders Agent responses at frozen anchors and omits unrelated lines", () =
   assert.doesNotMatch(output, /outside start|outside end|unrelated 10/);
 });
 
-test("groups responsive thread header information by priority", () => {
+test("shows complete responsive thread header information when height permits", () => {
   const { answered } = fixture();
   const { component } = createComponent(answered, 40);
 
@@ -253,6 +254,23 @@ test("renders multiple turns in order under the same inline thread", () => {
     output,
     /C1 · Open · Turn 1[\s\S]*You[\s\S]*Agent[\s\S]*C1 · Turn 2[\s\S]*validation sufficient[\s\S]*Agent[\s\S]*parser rejects/,
   );
+});
+
+test("renders turn sequence without parsing the opaque turn id", () => {
+  const { answered } = fixture();
+  const opaque: ReviewThreadBatch = {
+    ...answered,
+    turns: answered.turns.map((turn) => ({
+      ...turn,
+      id: "opaque-turn-id" as ReviewThreadTurnId,
+      sequence: 7,
+    })),
+  };
+  const { component } = createComponent(opaque, 40);
+  const output = component.render(100).join("\n");
+
+  assert.match(output, /Turn 7/);
+  assert.doesNotMatch(output, /opaque-turn-id/);
 });
 
 test("renders thread status only on the first turn header", () => {
@@ -352,6 +370,10 @@ test("uses the embedded Editor for multiline Chinese follow-up drafts", () => {
 
   press(component, "c");
   assert.match(component.render(100).join("\n"), /Reviewer follow-up/);
+  assert.match(
+    component.render(100).join("\n"),
+    /Frozen snapshot snapshot-thread-ui/,
+  );
   assert.ok(component.render(100).join("\n").includes(CURSOR_MARKER));
   press(component, "请", "解", "释", "\n", "失", "败", "路", "径", "\r");
 
@@ -368,7 +390,10 @@ test("submits saved drafts as a new pending turn with a selectable mode", () => 
 
   press(component, "c", "F", "i", "x", " ", "t", "h", "i", "s", "\r");
   press(component, "\r");
-  assert.match(component.render(100).join("\n"), /DiffWalk \/ Follow-up/);
+  const submission = component.render(100).join("\n");
+  assert.match(submission, /DiffWalk \/ Follow-up/);
+  assert.match(submission, /Anchored to frozen snapshot snapshot-thread-ui/);
+  assert.match(submission, /New code requires another \/diffwalk review/);
   press(component, "l", "\r");
 
   const outcome = outcomes[0];
@@ -457,6 +482,32 @@ test("keeps unanswered turns open and blocks another reply", () => {
     /still awaiting Agent responses/,
   );
   assert.match(component.render(80).join("\n"), /Awaiting Agent response/);
+});
+
+test("short thread screens keep their footer and one content row", () => {
+  const { answered } = fixture();
+  const { component, terminal } = createComponent(answered, 8);
+  terminal.columns = 30;
+
+  for (const rows of [4, 5, 8]) {
+    terminal.rows = rows;
+    component.invalidate();
+    const lines = component.render(30);
+    assert.match(lines.at(-1) ?? "", /j\/k thread/);
+    assert.match(lines.join("\n"), /C1/);
+    assert.doesNotMatch(lines.join("\n"), /answered|resolved|drafts/);
+  }
+
+  terminal.rows = 5;
+  press(component, "c");
+  let lines = component.render(30);
+  assert.match(lines.at(-1) ?? "", /Enter save/);
+  assert.ok(lines.join("\n").includes(CURSOR_MARKER), lines.join("\n"));
+
+  press(component, "F", "i", "x", "\r", "\r");
+  lines = component.render(30);
+  assert.match(lines.at(-1) ?? "", /mode|Enter/);
+  assert.match(lines.join("\n"), /Anchored to frozen snapshot/);
 });
 
 test("bounds every thread UI row on narrow terminals", () => {

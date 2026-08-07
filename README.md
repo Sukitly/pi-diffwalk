@@ -167,9 +167,9 @@ test/auth/handler.test.ts
 j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • ? help
 ```
 
-The header separates the current screen, unit title, and review totals. Wide terminals add a progress bar and right-align the unit position. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked.
+The header separates the current screen, unit title, and review totals. Wide terminals add a progress bar and right-align the unit position. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked. Short terminals remove status and progress rows before content, preserving the footer and at least one content row.
 
-One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. Terminals too short to spare a line keep every line for diff content.
+One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. A viewport too short to pin a file title keeps that line available for diff content.
 
 The normal flow is to select changed lines with `j` or `k`, move between review units with `Left` or `Right`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `?` on any read-only screen for the complete keyboard reference. Press `s` to inspect review progress and comments at any time.
 
@@ -224,7 +224,7 @@ Follow-up controls:
 | `r` | Resolve an answered thread or reopen a thread resolved in the current view |
 | `Esc` | Close the follow-up view; use `/diffwalk --threads` to reopen it |
 
-Each follow-up submission can independently select **Discuss first** or **Apply change requests**. Drafts and completed conversation turns persist with the thread batch. Enter completes the view immediately when there are no drafts. A thread resolved in the current view remains visible and can be reopened until the view closes; later follow-up views omit it. A thread with an unanswered reviewer message or draft cannot be resolved.
+Each follow-up submission can independently select **Discuss first** or **Apply change requests**. The reply editor and submission screen show the frozen snapshot ID, and the submission screen states that newer code requires another `/diffwalk` review. Drafts and completed conversation turns persist with the thread batch. Enter completes the view immediately when there are no drafts. A thread resolved in the current view remains visible and can be reopened until the view closes; later follow-up views omit it. A thread with an unanswered reviewer message or draft cannot be resolved.
 
 An agent response marks a turn answered, not resolved. Only the reviewer can change the resolved state. Conversations remain anchored to their original frozen snapshot even if the agent changes the worktree. Run `/diffwalk` again to inspect newer code. A new review cannot start while its baseline thread batch has a pending reviewer turn or saved draft. Unresolved comments remain `unresolved-comment` work in the next incremental review; resolved comments are carried forward. Resolution cannot change while a later walkthrough based on that thread batch is pending, because doing so would invalidate its frozen review delta.
 
@@ -289,6 +289,7 @@ src/
   review-thread-persistence.ts Session-entry serialization and migration of conversations
   review-ui.ts                 Interactive walkthrough TUI
   review-thread-ui.ts          Filtered multi-turn conversation TUI
+  ui-layout.ts                 Shared responsive header and viewport layout helpers
   prompts.ts                   Agent instructions for route construction
   types.ts               Shared data structures and schemas
 test/
@@ -306,6 +307,7 @@ test/
   review-threads.test.ts
   review-thread-persistence.test.ts
   review-thread-ui.test.ts
+  ui-layout.test.ts
   prompt-surface.test.ts
 ```
 
