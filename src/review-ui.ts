@@ -544,7 +544,7 @@ export class GuidedReviewComponent implements Component, Focusable {
         ? Math.min(
             summary.length,
             8,
-            Math.max(3, Math.floor(bodyHeight * 0.25)),
+            Math.max(6, Math.floor(bodyHeight * 0.25)),
           )
         : 0;
     const preview = summary.slice(0, summaryBudget);
@@ -817,38 +817,105 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private renderHeader(width: number): readonly string[] {
     const unitCount = this.units.length;
-    const position =
-      unitCount === 0 ? "unit 0/0" : `unit ${this.unitIndex + 1}/${unitCount}`;
-    const progress = `reviewed ${this.reviewedUnitCount()}/${unitCount}`;
-    const comments = `comments ${this.review.comments.length}`;
-    const inventory = `skipped ${this.skippedCount} • unsupported ${this.unsupportedCount}`;
-    const verification = `snapshot ${submissionLabel(this.submissionStatus)}`;
-    const title = this.screenTitle();
-    return [
-      fitLine(
-        `${this.theme.fg(
-          "accent",
-          this.theme.bold(`DiffWalk • ${position} • ${progress} • ${comments}`),
-        )} ${this.theme.fg("dim", `• ${inventory} • ${verification}`)}`,
-        width,
-      ),
-      fitLine(this.theme.fg("text", safeText(title)), width),
-      "",
-    ];
+    const currentUnit = unitCount === 0 ? 0 : this.unitIndex + 1;
+    const reviewed = this.reviewedUnitCount();
+    const position = `Unit ${currentUnit}/${unitCount}`;
+    const progress = `${reviewed}/${unitCount} reviewed`;
+    const comments = countNoun(this.review.comments.length, "comment");
+    const statusParts = [comments, `${this.skippedCount} skipped`];
+    if (this.unsupportedCount > 0) {
+      statusParts.push(`${this.unsupportedCount} unsupported`);
+    }
+
+    const brand = this.theme.fg(
+      "accent",
+      this.theme.bold(`DiffWalk / ${this.screenLabel()}`),
+    );
+    const title = this.theme.fg(
+      "text",
+      this.theme.bold(safeText(this.screenTitle())),
+    );
+    const status = this.theme.fg("muted", statusParts.join(" · "));
+    let header: string[];
+
+    if (width >= 88) {
+      const progressBar = renderProgressBar(reviewed, unitCount, this.theme);
+      header = [
+        fitColumns(brand, this.theme.fg("muted", position), width),
+        fitLine(title, width),
+        fitLine(
+          `${progressBar}  ${this.theme.fg("muted", progress)}    ${status}`,
+          width,
+        ),
+      ];
+    } else if (width >= 48) {
+      header = [
+        fitLine(`${brand}${this.theme.fg("dim", ` · ${position}`)}`, width),
+        fitLine(title, width),
+        ...packStatusParts([progress, ...statusParts], width).map((line) =>
+          fitLine(this.theme.fg("muted", line), width),
+        ),
+      ];
+    } else {
+      const narrowBrand =
+        width >= 28
+          ? brand
+          : this.theme.fg("accent", this.theme.bold("DiffWalk"));
+      header = [
+        fitLine(
+          `${narrowBrand}${this.theme.fg("dim", ` · ${currentUnit}/${unitCount}`)}`,
+          width,
+        ),
+        fitLine(title, width),
+        fitLine(
+          this.theme.fg("muted", `Reviewed ${reviewed}/${unitCount}`),
+          width,
+        ),
+        ...packStatusParts(statusParts, width).map((line) =>
+          fitLine(this.theme.fg("muted", line), width),
+        ),
+      ];
+    }
+
+    const snapshotAlert = renderSnapshotHeaderAlert(
+      this.submissionStatus,
+      this.theme,
+      width,
+    );
+    return [...header, ...snapshotAlert];
   }
 
   private renderFooter(width: number, text: string): readonly string[] {
     return [fitLine(this.theme.fg("dim", safeText(text)), width)];
   }
 
+  private screenLabel(): string {
+    switch (this.screen) {
+      case "walkthrough":
+        return "Review";
+      case "comment-editor":
+        return "Comment";
+      case "explanation":
+        return "Details";
+      case "inventory":
+      case "inventory-diff":
+        return "Inventory";
+      case "summary":
+        return "Summary";
+      case "help":
+        return "Help";
+      case "cancel-confirmation":
+        return "Pause";
+    }
+  }
+
   private screenTitle(): string {
     switch (this.screen) {
       case "walkthrough":
+      case "explanation":
         return this.currentUnit()?.unit.title ?? "Review inventory";
       case "comment-editor":
         return "Review comment";
-      case "explanation":
-        return "Agent explanation";
       case "inventory":
       case "inventory-diff":
         return "Review inventory";
@@ -2006,15 +2073,17 @@ function renderWalkthroughSummary(
   theme: ReviewUiTheme,
   width: number,
 ): string[] {
-  const lines = [theme.fg("accent", theme.bold("Review this change"))];
-  lines.push(
+  const lines = [
+    "",
     ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
-  );
-  lines.push(theme.fg("muted", theme.bold("Focus")));
-  for (const focus of unit.reviewFocus.slice(0, 2)) {
+    "",
+    theme.fg("muted", theme.bold("Review checks")),
+  ];
+  for (const [index, focus] of unit.reviewFocus.slice(0, 2).entries()) {
     lines.push(
-      ...wrapStyled(
-        `${theme.fg("accent", "• ")}${theme.fg("text", safeText(focus))}`,
+      ...wrapWithPrefix(
+        theme.fg("accent", `${String(index + 1).padStart(2, "0")}  `),
+        theme.fg("text", safeText(focus)),
         width,
       ),
     );
@@ -2027,9 +2096,7 @@ function renderWalkthroughSummary(
       ),
     );
   } else {
-    lines.push(
-      theme.fg("dim", "Press e for context and the full explanation."),
-    );
+    lines.push(theme.fg("dim", "Press e for complete context."));
   }
   return lines;
 }
@@ -2154,11 +2221,10 @@ function renderExplanationLines(
   width: number,
 ): string[] {
   const lines: string[] = [];
-  lines.push(theme.fg("accent", theme.bold("Agent explanation")));
-  addLabeledText(lines, "Why here", unit.whyHere, theme, width);
-  addLabeledText(lines, "Context", unit.context, theme, width);
-  addLabeledText(lines, "What changed", unit.changeSummary, theme, width);
-  lines.push(theme.fg("muted", theme.bold("Review focus")));
+  addSectionText(lines, "Why this comes next", unit.whyHere, theme, width);
+  addSectionText(lines, "Context to keep in mind", unit.context, theme, width);
+  addSectionText(lines, "Change", unit.changeSummary, theme, width);
+  lines.push("", theme.fg("muted", theme.bold("Review checks")));
   for (const focus of unit.reviewFocus) {
     lines.push(
       ...wrapStyled(
@@ -2170,17 +2236,16 @@ function renderExplanationLines(
   return lines;
 }
 
-function addLabeledText(
+function addSectionText(
   lines: string[],
   label: string,
   value: string,
   theme: ReviewUiTheme,
   width: number,
 ): void {
-  const prefix = `${theme.fg("muted", theme.bold(`${label}:`))} `;
-  lines.push(
-    ...wrapWithPrefix(prefix, theme.fg("text", safeText(value)), width),
-  );
+  if (lines.length > 0) lines.push("");
+  lines.push(theme.fg("muted", theme.bold(label)));
+  lines.push(...wrapStyled(theme.fg("text", safeText(value)), width));
 }
 
 const INLINE_SPAN_MERGE_GAP = 6;
@@ -3425,6 +3490,84 @@ function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width), "");
 }
 
+function fitColumns(left: string, right: string, width: number): string {
+  const available = Math.max(1, width);
+  const rightWidth = visibleWidth(right);
+  if (rightWidth + 2 >= available) return fitLine(left, available);
+  const leftWidth = available - rightWidth - 2;
+  const fittedLeft = truncateToWidth(left, leftWidth, "…", true);
+  const gap = " ".repeat(
+    Math.max(2, available - visibleWidth(fittedLeft) - rightWidth),
+  );
+  return fitLine(`${fittedLeft}${gap}${right}`, available);
+}
+
+function packStatusParts(
+  parts: readonly string[],
+  width: number,
+): readonly string[] {
+  const lines: string[] = [];
+  let current = "";
+  for (const part of parts) {
+    const candidate = current.length === 0 ? part : `${current} · ${part}`;
+    if (current.length > 0 && visibleWidth(candidate) > width) {
+      lines.push(current);
+      current = part;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) lines.push(current);
+  return lines;
+}
+
+function renderProgressBar(
+  reviewed: number,
+  total: number,
+  theme: ReviewUiTheme,
+): string {
+  const width = 12;
+  const completed =
+    total === 0 ? 0 : Math.round((Math.min(reviewed, total) / total) * width);
+  return `${theme.fg("accent", "█".repeat(completed))}${theme.fg(
+    "borderMuted",
+    "░".repeat(width - completed),
+  )}`;
+}
+
+function renderSnapshotHeaderAlert(
+  status: SubmissionStatus,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  switch (status) {
+    case "not-checked":
+      return [];
+    case "checking":
+      return [
+        fitLine(theme.fg("warning", "Snapshot check in progress"), width),
+      ];
+    case "repository-drifted":
+      return [
+        fitLine(
+          theme.fg("error", "Snapshot changed; submission is blocked"),
+          width,
+        ),
+      ];
+    case "verification-failed":
+      return [
+        fitLine(
+          theme.fg("error", "Snapshot check failed; submission is blocked"),
+          width,
+        ),
+      ];
+  }
+}
+
+function countNoun(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 const WALKTHROUGH_FOOTERS = [
   "j/k line • ←/→ unit • c comment • d delete • n complete • e details • i inventory • s summary • Esc pause • ? help",
   "j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • Esc pause • ? help",
@@ -3617,19 +3760,6 @@ function fileLineKey(
   line: number,
 ): string {
   return `${fileChangeId}\u0000${side}\u0000${line}`;
-}
-
-function submissionLabel(status: SubmissionStatus): string {
-  switch (status) {
-    case "not-checked":
-      return "check-on-submit";
-    case "checking":
-      return "checking";
-    case "repository-drifted":
-      return "repository-drifted";
-    case "verification-failed":
-      return "verification-failed";
-  }
 }
 
 function halfPage(viewportHeight: number): number {

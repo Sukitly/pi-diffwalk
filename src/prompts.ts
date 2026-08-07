@@ -243,8 +243,11 @@ export function buildReviewKickoffPrompt(
           "- `moves` lists exact relocations detected by comparing changed-line content. Put both sides of a move in the same review unit unless separating them is the honest reading order.",
         ]),
     "- Provide at least one review unit; do not skip everything.",
-    "- Keep titles, context, summaries, and questions explanatory. Do not paste patch text into the tool arguments.",
-    "- Each `reviewFocus` question must name a specific way the change could be wrong. A mechanical unit needs one question; do not pad with restatements of `changeSummary`.",
+    "- `title`: one concise phrase.",
+    "- `whyHere`: one sentence explaining the dependency or reading order.",
+    "- `context`: one to three sentences with only the required call path, contract, or invariant.",
+    "- `changeSummary`: one or two direct behavior sentences; no patch text.",
+    "- `reviewFocus`: one to three distinct failure questions; do not restate the summary.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
     ...(rules === undefined
       ? []

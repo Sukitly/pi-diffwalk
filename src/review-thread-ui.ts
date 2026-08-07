@@ -254,18 +254,13 @@ export class ReviewThreadComponent implements Component, Focusable {
 
   private renderReplyEditor(width: number, rows: number): readonly string[] {
     const thread = this.currentThread();
-    const header = [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk reply • ${thread?.id ?? "no thread"} • frozen snapshot ${this.batch.snapshotId}`,
-          ),
-        ),
-        width,
-      ),
-      "",
-    ];
+    const header = renderScreenHeader(
+      "Reply",
+      "Reviewer follow-up",
+      thread?.id,
+      this.theme,
+      width,
+    );
     const footer = [
       fitLine(
         this.theme.fg(
@@ -276,9 +271,7 @@ export class ReviewThreadComponent implements Component, Focusable {
       ),
     ];
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
-    const body: string[] = [
-      this.theme.fg("accent", this.theme.bold("Reviewer follow-up")),
-    ];
+    const body: string[] = [];
     if (thread !== undefined) {
       body.push(
         ...wrapStyled(
@@ -310,25 +303,13 @@ export class ReviewThreadComponent implements Component, Focusable {
 
   private renderSubmission(width: number, rows: number): readonly string[] {
     const drafts = this.draftThreads();
-    const header = [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk follow-up • ${drafts.length} repl${drafts.length === 1 ? "y" : "ies"}`,
-          ),
-        ),
-        width,
-      ),
-      fitLine(
-        this.theme.fg(
-          "muted",
-          `Anchored to frozen snapshot ${this.batch.snapshotId}. New code requires another /diffwalk review.`,
-        ),
-        width,
-      ),
-      "",
-    ];
+    const header = renderScreenHeader(
+      "Follow-up",
+      `${countNoun(drafts.length, "reply")} ready`,
+      undefined,
+      this.theme,
+      width,
+    );
     const footer = [
       fitLine(
         this.theme.fg(
@@ -383,26 +364,52 @@ export class ReviewThreadComponent implements Component, Focusable {
       (thread) => thread.resolved,
     ).length;
     const drafts = this.draftThreads().length;
+    const current = this.currentThread();
+    const position =
+      visible === 0
+        ? "No open threads"
+        : `Thread ${this.threadIndex + 1}/${visible}`;
+    const title =
+      current === undefined
+        ? "All conversations resolved"
+        : `${current.id} · ${current.resolved ? "Resolved" : "Open"}`;
+    const statusParts = [
+      `${answered}/${total} answered`,
+      `${resolved}/${total} resolved`,
+      countNoun(drafts, "draft"),
+    ];
+    const brand = this.theme.fg(
+      "accent",
+      this.theme.bold("DiffWalk / Threads"),
+    );
+
+    if (width >= 88) {
+      return [
+        fitColumns(brand, this.theme.fg("muted", position), width),
+        fitColumns(
+          this.theme.fg("text", this.theme.bold(title)),
+          this.theme.fg("muted", statusParts.join(" · ")),
+          width,
+        ),
+        "",
+      ];
+    }
+    if (width >= 48) {
+      return [
+        fitLine(`${brand}${this.theme.fg("dim", ` · ${position}`)}`, width),
+        fitLine(this.theme.fg("text", this.theme.bold(title)), width),
+        ...packStatusParts(statusParts, width).map((line) =>
+          fitLine(this.theme.fg("muted", line), width),
+        ),
+      ];
+    }
     return [
-      fitLine(
-        this.theme.fg(
-          "accent",
-          this.theme.bold(
-            `DiffWalk threads • ${visible === 0 ? 0 : this.threadIndex + 1}/${visible} visible • answered ${answered}/${total} • resolved ${resolved}/${total} • drafts ${drafts}`,
-          ),
-        ),
-        width,
+      fitLine(brand, width),
+      fitLine(this.theme.fg("muted", position), width),
+      fitLine(this.theme.fg("text", this.theme.bold(title)), width),
+      ...packStatusParts(statusParts, width).map((line) =>
+        fitLine(this.theme.fg("muted", line), width),
       ),
-      fitLine(
-        this.theme.fg(
-          "text",
-          this.currentThread() === undefined
-            ? "All conversations resolved • Enter complete"
-            : `${this.currentThread()?.id} • ${this.currentThread()?.resolved ? "resolved" : "open"} • frozen snapshot`,
-        ),
-        width,
-      ),
-      "",
     ];
   }
 
@@ -795,30 +802,28 @@ function renderThread(
     );
     if (item === undefined) continue;
     const selectionMarker = selected && first ? "▌" : " ";
+    const turnLabel = displayTurn(turn.id);
     const reviewerMetadata = first
-      ? `${thread.id} • ${turn.id} • ${status} • You`
-      : `${thread.id} • ${turn.id} • You`;
+      ? `${thread.id} · ${status === "open" ? "Open" : "Resolved"} · ${turnLabel}`
+      : `${thread.id} · ${turnLabel}`;
     const reviewerRows = [
       ...wrapStyled(
         theme.fg(
           "accent",
-          theme.bold(`${selectionMarker} [${reviewerMetadata}]`),
+          theme.bold(`${selectionMarker} ${reviewerMetadata}`),
         ),
         contentWidth,
       ),
+      theme.fg("muted", theme.bold("  You")),
       ...wrapWithPrefix(
         "  ",
         theme.fg("text", safeText(item.reviewerBody)),
         contentWidth,
       ),
     ];
-    const response =
-      item.agentResponse?.body ?? "Awaiting structured Agent response.";
+    const response = item.agentResponse?.body ?? "Awaiting Agent response.";
     const agentRows = [
-      ...wrapStyled(
-        theme.fg("muted", `  [${turn.id} • Agent response]`),
-        contentWidth,
-      ),
+      theme.fg("muted", theme.bold("  Agent")),
       ...wrapWithPrefix(
         "  ",
         theme.fg(
@@ -851,7 +856,7 @@ function renderThread(
   if (thread.draftReply !== undefined) {
     const draftRows = [
       ...wrapStyled(
-        theme.fg("accent", theme.bold("  [Draft follow-up]")),
+        theme.fg("accent", theme.bold("  Draft follow-up")),
         contentWidth,
       ),
       ...wrapWithPrefix(
@@ -989,6 +994,63 @@ function wrapStyled(text: string, width: number): string[] {
 
 function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width), "");
+}
+
+function fitColumns(left: string, right: string, width: number): string {
+  const available = Math.max(1, width);
+  const rightWidth = visibleWidth(right);
+  if (rightWidth + 2 >= available) return fitLine(left, available);
+  const leftWidth = available - rightWidth - 2;
+  const fittedLeft = truncateToWidth(left, leftWidth, "…", true);
+  const gap = " ".repeat(
+    Math.max(2, available - visibleWidth(fittedLeft) - rightWidth),
+  );
+  return fitLine(`${fittedLeft}${gap}${right}`, available);
+}
+
+function packStatusParts(
+  parts: readonly string[],
+  width: number,
+): readonly string[] {
+  const lines: string[] = [];
+  let current = "";
+  for (const part of parts) {
+    const candidate = current.length === 0 ? part : `${current} · ${part}`;
+    if (current.length > 0 && visibleWidth(candidate) > width) {
+      lines.push(current);
+      current = part;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) lines.push(current);
+  return lines;
+}
+
+function renderScreenHeader(
+  screen: string,
+  title: string,
+  right: string | undefined,
+  theme: ThreadUiTheme,
+  width: number,
+): readonly string[] {
+  const brand = theme.fg("accent", theme.bold(`DiffWalk / ${screen}`));
+  return [
+    right === undefined
+      ? fitLine(brand, width)
+      : fitColumns(brand, theme.fg("muted", right), width),
+    fitLine(theme.fg("text", theme.bold(title)), width),
+    "",
+  ];
+}
+
+function displayTurn(turnId: ReviewThreadTurnId): string {
+  const number = turnId.startsWith("T") ? turnId.slice(1) : turnId;
+  return `Turn ${number}`;
+}
+
+function countNoun(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function fillLine(line: string, width: number): string {

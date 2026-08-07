@@ -119,12 +119,12 @@ A frozen slice can contain changed lines owned by another unit, explicitly skipp
 
 Each unit should include:
 
-- **Why here:** Why this is the right point to inspect now.
-- **Context:** The call path, contract, or invariant needed to understand the code.
-- **What changed:** A direct description of the behavioral or structural change.
-- **Review focus:** Concrete questions the reviewer should answer.
+- **Title:** A concise phrase naming the review unit.
+- **Why this comes next:** One sentence explaining the dependency or reading-order reason for the unit.
+- **Context to keep in mind:** The call path, contract, or invariant needed to understand the code.
+- **Change:** A direct description of the behavioral or structural change.
+- **Review checks:** One to three distinct questions naming specific ways the change could be wrong.
 - **Diff:** The frozen snapshot content in route order, with repeated changed lines represented once at their owning span.
-- **Next:** Why the following unit comes next.
 
 The agent provides the route and explanation. DiffWalk provides the diff content. The model must never generate or rewrite the displayed patch.
 
@@ -140,18 +140,18 @@ When a signal fires, DiffWalk returns it to the agent once instead of opening th
 
 ## TUI
 
-The walkthrough keeps the default screen focused on the review task and frozen diff. Press `e` when the full call path and agent explanation are needed.
+The walkthrough keeps the default screen focused on the review task and frozen diff. Press `e` when the full reading-order reason, context, and review checks are needed.
 
 ```text
-DiffWalk • unit 3/12 • reviewed 2/12 • comments 1
-Authentication request validation • skipped 1 • unsupported 0 • snapshot check-on-submit
+DiffWalk / Review                                  Unit 3/12
+Authentication request validation
+██░░░░░░░░░░  2/12 reviewed    1 comment · 1 skipped
 
-Review this change
 The handler now validates issuer and audience.
 
-Focus
-• Is the trusted issuer read from configuration?
-• Do existing tokens remain compatible?
+Review checks
+01  Is the trusted issuer read from configuration?
+02  Do existing tokens remain compatible?
 
 src/auth/handler.ts
      46    46   const request = await parse(raw)
@@ -166,6 +166,8 @@ test/auth/handler.test.ts
 
 j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • ? help
 ```
+
+The header separates the current screen, unit title, and review totals. Wide terminals add a progress bar and right-align the unit position. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked.
 
 One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. Terminals too short to spare a line keep every line for diff content.
 
@@ -185,7 +187,7 @@ Controls:
 | `l`, `Right` | Move to the next review unit without marking anything reviewed |
 | `c` | Add or edit a comment on the selected line |
 | `d` | Delete the comment on the selected line |
-| `e` | Open the complete agent explanation |
+| `e` | Open the complete unit details |
 | `i` | Open the frozen snapshot inventory |
 | `s` | Open the comment summary and submission page |
 | `?` | Open or close the complete keyboard reference on read-only screens |
@@ -208,7 +210,7 @@ The final page supports two submission modes:
 
 The comments are returned only after the reviewer explicitly completes every planned review unit and submits the batch. An incomplete summary sends Enter back to the first pending unit. This keeps the review uninterrupted and prevents the agent from changing later regions while the human is still reading the snapshot. Submission rechecks the repository state; drift blocks submission and leaves draft comments in the walkthrough. Snapshot verification can be cancelled without losing drafts.
 
-The agent must call `submit_diffwalk_responses` with the batch ID, pending turn ID, and exactly one non-empty response for every thread in that turn. Missing, duplicate, unknown, blank, repeated, stale-turn, or cross-batch responses are rejected. The tool opens a full-screen follow-up view. If the reviewer submits more replies, the tool continues the agent turn with the new conversation turn instead of ending it. The follow-up view derives compact context windows from the frozen snapshot and merges adjacent windows, so unrelated route regions are not shown.
+The agent must call `submit_diffwalk_responses` with the batch ID, pending turn ID, and exactly one non-empty response for every thread in that turn. Each response answers first, then gives evidence or applied changes, and ends with any uncertainty. Missing, duplicate, unknown, blank, repeated, stale-turn, or cross-batch responses are rejected. The tool opens a full-screen follow-up view. Reviewer and Agent text is shown under explicit role labels, while thread ID, status, and turn stay separate from the message body. If the reviewer submits more replies, the tool continues the agent turn with the new conversation turn instead of ending it. The follow-up view derives compact context windows from the frozen snapshot and merges adjacent windows, so unrelated route regions are not shown.
 
 Follow-up controls:
 

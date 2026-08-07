@@ -37,7 +37,7 @@ export const ReviewResponseCandidateSchema = Type.Object(
           }),
           body: Type.String({
             description:
-              "Direct answer to the latest reviewer message in this thread",
+              "Direct response to the latest reviewer message: answer first, then give evidence or applied changes, and end with any uncertainty",
           }),
         },
         { additionalProperties: false },

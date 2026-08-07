@@ -476,17 +476,50 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   const harness = createHarness(100, 30);
   const walkthrough = renderText(harness);
 
-  assert.match(walkthrough, /Review this change/);
+  assert.match(walkthrough, /Review checks/);
   assert.match(walkthrough, /src\/entry 文\\nfile\.ts/);
   assert.doesNotMatch(walkthrough, /Git snapshot diff/);
   assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
-  assert.doesNotMatch(walkthrough, /Why here/);
+  assert.doesNotMatch(walkthrough, /Why this comes next/);
 
   press(harness.component, "e");
   const explanation = renderText(harness);
-  assert.match(explanation, /Agent explanation/);
-  assert.match(explanation, /Why here/);
+  assert.match(explanation, /DiffWalk \/ Details/);
+  assert.match(explanation, /Why this comes next/);
+  assert.match(explanation, /Context to keep in mind/);
+  assert.match(explanation, /Review checks/);
   assert.doesNotMatch(explanation, /src\/entry 文\\nfile\.ts/);
+});
+
+test("groups responsive header information by priority", () => {
+  const harness = createHarness(120, 30);
+
+  let lines = harness.component.render(120).map((line) => line.trimEnd());
+  assert.match(lines[0] ?? "", /^DiffWalk \/ Review.*Unit 1\/2$/);
+  assert.match(lines[1] ?? "", /Request entry point/);
+  assert.match(lines[2] ?? "", /0\/2 reviewed.*0 comments.*1 skipped/);
+  assert.doesNotMatch(lines.slice(0, 3).join("\n"), /snapshot/);
+
+  harness.terminal.columns = 80;
+  harness.terminal.rows = 24;
+  lines = harness.component.render(80).map((line) => line.trimEnd());
+  assert.match(lines[0] ?? "", /^DiffWalk \/ Review · Unit 1\/2$/);
+  assert.match(lines[2] ?? "", /0\/2 reviewed · 0 comments · 1 skipped/);
+  assert.match(lines.join("\n"), /Does validation preserve compatibility/);
+
+  harness.terminal.columns = 40;
+  lines = harness.component.render(40).map((line) => line.trimEnd());
+  assert.equal(lines[0], "DiffWalk / Review · 1/2");
+  assert.equal(lines[2], "Reviewed 0/2");
+  assert.match(lines[3] ?? "", /0 comments · 1 skipped/);
+
+  harness.terminal.columns = 18;
+  lines = harness.component.render(18).map((line) => line.trimEnd());
+  assert.equal(lines[0], "DiffWalk · 1/2");
+  assert.match(lines.slice(2, 7).join("\n"), /Reviewed 0\/2/);
+  assert.match(lines.slice(2, 7).join("\n"), /0 comments/);
+  assert.match(lines.slice(2, 7).join("\n"), /1 skipped/);
+  assert.match(lines.slice(2, 7).join("\n"), /2 unsupported/);
 });
 
 test("keeps core workflow actions in the responsive walkthrough footer", () => {
@@ -523,7 +556,7 @@ test("opens full keyboard help and returns without moving the review", () => {
 
   press(harness.component, "?");
   const walkthrough = renderText(harness);
-  assert.match(walkthrough, /unit 1\/2/);
+  assert.match(walkthrough, /Unit 1\/2/);
   assert.match(walkthrough, />\s+5\s+\+const value = validate/);
 });
 
@@ -539,7 +572,7 @@ test("scrolls keyboard help and returns to the screen that opened it", () => {
   assert.match(renderText(harness), /Review workflow/);
 
   press(harness.component, "\u001b");
-  assert.match(renderText(harness), /Agent explanation/);
+  assert.match(renderText(harness), /DiffWalk \/ Details/);
 });
 
 test("keeps question marks as text in the comment editor", () => {
@@ -708,12 +741,12 @@ test("moves between semantic units and preserves each unit cursor", () => {
   press(harness.component, "j", "j");
 
   press(harness.component, "n");
-  assert.match(renderText(harness), /unit 2\/2/);
+  assert.match(renderText(harness), /Unit 2\/2/);
   assert.match(renderText(harness), /Public contract/);
   assert.match(renderText(harness), /export interface Contract/);
 
   press(harness.component, "p");
-  assert.match(renderText(harness), /unit 1\/2/);
+  assert.match(renderText(harness), /Unit 1\/2/);
   press(harness.component, "c");
   assert.match(renderText(harness), /const value = validate\(request\.value\)/);
 });
@@ -824,25 +857,25 @@ test("moves between units with arrow keys without marking them reviewed", () => 
   const harness = createHarness(80, 18);
 
   press(harness.component, "\u001b[C");
-  assert.match(renderText(harness), /unit 2\/2/);
-  assert.match(renderText(harness), /reviewed 0\/2/);
+  assert.match(renderText(harness), /Unit 2\/2/);
+  assert.match(renderText(harness), /0\/2 reviewed/);
 
   press(harness.component, "\u001b[D");
-  assert.match(renderText(harness), /unit 1\/2/);
+  assert.match(renderText(harness), /Unit 1\/2/);
 
   press(harness.component, "n");
-  assert.match(renderText(harness), /reviewed 1\/2/);
+  assert.match(renderText(harness), /1\/2 reviewed/);
 });
 
 test("moves between units with h and l without marking them reviewed", () => {
   const harness = createHarness(80, 18);
 
   press(harness.component, "l");
-  assert.match(renderText(harness), /unit 2\/2/);
-  assert.match(renderText(harness), /reviewed 0\/2/);
+  assert.match(renderText(harness), /Unit 2\/2/);
+  assert.match(renderText(harness), /0\/2 reviewed/);
 
   press(harness.component, "h");
-  assert.match(renderText(harness), /unit 1\/2/);
+  assert.match(renderText(harness), /Unit 1\/2/);
 });
 
 test("jumps to the first and last commentable line with gg and G", () => {
@@ -874,7 +907,7 @@ test("a bare g prefix does not swallow the following non-g key", () => {
   );
 
   press(harness.component, "g", "e");
-  assert.match(renderText(harness), /Agent explanation/);
+  assert.match(renderText(harness), /DiffWalk \/ Details/);
 });
 
 test("typing g and digits in the comment editor stays text input", () => {
@@ -912,10 +945,10 @@ test("clamps a count prefix on unit movement", () => {
   const harness = createHarness(80, 18);
 
   press(harness.component, "9", "l");
-  assert.match(renderText(harness), /unit 2\/2/);
+  assert.match(renderText(harness), /Unit 2\/2/);
 
   press(harness.component, "9", "h");
-  assert.match(renderText(harness), /unit 1\/2/);
+  assert.match(renderText(harness), /Unit 1\/2/);
 });
 
 test("clears a pending count when a non-movement key follows", () => {
@@ -926,7 +959,7 @@ test("clears a pending count when a non-movement key follows", () => {
   );
 
   press(harness.component, "5", "e");
-  assert.match(renderText(harness), /Agent explanation/);
+  assert.match(renderText(harness), /DiffWalk \/ Details/);
   press(harness.component, "h");
 
   press(harness.component, "j");
@@ -1456,7 +1489,7 @@ test("navigates the inventory with vim keys", () => {
   press(harness.component, "h");
   assert.match(renderText(harness), /Review inventory/);
   press(harness.component, "h");
-  assert.match(renderText(harness), /Review this change/);
+  assert.match(renderText(harness), /Review checks/);
 });
 
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
@@ -1483,7 +1516,7 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
   assert.equal(comment?.body, "请检查\n失败路径");
   assert.equal(comment?.side, "old");
   assert.equal(comment?.line, 5);
-  assert.match(renderText(harness), /comments 1/);
+  assert.match(renderText(harness), /1 comment/);
   assert.match(
     renderText(harness),
     /\[Draft comment\][\s\S]*请检查[\s\S]*失败路径/,
@@ -1533,7 +1566,7 @@ test("prefills an existing comment and discards an edit without changing it", ()
   press(harness.component, "!", "\u001b");
 
   assert.equal(harness.state.review.comments[0]?.body, "Original");
-  assert.match(renderText(harness), /Review this change/);
+  assert.match(renderText(harness), /Review checks/);
 });
 
 test("keeps comment input errors local to the editor", () => {
@@ -1759,7 +1792,7 @@ test("shows planned, carried, skipped, metadata, binary, and notice inventory", 
   assert.match(output, /Mode: 100644 -> 100755/);
   assert.match(output, /binary: added:.*asset\.bin/);
   assert.match(output, /binary: deleted:.*removed\.bin/);
-  assert.match(output, /unsupported 2/);
+  assert.match(output, /2 unsupported/);
   assert.match(output, /notice:.*cancelled\.ts/);
 });
 
@@ -1783,7 +1816,7 @@ test("continues the first pending section before submission", async () => {
   press(harness.component, "\r");
   assert.deepEqual(harness.submittedModes, []);
   assert.match(renderText(harness), /Continue reviewing this section/);
-  assert.match(renderText(harness), /unit 1\/2/);
+  assert.match(renderText(harness), /Unit 1\/2/);
 
   press(harness.component, "n", "n", "\r");
   assert.deepEqual(harness.submittedModes, ["discuss-first"]);
@@ -1835,6 +1868,7 @@ test("aborts pending verification and ignores its late result", async () => {
     },
   });
   press(harness.component, "c", "D", "r", "a", "f", "t", "\r", "n", "n", "\r");
+  assert.match(renderText(harness), /Snapshot check in progress/);
   assert.match(renderText(harness), /Checking the frozen snapshot/);
 
   press(harness.component, "\u001b");
@@ -1857,7 +1891,7 @@ test("pauses explicitly without discarding drafts", () => {
   assert.match(renderText(harness), /Pause to keep 1 draft comment/);
   press(harness.component, "\u001b");
   assert.equal(harness.cancellations.count, 0);
-  assert.match(renderText(harness), /Review this change/);
+  assert.match(renderText(harness), /Review checks/);
 
   press(harness.component, "\u001b", "\r");
   assert.equal(harness.cancellations.count, 1);
@@ -2087,6 +2121,7 @@ test("keeps repository drift in the UI with drafts preserved", async () => {
     new ReviewSnapshotDriftError("repository changed"),
   );
 
+  assert.match(failure.output, /Snapshot changed; submission is blocked/);
   assert.match(failure.output, /Repository drift blocks submission/);
   assert.match(failure.output, /repository changed/);
   assert.match(failure.output, /Draft/);
@@ -2116,6 +2151,7 @@ test("keeps generic verification failures distinct from drift", async () => {
     new Error("git executable unavailable"),
   );
 
+  assert.match(failure.output, /Snapshot check failed; submission is blocked/);
   assert.match(failure.output, /Snapshot verification failed/);
   assert.match(failure.output, /git executable unavailable/);
   assert.doesNotMatch(failure.output, /Repository drift blocks submission/);
