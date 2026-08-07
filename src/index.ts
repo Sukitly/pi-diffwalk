@@ -54,6 +54,12 @@ import {
   assessRouteQuality,
   ReviewRouteAdvisoryNudge,
 } from "./route-advisory.ts";
+import {
+  DIFFWALK_RULES_SOURCE,
+  type DiffWalkRulesLoadResult,
+  type LoadedDiffWalkRules,
+  loadDiffWalkRules,
+} from "./route-rules.ts";
 import { validateReviewRoute } from "./route-validation.ts";
 import {
   type GuidedReviewResult,
@@ -100,12 +106,17 @@ export interface SubmittedReviewMessageDetails {
   readonly commentCount: number;
 }
 
-type CommandContext = Pick<ExtensionCommandContext, "cwd" | "ui">;
+type CommandContext = Pick<
+  ExtensionCommandContext,
+  "cwd" | "isProjectTrusted" | "ui"
+>;
 
 interface PendingReview {
   review: InProgressReview;
   series: ReviewSeries;
   inProgress: boolean;
+  /** Rules are captured once so repeated route kickoffs stay deterministic. */
+  routeRules?: LoadedDiffWalkRules;
   /** Advisory route-quality signals are returned at most once per review. */
   advisoryNudged: boolean;
 }
@@ -158,6 +169,7 @@ export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
   readonly captureRepositoryState: typeof captureRepositoryState;
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
+  readonly loadDiffWalkRules: typeof loadDiffWalkRules;
   readonly openGuidedReview: typeof openGuidedReview;
   readonly openReviewThreads: typeof openReviewThreads;
 }
@@ -166,6 +178,7 @@ const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   captureReviewSnapshot,
   captureRepositoryState,
   assertReviewSnapshotUnchanged,
+  loadDiffWalkRules,
   openGuidedReview,
   openReviewThreads,
 };
@@ -254,19 +267,74 @@ export function registerDiffWalk(
     return result;
   }
 
-  function sendKickoffPrompt(
-    snapshot: ReviewSnapshot,
-    delta: ReviewDelta,
-  ): void {
+  function sendKickoffPrompt(pending: PendingReview): void {
+    const { delta, snapshot } = pending.review;
     pi.sendMessage(
       {
         customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
-        content: buildReviewKickoffPrompt(snapshot, delta),
+        content: buildReviewKickoffPrompt(snapshot, delta, pending.routeRules),
         display: true,
         details: buildKickoffMessageDetails(snapshot, delta),
       },
       { triggerTurn: true },
     );
+  }
+
+  async function captureRouteRules(
+    ctx: CommandContext,
+    snapshot: ReviewSnapshot,
+  ): Promise<LoadedDiffWalkRules | undefined> {
+    if (
+      snapshot.changes.some(
+        (change) =>
+          change.oldPath === DIFFWALK_RULES_SOURCE ||
+          change.newPath === DIFFWALK_RULES_SOURCE,
+      )
+    ) {
+      ctx.ui.notify(
+        `Ignored ${DIFFWALK_RULES_SOURCE} because it is part of snapshot ${snapshot.id}. Project rules cannot shape the review of their own changes.`,
+        "warning",
+      );
+      return undefined;
+    }
+
+    let result: DiffWalkRulesLoadResult;
+    try {
+      result = await dependencies.loadDiffWalkRules(
+        snapshot.repositoryRoot,
+        ctx.isProjectTrusted(),
+      );
+    } catch (error: unknown) {
+      ctx.ui.notify(
+        `Cannot load DiffWalk rules: ${errorMessage(error)} Continuing with the default route instructions.`,
+        "warning",
+      );
+      return undefined;
+    }
+
+    if (result.status === "absent") return undefined;
+    if (result.status === "ignored-untrusted") {
+      ctx.ui.notify(
+        `Ignored ${DIFFWALK_RULES_SOURCE} because the project is not trusted.`,
+        "warning",
+      );
+      return undefined;
+    }
+    if (result.status === "unavailable") {
+      ctx.ui.notify(
+        `${result.reason} Continuing with the default route instructions.`,
+        "warning",
+      );
+      return undefined;
+    }
+
+    await verifySnapshot(
+      pi,
+      dependencies.assertReviewSnapshotUnchanged,
+      snapshot,
+      new AbortController().signal,
+    );
+    return result.rules;
   }
 
   async function startNewReview(
@@ -310,19 +378,22 @@ export function registerDiffWalk(
       );
       return;
     }
+    const routeRules = await captureRouteRules(ctx, snapshot);
     const review = createInProgressReview({
       series,
       snapshot,
       delta,
       timestamp: new Date().toISOString(),
     });
-    pendingReview = {
+    const pending: PendingReview = {
       review,
       series,
       inProgress: false,
+      ...(routeRules === undefined ? {} : { routeRules }),
       advisoryNudged: false,
     };
-    sendKickoffPrompt(snapshot, delta);
+    pendingReview = pending;
+    sendKickoffPrompt(pending);
   }
 
   async function submitPendingReview(
@@ -533,7 +604,7 @@ export function registerDiffWalk(
           await startNewReview(ctx, requestedTarget ?? pendingTarget);
           return;
         }
-        sendKickoffPrompt(existing.review.snapshot, existing.review.delta);
+        sendKickoffPrompt(existing);
         return;
       }
 
@@ -716,6 +787,10 @@ export function registerDiffWalk(
       return renderGuidedReviewToolResult(result.details, theme);
     },
   });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function verifySnapshot(

@@ -36,6 +36,7 @@ import {
   type ReviewResponseCandidateSchema,
   setReviewThreadResolved,
 } from "../src/review-threads.ts";
+import type { DiffWalkRulesLoadResult } from "../src/route-rules.ts";
 import type {
   FileChange,
   FileChangeId,
@@ -68,6 +69,8 @@ interface HarnessBehavior {
   markProgressOnOpen: boolean;
   submissionDrift: boolean;
   resolveThreadOnOpen: boolean;
+  rulesResult: DiffWalkRulesLoadResult;
+  rulesError?: Error;
   snapshot: ReviewSnapshot;
 }
 
@@ -80,6 +83,11 @@ interface SentMessageMeta {
 interface AppendedEntry {
   readonly customType: string;
   readonly data: unknown;
+}
+
+interface RuleLoadCall {
+  readonly repositoryRoot: string;
+  readonly projectTrusted: boolean;
 }
 
 interface Harness {
@@ -95,6 +103,7 @@ interface Harness {
   readonly openedSnapshots: readonly string[];
   readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
+  readonly ruleLoadCalls: readonly RuleLoadCall[];
   readonly behavior: HarnessBehavior;
   /** Replays persisted entries into a fresh harness, as session_start does. */
   readonly restoreSession: (entries: readonly AppendedEntry[]) => Promise<void>;
@@ -111,6 +120,7 @@ function createHarness(
     markProgressOnOpen: false,
     submissionDrift: false,
     resolveThreadOnOpen: false,
+    rulesResult: { status: "absent" },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -127,6 +137,7 @@ function createHarness(
   const openedSnapshots: string[] = [];
   const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
+  const ruleLoadCalls: RuleLoadCall[] = [];
   let sessionStartHandler:
     | ((event: unknown, ctx: unknown) => unknown)
     | undefined;
@@ -198,6 +209,11 @@ function createHarness(
       if (behavior.drift) {
         throw new ReviewSnapshotDriftError("Repository changed.");
       }
+    },
+    async loadDiffWalkRules(repositoryRoot, projectTrusted) {
+      ruleLoadCalls.push({ repositoryRoot, projectTrusted });
+      if (behavior.rulesError !== undefined) throw behavior.rulesError;
+      return behavior.rulesResult;
     },
     async openReviewThreads(_ctx, input) {
       openedThreadBatches.push(input.batch.id);
@@ -298,6 +314,7 @@ function createHarness(
     openedSnapshots,
     openedThreadBatches,
     appendedEntries,
+    ruleLoadCalls,
     behavior,
     restoreSession,
   };
@@ -320,10 +337,13 @@ function renderedText(
 function commandContext(
   mode: ExtensionCommandContext["mode"] = "tui",
   notifications: string[] = [],
+  projectTrusted = true,
+  cwd = "/repo",
 ): ExtensionCommandContext {
   return {
     mode,
-    cwd: "/repo",
+    cwd,
+    isProjectTrusted: () => projectTrusted,
     ui: {
       notify: (message: string) => {
         notifications.push(message);
@@ -574,6 +594,142 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
     ),
     /already has a validated route.*resume it/,
   );
+});
+
+test("captures trusted project rules once from the repository root", async () => {
+  const harness = createHarness({
+    rulesResult: {
+      status: "loaded",
+      rules: { content: "Review security boundaries before callers." },
+    },
+  });
+
+  await harness.command(
+    "",
+    commandContext("tui", [], true, "/repo/packages/service"),
+  );
+  assert.match(
+    harness.sentMessages[0] ?? "",
+    /Review security boundaries before callers\./,
+  );
+
+  harness.behavior.rulesResult = {
+    status: "loaded",
+    rules: { content: "Keep behavioral tests with their implementation." },
+  };
+  await harness.command("", commandContext());
+  assert.match(
+    harness.sentMessages[1] ?? "",
+    /Review security boundaries before callers\./,
+  );
+  assert.doesNotMatch(
+    harness.sentMessages[1] ?? "",
+    /Keep behavioral tests with their implementation\./,
+  );
+  assert.deepEqual(harness.ruleLoadCalls, [
+    { repositoryRoot: "/repo", projectTrusted: true },
+  ]);
+});
+
+test("warns when project trust suppresses an existing rules file", async () => {
+  const notifications: string[] = [];
+  const harness = createHarness({
+    rulesResult: { status: "ignored-untrusted" },
+  });
+
+  await harness.command("", commandContext("tui", notifications, false));
+
+  assert.doesNotMatch(
+    harness.sentMessages[0] ?? "",
+    /BEGIN_DIFFWALK_PROJECT_RULES_JSON/,
+  );
+  assert.match(notifications[0] ?? "", /project is not trusted/);
+  assert.deepEqual(harness.ruleLoadCalls, [
+    { repositoryRoot: "/repo", projectTrusted: false },
+  ]);
+});
+
+test("does not let a changed rules file shape its own review", async () => {
+  const notifications: string[] = [];
+  const harness = createHarness({
+    rulesResult: {
+      status: "loaded",
+      rules: { content: "Skip this file." },
+    },
+    snapshot: makeSnapshot("snapshot-index", [
+      {
+        path: ".pi/diffwalk/rules.md",
+        lines: ["+- Skip this file."],
+      },
+    ]),
+  });
+
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.doesNotMatch(harness.sentMessages[0] ?? "", /Skip this file/);
+  assert.match(notifications[0] ?? "", /cannot shape the review of their own/);
+  assert.deepEqual(harness.ruleLoadCalls, []);
+});
+
+test("falls back when project rules are unavailable", async () => {
+  const notifications: string[] = [];
+  const harness = createHarness({
+    rulesResult: {
+      status: "unavailable",
+      reason: "DiffWalk rules are too large.",
+    },
+  });
+
+  await harness.command("", commandContext("tui", notifications));
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.equal(harness.sentMessages.length, 2);
+  assert.doesNotMatch(
+    harness.sentMessages[0] ?? "",
+    /BEGIN_DIFFWALK_PROJECT_RULES_JSON/,
+  );
+  assert.match(notifications[0] ?? "", /Continuing with the default/);
+  assert.deepEqual(harness.ruleLoadCalls, [
+    { repositoryRoot: "/repo", projectTrusted: true },
+  ]);
+
+  const opened = await harness.tool.execute(
+    "call-rules-unavailable",
+    validRoute(),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(opened.details.status, "paused");
+});
+
+test("falls back when the injected rules loader rejects", async () => {
+  const notifications: string[] = [];
+  const harness = createHarness({
+    rulesError: new Error("Injected loader failure."),
+  });
+
+  await harness.command("", commandContext("tui", notifications));
+
+  assert.match(harness.sentMessages[0] ?? "", /Prepare a semantic route/);
+  assert.match(notifications[0] ?? "", /Injected loader failure/);
+  assert.match(notifications[0] ?? "", /Continuing with the default/);
+});
+
+test("rejects drift detected after trusted rules are captured", async () => {
+  const harness = createHarness({
+    drift: true,
+    rulesResult: {
+      status: "loaded",
+      rules: { content: "Review public contracts first." },
+    },
+  });
+
+  await assert.rejects(
+    harness.command("", commandContext()),
+    ReviewSnapshotDriftError,
+  );
+  assert.equal(harness.sentMessages.length, 0);
 });
 
 test("terminates the initial tool turn when the review is discarded", async () => {

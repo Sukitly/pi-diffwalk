@@ -83,6 +83,20 @@ The agent should normally construct a route that moves through:
 
 This is a default reasoning pattern, not a fixed file order. The agent may choose another route when the change demands it, but every step must explain why it appears at that point in the review.
 
+## Project Review Rules
+
+A trusted project can add route-planning preferences in:
+
+```text
+.pi/diffwalk/rules.md
+```
+
+The file contains Markdown instructions for review order, grouping, explanations, and review focus. DiffWalk resolves it from the repository root and captures its content once when starting a new review. Repeating route preparation for the same frozen snapshot reuses that content. To apply a local rule change to an existing route request, discard the pending review and start a new one.
+
+A missing or blank file preserves the default behavior. The file is limited to 16 KiB and must contain valid UTF-8. DiffWalk warns and continues with the default route instructions when the file is unavailable or invalid. An existing file is ignored with a warning when the project is not trusted. If the rules file itself is part of the change under review, DiffWalk ignores it with a warning so unreviewed instructions cannot shape their own review.
+
+Project review rules customize how the agent presents the review. They cannot change the frozen snapshot, route schema, changed-line coverage requirements, read-only preparation rule, or `guided_review` tool contract.
+
 ## Review Units
 
 A review unit is one conceptual stop in the walkthrough. The agent defines it by drawing spans: a path with an old line range, a new line range, or both.
@@ -243,6 +257,7 @@ src/
   review-span.ts        Changed-line atom, span resolution, and coverage arithmetic
   review-delta.ts       Incremental changed-line classification and delta validation
   review-moves.ts       Exact relocation detection over the frozen snapshot
+  route-rules.ts        Trusted project review preference loading
   in-progress-review.ts Resumable review lifecycle and submission eligibility
   route-validation.ts   Route coverage, ordering, and skip validation
   route-advisory.ts     Advisory route-quality signals and the one-shot nudge
@@ -333,7 +348,8 @@ The current version includes:
 - tracked and untracked file support
 - changed-line addressing with whole-file reconstruction
 - agent-planned review routes with semantic, possibly cross-file, review units
-- an inventory-only agent prompt that carries no file content
+- an inventory-only agent prompt that carries no reviewed source content
+- trusted project review preferences from `.pi/diffwalk/rules.md`
 - complete changed-line coverage validation
 - line-oriented diff navigation
 - inline comment editing and anchored draft display
