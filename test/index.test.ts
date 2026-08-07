@@ -36,6 +36,7 @@ import {
   type ReviewResponseCandidateSchema,
   setReviewThreadResolved,
 } from "../src/review-threads.ts";
+import type { LoadedDiffWalkRules } from "../src/route-rules.ts";
 import type {
   FileChange,
   FileChangeId,
@@ -68,6 +69,7 @@ interface HarnessBehavior {
   markProgressOnOpen: boolean;
   submissionDrift: boolean;
   resolveThreadOnOpen: boolean;
+  rules?: LoadedDiffWalkRules;
   snapshot: ReviewSnapshot;
 }
 
@@ -80,6 +82,11 @@ interface SentMessageMeta {
 interface AppendedEntry {
   readonly customType: string;
   readonly data: unknown;
+}
+
+interface RuleLoadCall {
+  readonly cwd: string;
+  readonly projectTrusted: boolean;
 }
 
 interface Harness {
@@ -95,6 +102,7 @@ interface Harness {
   readonly openedSnapshots: readonly string[];
   readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
+  readonly ruleLoadCalls: readonly RuleLoadCall[];
   readonly behavior: HarnessBehavior;
   /** Replays persisted entries into a fresh harness, as session_start does. */
   readonly restoreSession: (entries: readonly AppendedEntry[]) => Promise<void>;
@@ -127,6 +135,7 @@ function createHarness(
   const openedSnapshots: string[] = [];
   const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
+  const ruleLoadCalls: RuleLoadCall[] = [];
   let sessionStartHandler:
     | ((event: unknown, ctx: unknown) => unknown)
     | undefined;
@@ -198,6 +207,10 @@ function createHarness(
       if (behavior.drift) {
         throw new ReviewSnapshotDriftError("Repository changed.");
       }
+    },
+    async loadDiffWalkRules(cwd, projectTrusted) {
+      ruleLoadCalls.push({ cwd, projectTrusted });
+      return projectTrusted ? behavior.rules : undefined;
     },
     async openReviewThreads(_ctx, input) {
       openedThreadBatches.push(input.batch.id);
@@ -298,6 +311,7 @@ function createHarness(
     openedSnapshots,
     openedThreadBatches,
     appendedEntries,
+    ruleLoadCalls,
     behavior,
     restoreSession,
   };
@@ -320,10 +334,12 @@ function renderedText(
 function commandContext(
   mode: ExtensionCommandContext["mode"] = "tui",
   notifications: string[] = [],
+  projectTrusted = true,
 ): ExtensionCommandContext {
   return {
     mode,
     cwd: "/repo",
+    isProjectTrusted: () => projectTrusted,
     ui: {
       notify: (message: string) => {
         notifications.push(message);
@@ -574,6 +590,45 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
     ),
     /already has a validated route.*resume it/,
   );
+});
+
+test("loads trusted project rules for every route kickoff", async () => {
+  const harness = createHarness({
+    rules: {
+      source: ".pi/diffwalk/rules.md",
+      content: "Review security boundaries before callers.",
+    },
+  });
+
+  await harness.command("", commandContext());
+  assert.match(
+    harness.sentMessages[0] ?? "",
+    /Review security boundaries before callers\./,
+  );
+
+  harness.behavior.rules = {
+    source: ".pi/diffwalk/rules.md",
+    content: "Keep behavioral tests with their implementation.",
+  };
+  await harness.command("", commandContext());
+  assert.match(
+    harness.sentMessages[1] ?? "",
+    /Keep behavioral tests with their implementation\./,
+  );
+  assert.deepEqual(harness.ruleLoadCalls, [
+    { cwd: "/repo", projectTrusted: true },
+    { cwd: "/repo", projectTrusted: true },
+  ]);
+
+  const untrusted = createHarness({ rules: harness.behavior.rules });
+  await untrusted.command("", commandContext("tui", [], false));
+  assert.doesNotMatch(
+    untrusted.sentMessages[0] ?? "",
+    /Keep behavioral tests with their implementation\./,
+  );
+  assert.deepEqual(untrusted.ruleLoadCalls, [
+    { cwd: "/repo", projectTrusted: false },
+  ]);
 });
 
 test("terminates the initial tool turn when the review is discarded", async () => {

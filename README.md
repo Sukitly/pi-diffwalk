@@ -83,6 +83,18 @@ The agent should normally construct a route that moves through:
 
 This is a default reasoning pattern, not a fixed file order. The agent may choose another route when the change demands it, but every step must explain why it appears at that point in the review.
 
+## Project Review Rules
+
+A trusted project can add route-planning preferences in:
+
+```text
+.pi/diffwalk/rules.md
+```
+
+The file contains Markdown instructions for review order, grouping, explanations, and review focus. DiffWalk reads it for every route-planning kickoff, so changes apply the next time `/diffwalk` requests or repeats a route. A missing or blank file preserves the default behavior. The file is limited to 16 KiB to protect the model context.
+
+Project review rules customize how the agent presents the review. They cannot change the frozen snapshot, route schema, changed-line coverage requirements, read-only preparation rule, or `guided_review` tool contract. DiffWalk ignores the file when the project is not trusted.
+
 ## Review Units
 
 A review unit is one conceptual stop in the walkthrough. The agent defines it by drawing spans: a path with an old line range, a new line range, or both.
@@ -243,6 +255,7 @@ src/
   review-span.ts        Changed-line atom, span resolution, and coverage arithmetic
   review-delta.ts       Incremental changed-line classification and delta validation
   review-moves.ts       Exact relocation detection over the frozen snapshot
+  route-rules.ts        Trusted project review preference loading
   in-progress-review.ts Resumable review lifecycle and submission eligibility
   route-validation.ts   Route coverage, ordering, and skip validation
   route-advisory.ts     Advisory route-quality signals and the one-shot nudge

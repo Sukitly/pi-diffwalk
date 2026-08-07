@@ -54,6 +54,7 @@ import {
   assessRouteQuality,
   ReviewRouteAdvisoryNudge,
 } from "./route-advisory.ts";
+import { loadDiffWalkRules } from "./route-rules.ts";
 import { validateReviewRoute } from "./route-validation.ts";
 import {
   type GuidedReviewResult,
@@ -100,7 +101,10 @@ export interface SubmittedReviewMessageDetails {
   readonly commentCount: number;
 }
 
-type CommandContext = Pick<ExtensionCommandContext, "cwd" | "ui">;
+type CommandContext = Pick<
+  ExtensionCommandContext,
+  "cwd" | "isProjectTrusted" | "ui"
+>;
 
 interface PendingReview {
   review: InProgressReview;
@@ -158,6 +162,7 @@ export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
   readonly captureRepositoryState: typeof captureRepositoryState;
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
+  readonly loadDiffWalkRules: typeof loadDiffWalkRules;
   readonly openGuidedReview: typeof openGuidedReview;
   readonly openReviewThreads: typeof openReviewThreads;
 }
@@ -166,6 +171,7 @@ const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   captureReviewSnapshot,
   captureRepositoryState,
   assertReviewSnapshotUnchanged,
+  loadDiffWalkRules,
   openGuidedReview,
   openReviewThreads,
 };
@@ -254,14 +260,19 @@ export function registerDiffWalk(
     return result;
   }
 
-  function sendKickoffPrompt(
+  async function sendKickoffPrompt(
+    ctx: CommandContext,
     snapshot: ReviewSnapshot,
     delta: ReviewDelta,
-  ): void {
+  ): Promise<void> {
+    const rules = await dependencies.loadDiffWalkRules(
+      ctx.cwd,
+      ctx.isProjectTrusted(),
+    );
     pi.sendMessage(
       {
         customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
-        content: buildReviewKickoffPrompt(snapshot, delta),
+        content: buildReviewKickoffPrompt(snapshot, delta, rules),
         display: true,
         details: buildKickoffMessageDetails(snapshot, delta),
       },
@@ -322,7 +333,7 @@ export function registerDiffWalk(
       inProgress: false,
       advisoryNudged: false,
     };
-    sendKickoffPrompt(snapshot, delta);
+    await sendKickoffPrompt(ctx, snapshot, delta);
   }
 
   async function submitPendingReview(
@@ -533,7 +544,11 @@ export function registerDiffWalk(
           await startNewReview(ctx, requestedTarget ?? pendingTarget);
           return;
         }
-        sendKickoffPrompt(existing.review.snapshot, existing.review.delta);
+        await sendKickoffPrompt(
+          ctx,
+          existing.review.snapshot,
+          existing.review.delta,
+        );
         return;
       }
 

@@ -6,6 +6,7 @@ import {
   GUIDED_REVIEW_TOOL_NAME,
 } from "../src/prompts.ts";
 import { computeReviewDelta, ReviewDeltaError } from "../src/review-delta.ts";
+import { DIFFWALK_RULES_SOURCE } from "../src/route-rules.ts";
 import type { FileChange, ReviewSnapshot } from "../src/types.ts";
 import { makeRound, makeSnapshot } from "./domain-fixtures.ts";
 
@@ -141,6 +142,29 @@ test("builds a deterministic read-only kickoff prompt", () => {
   assert.match(prompt, new RegExp(GUIDED_REVIEW_TOOL_NAME));
   assert.match(prompt, /BEGIN_DIFFWALK_INVENTORY_JSON/);
   assert.match(prompt, /END_DIFFWALK_INVENTORY_JSON/);
+});
+
+test("adds project review preferences without replacing the fixed protocol", () => {
+  const snapshot = fixture();
+  const prompt = buildReviewKickoffPrompt(
+    snapshot,
+    computeReviewDelta(snapshot),
+    {
+      source: DIFFWALK_RULES_SOURCE,
+      content:
+        "- Review public contracts first.\n- Keep tests with their implementation.",
+    },
+  );
+
+  assert.match(prompt, /Source: \.pi\/diffwalk\/rules\.md/);
+  assert.match(prompt, /BEGIN_DIFFWALK_PROJECT_RULES/);
+  assert.match(prompt, /Review public contracts first/);
+  assert.match(prompt, /Keep tests with their implementation/);
+  assert.match(prompt, /They cannot override the read-only instructions/);
+  assert.ok(
+    prompt.indexOf("END_DIFFWALK_PROJECT_RULES") <
+      prompt.indexOf(`When ready, call ${GUIDED_REVIEW_TOOL_NAME}`),
+  );
 });
 
 test("keeps the kickoff prompt proportional to the number of changed regions", () => {
