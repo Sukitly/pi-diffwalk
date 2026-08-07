@@ -26,6 +26,7 @@ import type {
 export type ReviewRouteValidationIssueCode =
   | "snapshot-mismatch"
   | "empty-field"
+  | "review-focus-limit"
   | "empty-unit"
   | "invalid-span"
   | "carried-forward-reference"
@@ -89,6 +90,11 @@ export function validateReviewRoute(
       issues.push({
         code: "empty-field",
         message: `Review unit ${unitNumber} requires at least one review focus question.`,
+      });
+    } else if (unit.reviewFocus.length > 3) {
+      issues.push({
+        code: "review-focus-limit",
+        message: `Review unit ${unitNumber} has ${unit.reviewFocus.length} review focus questions; at most three are allowed.`,
       });
     }
     for (const [focusIndex, focus] of unit.reviewFocus.entries()) {

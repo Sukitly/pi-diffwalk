@@ -328,6 +328,7 @@ const ReviewUnitCandidateSchema = Type.Object(
       description:
         "One to three distinct questions naming specific ways this change could be wrong",
       minItems: 1,
+      maxItems: 3,
     }),
     spans: Type.Array(ReviewSpanCandidateSchema, {
       description:
