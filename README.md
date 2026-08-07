@@ -156,12 +156,12 @@ src/auth/handler.ts
 test/auth/handler.test.ts
            88 + test("rejects a foreign issuer", async () => {
 
-j/k select line • c comment • n complete section • e details • s summary • Esc pause
+j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • ? help
 ```
 
 One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. Terminals too short to spare a line keep every line for diff content.
 
-The normal flow is to select changed lines with `j` or `k`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `s` to inspect review progress and comments at any time.
+The normal flow is to select changed lines with `j` or `k`, move between review units with `Left` or `Right`, add comments with `c`, and explicitly complete each review unit with `n`. Completing the final unit opens the submission page. Press `?` on any read-only screen for the complete keyboard reference. Press `s` to inspect review progress and comments at any time.
 
 Controls:
 
@@ -180,9 +180,12 @@ Controls:
 | `e` | Open the complete agent explanation |
 | `i` | Open the frozen snapshot inventory |
 | `s` | Open the comment summary and submission page |
+| `?` | Open or close the complete keyboard reference on read-only screens |
 | `Esc` | Return from a secondary page or open the pause and discard screen |
 
-The walkthrough footer shows only the most common keys. The table above is the complete set. On secondary pages `h` and `l` follow `Left` and `Right`: `h` returns from the explanation, inventory, and read-only diff pages, `l` opens the selected inventory entry, and on the submission page both switch the submission mode.
+The walkthrough footer keeps commenting, unit navigation, completion, and help visible. As the terminal widens, it adds details, summary, inventory, pause, and comment deletion; narrower terminals drop those lower-priority hints first. The `?` help page groups the complete controls by workflow, navigation, secondary pages, comment editing, and pause behavior. It is scrollable and returns to the same screen without changing the current unit or selection. In the comment editor, `?` remains ordinary comment text.
+
+On secondary pages `h` and `l` follow `Left` and `Right`: `h` returns from the explanation, inventory, and read-only diff pages, `l` opens the selected inventory entry, and on the submission page both switch the submission mode.
 
 The inventory lists one entry per changed file with its planned, skipped, and carried-forward line counts, plus metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Any changed region can be opened for explicit read-only inspection, including regions outside the planned route.
 

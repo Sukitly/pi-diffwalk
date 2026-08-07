@@ -90,6 +90,7 @@ type ReviewScreen =
   | "inventory"
   | "inventory-diff"
   | "summary"
+  | "help"
   | "cancel-confirmation";
 
 type SubmissionStatus =
@@ -277,6 +278,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   private readonly editor: Editor;
   private screen: ReviewScreen = "walkthrough";
   private returnScreen: ReviewScreen = "walkthrough";
+  private helpReturnScreen: ReviewScreen = "walkthrough";
   private unitIndex = 0;
   private readonly selectedTargetByUnit: number[];
   private diffOffset = 0;
@@ -285,6 +287,7 @@ export class GuidedReviewComponent implements Component, Focusable {
   private inventoryOffset = 0;
   private inventoryDiffOffset = 0;
   private summaryOffset = 0;
+  private helpOffset = 0;
   private submissionStatus: SubmissionStatus = "not-checked";
   private submissionFailure?: SubmissionFailure;
   private transientFeedback?: TransientFeedback;
@@ -380,6 +383,11 @@ export class GuidedReviewComponent implements Component, Focusable {
       return;
     }
 
+    if (this.screen !== "comment-editor" && matchesKey(data, "?")) {
+      this.toggleHelp();
+      return;
+    }
+
     if (this.pendingGPrefix) {
       this.pendingGPrefix = false;
       if (matchesKey(data, "g")) {
@@ -427,6 +435,9 @@ export class GuidedReviewComponent implements Component, Focusable {
       case "summary":
         this.handleSummaryInput(data, count);
         break;
+      case "help":
+        this.handleHelpInput(data, count);
+        break;
       case "cancel-confirmation":
         this.handleCancelConfirmationInput(data);
         break;
@@ -458,6 +469,8 @@ export class GuidedReviewComponent implements Component, Focusable {
         return this.renderInventoryDiff(width, rows);
       case "summary":
         return this.renderSummary(width, rows);
+      case "help":
+        return this.renderHelp(width, rows);
       case "cancel-confirmation":
         return this.renderCancelConfirmation(width, rows);
     }
@@ -465,10 +478,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
   private renderWalkthrough(width: number, rows: number): readonly string[] {
     const header = this.renderHeader(width);
-    const footer = this.renderFooter(
-      width,
-      "j/k select line • c comment • n complete section • e details • s summary • Esc pause",
-    );
+    const footer = this.renderFooter(width, walkthroughFooterText(width));
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
 
@@ -592,7 +602,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "j/k or ↑/↓ scroll • PgUp/PgDn page • e/Esc return",
+      "j/k or ↑/↓ scroll • PgUp/PgDn page • e/Esc return • ? help",
     );
     const viewportHeight = Math.max(0, rows - header.length - footer.length);
     const content = this.explanationContent(width);
@@ -615,7 +625,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "j/k or ↑/↓ select • Enter inspect frozen hunk • i/Esc return",
+      "j/k or ↑/↓ select • Enter inspect frozen hunk • i/Esc return • ? help",
     );
     const feedback = renderTransientFeedback(
       this.transientFeedback,
@@ -652,7 +662,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "j/k or ↑/↓ scroll • PgUp/PgDn page • Esc return to inventory",
+      "j/k or ↑/↓ scroll • PgUp/PgDn page • Esc return to inventory • ? help",
     );
     const viewportHeight = Math.max(0, rows - header.length - footer.length);
     const entry = this.inventory[this.inventoryIndex];
@@ -689,8 +699,8 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.submissionStatus === "checking"
         ? "Checking repository state... • Esc cancel verification"
         : this.pendingUnits().length > 0
-          ? "Enter continue next pending section • Esc return"
-          : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return",
+          ? "Enter continue next pending section • Esc return • ? help"
+          : "←/→ or Tab mode • j/k scroll • Enter submit • Esc return • ? help",
     );
     const availableHeight = Math.max(0, rows - header.length - footer.length);
     const submissionNotice = renderSubmissionNotice(
@@ -717,6 +727,26 @@ export class GuidedReviewComponent implements Component, Focusable {
     ];
   }
 
+  private renderHelp(width: number, rows: number): readonly string[] {
+    const header = this.renderHeader(width);
+    const footer = this.renderFooter(
+      width,
+      "j/k scroll • PgUp/PgDn page • ?/Esc return",
+    );
+    const viewportHeight = Math.max(0, rows - header.length - footer.length);
+    const content = renderHelpLines(this.theme, width);
+    this.helpOffset = clampOffset(
+      this.helpOffset,
+      content.length,
+      viewportHeight,
+    );
+    return [
+      ...header,
+      ...content.slice(this.helpOffset, this.helpOffset + viewportHeight),
+      ...footer,
+    ];
+  }
+
   private renderCancelConfirmation(
     width: number,
     rows: number,
@@ -724,7 +754,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const header = this.renderHeader(width);
     const footer = this.renderFooter(
       width,
-      "Enter pause and resume later • d discard review • Esc continue",
+      "Enter pause and resume later • d discard review • Esc continue • ? help",
     );
     const comments = this.review.comments.length;
     const content = [
@@ -780,6 +810,8 @@ export class GuidedReviewComponent implements Component, Focusable {
         return "Review inventory";
       case "summary":
         return "Submission summary";
+      case "help":
+        return "Keyboard help";
       case "cancel-confirmation":
         return "Pause or discard review";
     }
@@ -1014,6 +1046,24 @@ export class GuidedReviewComponent implements Component, Focusable {
     else if (matchesKey(data, Key.enter)) this.startSubmission();
   }
 
+  private handleHelpInput(data: string, count: number): void {
+    if (matchesKey(data, Key.escape)) {
+      this.closeHelp();
+      return;
+    }
+    if (this.isUp(data)) this.scrollHelp(-count);
+    else if (this.isDown(data)) this.scrollHelp(count);
+    else if (matchesKey(data, "shift+g")) this.scrollHelpToEnd();
+    else if (this.isPageUp(data))
+      this.scrollHelp(-count * this.secondaryViewportHeight());
+    else if (this.isPageDown(data))
+      this.scrollHelp(count * this.secondaryViewportHeight());
+    else if (matchesKey(data, "ctrl+u"))
+      this.scrollHelp(-count * halfPage(this.secondaryViewportHeight()));
+    else if (matchesKey(data, "ctrl+d"))
+      this.scrollHelp(count * halfPage(this.secondaryViewportHeight()));
+  }
+
   private handleCancelConfirmationInput(data: string): void {
     if (matchesKey(data, Key.enter)) {
       this.onPause();
@@ -1065,6 +1115,10 @@ export class GuidedReviewComponent implements Component, Focusable {
         return;
       case "summary":
         this.summaryOffset = 0;
+        this.refresh();
+        return;
+      case "help":
+        this.helpOffset = 0;
         this.refresh();
         return;
       default:
@@ -1372,6 +1426,20 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.refresh();
   }
 
+  private scrollHelp(delta: number): void {
+    this.helpOffset = Math.max(0, this.helpOffset + delta);
+    this.refresh();
+  }
+
+  private scrollHelpToEnd(): void {
+    const width = Math.max(1, this.tui.terminal.columns);
+    this.helpOffset = Math.max(
+      0,
+      renderHelpLines(this.theme, width).length - this.bodyHeight(width),
+    );
+    this.refresh();
+  }
+
   /** Summary body lines, shared by render and scroll-to-end. */
   private summaryContent(width: number): readonly string[] {
     return renderSummaryLines(
@@ -1564,6 +1632,20 @@ export class GuidedReviewComponent implements Component, Focusable {
       width,
     ).length;
     return Math.max(0, bodyHeight - previewHeight - feedbackHeight - 1);
+  }
+
+  private toggleHelp(): void {
+    if (this.screen === "help") {
+      this.closeHelp();
+      return;
+    }
+    this.helpReturnScreen = this.screen;
+    this.helpOffset = 0;
+    this.openScreen("help");
+  }
+
+  private closeHelp(): void {
+    this.openScreen(this.helpReturnScreen);
   }
 
   private openCancelConfirmation(): void {
@@ -1792,6 +1874,120 @@ function renderWalkthroughSummary(
     lines.push(
       theme.fg("dim", "Press e for context and the full explanation."),
     );
+  }
+  return lines;
+}
+
+interface HelpEntry {
+  readonly keys: string;
+  readonly action: string;
+}
+
+interface HelpSection {
+  readonly title: string;
+  readonly entries: readonly HelpEntry[];
+}
+
+const HELP_SECTIONS: readonly HelpSection[] = [
+  {
+    title: "Review workflow",
+    entries: [
+      { keys: "j/k, ↑/↓", action: "Select a changed line or scroll the unit." },
+      {
+        keys: "p/h/←",
+        action: "Open the previous unit without marking it reviewed.",
+      },
+      {
+        keys: "l/→",
+        action: "Open the next unit without marking it reviewed.",
+      },
+      { keys: "c", action: "Add or edit a comment on the selected line." },
+      { keys: "d", action: "Delete the comment on the selected line." },
+      { keys: "n", action: "Mark the current unit reviewed and continue." },
+      { keys: "e", action: "Open the complete agent explanation." },
+      { keys: "i", action: "Open the frozen snapshot inventory." },
+      { keys: "s", action: "Open the submission summary." },
+      { keys: "Esc", action: "Open the pause and discard screen." },
+      { keys: "?", action: "Open or close this keyboard help." },
+    ],
+  },
+  {
+    title: "Navigation",
+    entries: [
+      { keys: "gg / G", action: "Jump to the first or last item." },
+      {
+        keys: "1-9 + move",
+        action: "Repeat the next movement, for example 5j or 2Ctrl+d.",
+      },
+      { keys: "Ctrl+u/d", action: "Move by half a viewport." },
+      {
+        keys: "PgUp/PgDn, Ctrl+b/f",
+        action: "Move by a full viewport.",
+      },
+    ],
+  },
+  {
+    title: "Other screens",
+    entries: [
+      {
+        keys: "Explanation: e/h/←/Esc",
+        action: "Return to the walkthrough.",
+      },
+      {
+        keys: "Inventory: Enter/l/→",
+        action: "Inspect the selected frozen file diff.",
+      },
+      {
+        keys: "Inventory: i/h/←/Esc",
+        action: "Return to the walkthrough.",
+      },
+      {
+        keys: "Frozen diff: h/←/Esc",
+        action: "Return to the inventory.",
+      },
+      {
+        keys: "Summary: h/l/←/→/Tab",
+        action: "Switch the submission mode.",
+      },
+      {
+        keys: "Summary: Enter",
+        action: "Submit, or continue the first pending unit.",
+      },
+      { keys: "Summary: Esc", action: "Return to the walkthrough." },
+      {
+        keys: "Verification: Esc",
+        action: "Cancel the repository check before submission.",
+      },
+    ],
+  },
+  {
+    title: "Comment and pause screens",
+    entries: [
+      { keys: "Comment: Enter", action: "Save the draft comment." },
+      { keys: "Comment: Shift+Enter", action: "Insert a newline." },
+      { keys: "Comment: Esc", action: "Discard the current edit." },
+      { keys: "Pause: Enter", action: "Pause and resume later." },
+      { keys: "Pause: d", action: "Discard the review permanently." },
+      { keys: "Pause: Esc", action: "Continue the review." },
+    ],
+  },
+];
+
+function renderHelpLines(theme: ReviewUiTheme, width: number): string[] {
+  const lines: string[] = [];
+  for (const [sectionIndex, section] of HELP_SECTIONS.entries()) {
+    if (sectionIndex > 0) lines.push("");
+    lines.push(theme.fg("muted", theme.bold(section.title)));
+    for (const entry of section.entries) {
+      const prefix = `${theme.fg("accent", entry.keys)}  `;
+      lines.push(
+        ...wrapWithPrefix(
+          prefix,
+          theme.fg("text", safeText(entry.action)),
+          width,
+        ),
+      );
+    }
   }
   return lines;
 }
@@ -2736,6 +2932,27 @@ function wrapStyled(text: string, width: number): string[] {
 
 function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width), "");
+}
+
+const WALKTHROUGH_FOOTERS = [
+  "j/k line • ←/→ unit • c comment • d delete • n complete • e details • i inventory • s summary • Esc pause • ? help",
+  "j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • Esc pause • ? help",
+  "j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • ? help",
+  "j/k line • ←/→ unit • c comment • n complete • e details • s summary • ? help",
+  "j/k line • ←/→ unit • c comment • n complete • ? help",
+  "c comment • ←/→ unit • n finish • ? help",
+  "c comment • n finish • ? help",
+  "c comment • ? help",
+  "? help",
+  "?",
+] as const;
+
+function walkthroughFooterText(width: number): string {
+  const available = Math.max(1, width);
+  return (
+    WALKTHROUGH_FOOTERS.find((footer) => visibleWidth(footer) <= available) ??
+    "?"
+  );
 }
 
 function fillLine(line: string, width: number): string {
