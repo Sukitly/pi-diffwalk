@@ -173,53 +173,113 @@ function press(component: ReviewThreadComponent, ...keys: string[]): void {
   for (const key of keys) component.handleInput(key);
 }
 
+function attachAnsweredFollowUp(
+  batch: ReviewThreadBatch,
+  items: readonly {
+    readonly threadId: ReviewCommentId;
+    readonly reviewerBody: string;
+    readonly agentBody: string;
+  }[],
+): ReviewThreadBatch {
+  const pending = appendReviewThreadTurn(batch, {
+    submissionMode: "discuss-first",
+    replies: items.map((item) => ({
+      threadId: item.threadId,
+      body: item.reviewerBody,
+    })),
+  });
+  const turn = pending.turns.at(-1);
+  assert.ok(turn);
+  return attachReviewThreadResponses(pending, {
+    batchId: pending.id,
+    turnId: turn.id,
+    responses: items.map((item) => ({
+      threadId: item.threadId,
+      body: item.agentBody,
+    })),
+  });
+}
+
 test("renders Agent responses at frozen anchors and omits unrelated lines", () => {
   const { answered } = fixture();
   const { component } = createComponent(answered, 40);
   const output = component.render(100).join("\n");
 
-  assert.match(
-    output,
-    /\+first changed[\s\S]*\[C1 • open\][\s\S]*\[T1 • You\]/,
-  );
+  assert.match(output, /\+first changed[\s\S]*\[C1 • T1 • open • You\]/);
   assert.match(
     output,
     /Why is the first line needed\?[\s\S]*\[T1 • Agent response\][\s\S]*first line validates/,
   );
-  assert.match(
-    output,
-    /\+second changed[\s\S]*\[C2 • open\][\s\S]*\[T1 • You\]/,
-  );
+  assert.match(output, /\+second changed[\s\S]*\[C2 • T1 • open • You\]/);
   assert.match(output, /contract test guarantees the second/);
   assert.doesNotMatch(output, /outside start|outside end|unrelated 10/);
 });
 
 test("renders multiple turns in order under the same inline thread", () => {
   const { answered } = fixture();
-  const pendingFollowUp = appendReviewThreadTurn(answered, {
-    submissionMode: "discuss-first",
-    replies: [
-      {
-        threadId: "C1" as ReviewCommentId,
-        body: "Why is that validation sufficient?",
-      },
-    ],
-  });
-  const multiTurn = attachReviewThreadResponses(pendingFollowUp, {
-    batchId: pendingFollowUp.id,
-    turnId: "T2",
-    responses: [
-      { threadId: "C1", body: "The parser rejects every other shape." },
-    ],
-  });
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "Why is that validation sufficient?",
+      agentBody: "The parser rejects every other shape.",
+    },
+  ]);
   const { component } = createComponent(multiTurn, 40);
   const output = component.render(100).join("\n");
 
-  assert.equal(output.match(/\[C1 • open\]/g)?.length, 1);
   assert.match(
     output,
-    /T1 • You[\s\S]*T1 • Agent response[\s\S]*T2 • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
+    /C1 • T1 • open • You[\s\S]*T1 • Agent response[\s\S]*C1 • T2 • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
   );
+});
+
+test("renders thread status only on the first turn header", () => {
+  const { answered } = fixture();
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "Why is that validation sufficient?",
+      agentBody: "The parser rejects every other shape.",
+    },
+  ]);
+  const { component } = createComponent(multiTurn, 40);
+  const output = component.render(100).join("\n");
+
+  assert.equal(output.match(/\[C1 • T\d+ • open • You\]/g)?.length, 1);
+  assert.match(output, /\[C1 • T1 • open • You\]/);
+  assert.match(output, /\[C1 • T2 • You\]/);
+});
+
+test("keeps thread ownership visible when paging through later turns", () => {
+  const { answered } = fixture();
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "First follow-up.",
+      agentBody: "First follow-up response.",
+    },
+    {
+      threadId: "C2" as ReviewCommentId,
+      reviewerBody: "Second follow-up.",
+      agentBody: "Second follow-up response.",
+    },
+  ]);
+  const { component } = createComponent(multiTurn, 8);
+
+  press(component, "j");
+  let output = component.render(100).join("\n");
+  for (
+    let attempt = 0;
+    attempt < 10 && !/\[C1 • T2 • You\]/.test(output);
+    attempt += 1
+  ) {
+    press(component, "\u001b[5~");
+    output = component.render(100).join("\n");
+  }
+
+  assert.match(output, /C2 • open • frozen snapshot/);
+  assert.doesNotMatch(output, /\[C1 • T1 • open • You\]/);
+  assert.match(output, /\[C1 • T2 • You\]/);
 });
 
 test("renders full-width reviewer and Agent cards with readable wrapping", () => {
@@ -249,8 +309,9 @@ test("renders full-width reviewer and Agent cards with readable wrapping", () =>
   );
   const agentRows = lines.filter((line) => line.startsWith(agentBackground));
 
-  assert.ok(reviewerRows.some((line) => line.includes("▌ [C1 • open]")));
-  assert.ok(reviewerRows.some((line) => line.includes("[T1 • You]")));
+  assert.ok(
+    reviewerRows.some((line) => line.includes("▌ [C1 • T1 • open • You]")),
+  );
   assert.ok(agentRows.some((line) => line.includes("[T1 • Agent response]")));
   assert.ok(
     agentRows.some((line) =>
@@ -323,10 +384,13 @@ test("hides previously resolved threads in later follow-up views", () => {
   const firstOutput = firstView.component.render(100).join("\n");
 
   assert.doesNotMatch(firstOutput, /C1|Why is the first line needed/);
-  assert.match(firstOutput, /\[C2 • open\]/);
+  assert.match(firstOutput, /C2 • T1 • open/);
 
   press(firstView.component, "r");
-  assert.match(firstView.component.render(100).join("\n"), /\[C2 • resolved\]/);
+  assert.match(
+    firstView.component.render(100).join("\n"),
+    /C2 • T1 • resolved/,
+  );
   press(firstView.component, "\r");
 
   const completed = firstView.outcomes[0];
@@ -345,7 +409,7 @@ test("lets only the reviewer resolve answered threads without drafts", () => {
 
   press(component, "r");
   assert.equal(changes.at(-1)?.threads[0]?.resolved, true);
-  assert.match(component.render(90).join("\n"), /\[C1 • resolved\]/);
+  assert.match(component.render(90).join("\n"), /C1 • T1 • resolved/);
 
   press(component, "c");
   assert.match(component.render(90).join("\n"), /must be reopened/);
