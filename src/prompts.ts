@@ -209,7 +209,7 @@ function formatMoveLines(range: MoveSideRange): string {
 export function buildReviewKickoffPrompt(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
-  rules: readonly LoadedDiffWalkRules[] = [],
+  rules?: LoadedDiffWalkRules,
 ): string {
   const inventory = buildReviewPromptInventory(snapshot, delta);
   const comparison = snapshot.comparison;
@@ -246,19 +246,17 @@ export function buildReviewKickoffPrompt(
     "- Keep titles, context, summaries, and questions explanatory. Do not paste patch text into the tool arguments.",
     "- Each `reviewFocus` question must name a specific way the change could be wrong. A mechanical unit needs one question; do not pad with restatements of `changeSummary`.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
-    ...(rules.length === 0
+    ...(rules === undefined
       ? []
       : [
           "",
-          "Apply the ordered `rules` entries in this JSON when constructing the route. Later entries take precedence when preferences conflict:",
+          "Apply the `instructions` string in this selected rules JSON when constructing the route:",
           "BEGIN_DIFFWALK_REVIEW_RULES_JSON",
           JSON.stringify(
             {
               formatVersion: 1,
-              rules: rules.map((rule) => ({
-                scope: rule.scope,
-                instructions: rule.content,
-              })),
+              scope: rules.scope,
+              instructions: rules.content,
             },
             null,
             2,

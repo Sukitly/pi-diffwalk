@@ -127,7 +127,7 @@ BEGIN_DIFFWALK_INVENTORY_JSON
 }
 END_DIFFWALK_INVENTORY_JSON
 
-=== kickoff prompt: incremental review with global and project rules without moves ===
+=== kickoff prompt: incremental review with selected project rules without moves ===
 Prepare a semantic route for a human-guided DiffWalk review.
 
 Route preparation is read-only:
@@ -155,20 +155,12 @@ Construct the route according to these rules:
 - Each `reviewFocus` question must name a specific way the change could be wrong. A mechanical unit needs one question; do not pad with restatements of `changeSummary`.
 - Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.
 
-Apply the ordered `rules` entries in this JSON when constructing the route. Later entries take precedence when preferences conflict:
+Apply the `instructions` string in this selected rules JSON when constructing the route:
 BEGIN_DIFFWALK_REVIEW_RULES_JSON
 {
   "formatVersion": 1,
-  "rules": [
-    {
-      "scope": "global",
-      "instructions": "- Review compatibility before internal implementation."
-    },
-    {
-      "scope": "project",
-      "instructions": "- Keep behavioral tests with the code they prove."
-    }
-  ]
+  "scope": "project",
+  "instructions": "- Keep behavioral tests with the code they prove."
 }
 END_DIFFWALK_REVIEW_RULES_JSON
 Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.

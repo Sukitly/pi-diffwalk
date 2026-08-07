@@ -84,7 +84,7 @@ The agent should normally construct a route that moves through:
 
 This is a default reasoning pattern, not a fixed file order. The agent may choose another route when the change demands it, but every step must explain why it appears at that point in the review.
 
-## Project Review Rules
+## Review Rules
 
 DiffWalk can load route-planning preferences from two scopes:
 
@@ -95,9 +95,9 @@ DiffWalk can load route-planning preferences from two scopes:
 
 The global path follows Pi's agent configuration directory, which defaults to `~/.pi/agent` and honors `PI_CODING_AGENT_DIR`. Both files contain Markdown instructions for review order, grouping, explanations, and review focus.
 
-DiffWalk captures available rules once when starting a new review. Global rules are applied first, followed by the more specific project rules. Project rules take precedence when preferences conflict. Repeating route preparation for the same frozen snapshot reuses the captured content. To apply a rule change to an existing route request, discard the pending review and start a new one.
+DiffWalk selects one rules file when starting a new review. A usable project file replaces the global file completely, matching Pi's project-over-user precedence for same-named prompt templates. If project rules are absent, unavailable, untrusted, or part of the change under review, DiffWalk falls back to global rules. Repeating route preparation for the same frozen snapshot reuses the selected content. To apply a rule change to an existing route request, discard the pending review and start a new one.
 
-A missing or blank file preserves the default behavior for that scope. Each file is limited to 16 KiB and must contain valid UTF-8. DiffWalk warns and continues with the other scope or the default route instructions when a file is unavailable or invalid. Global rules do not depend on project trust. An existing project file is ignored with a warning when the project is not trusted. If the project rules file itself is part of the change under review, DiffWalk ignores only that file so unreviewed instructions cannot shape their own review.
+A missing or blank file preserves the default behavior for that scope. Each file is limited to 16 KiB and must contain valid UTF-8. DiffWalk warns when a file is unavailable or invalid and continues with the fallback or default route instructions. Global rules do not depend on project trust. An existing project file is ignored with a warning when the project is not trusted. If the project rules file itself is part of the change under review, DiffWalk ignores that file so unreviewed instructions cannot shape their own review.
 
 Review rules customize how the agent presents the review. They cannot change the frozen snapshot, route schema, changed-line coverage requirements, read-only preparation rule, or `guided_review` tool contract.
 
