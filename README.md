@@ -110,13 +110,17 @@ DiffWalk also detects exact relocations: a block of removed lines that reappears
 
 In an incremental review, the planned route will contain only lines marked `needs-review`. Lines already reviewed without comment will be carried forward outside the planned route. They will remain visible in the review inventory and coverage summary, and the human will be able to inspect them explicitly without requiring the agent to route or skip them again.
 
+The walkthrough preserves the span order supplied by the agent inside each unit. Consecutive spans for one file share a file block, but returning to that file after another file starts a new block so a route such as caller, callee, return stays in that order. When overlapping old-side and new-side spans pull the same changed line into several frozen slices, the first covering route span owns the selectable row. Later copies are replaced by a visible marker.
+
+A frozen slice can contain changed lines owned by another unit, explicitly skipped lines, or carried-forward lines because unified diffs interleave old-side and new-side content. These lines remain visible when they are inside the span and use a `·` gutter marker plus their disposition; they are not selectable in the current unit. Short gaps between spans show unchanged context directly and collapse changed lines into markers that name whether the lines were reviewed earlier, skipped for a stated reason, or routed to another unit.
+
 Each unit should include:
 
 - **Why here:** Why this is the right point to inspect now.
 - **Context:** The call path, contract, or invariant needed to understand the code.
 - **What changed:** A direct description of the behavioral or structural change.
 - **Review focus:** Concrete questions the reviewer should answer.
-- **Diff:** The exact content of the region from the frozen snapshot.
+- **Diff:** The frozen snapshot content in route order, with repeated changed lines represented once at their owning span.
 - **Next:** Why the following unit comes next.
 
 The agent provides the route and explanation. DiffWalk provides the diff content. The model must never generate or rewrite the displayed patch.
