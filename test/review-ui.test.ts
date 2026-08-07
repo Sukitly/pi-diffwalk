@@ -489,6 +489,70 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   assert.doesNotMatch(explanation, /src\/entry 文\\nfile\.ts/);
 });
 
+test("keeps core workflow actions in the responsive walkthrough footer", () => {
+  const harness = createHarness(80, 18);
+  const footerAt = (width: number): string => {
+    harness.terminal.columns = width;
+    return harness.component.render(width).at(-1)?.trimEnd() ?? "";
+  };
+
+  assert.equal(footerAt(40), "c comment • ←/→ unit • n finish • ? help");
+  assert.equal(
+    footerAt(80),
+    "j/k line • ←/→ unit • c comment • n complete • e details • s summary • ? help",
+  );
+  assert.equal(
+    footerAt(120),
+    "j/k line • ←/→ unit • c comment • d delete • n complete • e details • i inventory • s summary • Esc pause • ? help",
+  );
+  assert.equal(footerAt(29), "c comment • n finish • ? help");
+  assert.equal(footerAt(18), "c comment • ? help");
+});
+
+test("opens full keyboard help and returns without moving the review", () => {
+  const harness = createHarness(100, 60);
+  press(harness.component, "j", "?");
+
+  const help = renderText(harness);
+  assert.match(help, /Keyboard help/);
+  assert.match(help, /p\/h\/←\s+Open the previous unit/);
+  assert.match(help, /c\s+Add or edit a comment/);
+  assert.match(help, /n\s+Mark the current unit reviewed/);
+  assert.match(help, /1-9 \+ move/);
+  assert.match(help, /Summary: Enter/);
+
+  press(harness.component, "?");
+  const walkthrough = renderText(harness);
+  assert.match(walkthrough, /unit 1\/2/);
+  assert.match(walkthrough, />\s+5\s+\+const value = validate/);
+});
+
+test("scrolls keyboard help and returns to the screen that opened it", () => {
+  const harness = createHarness(50, 8);
+  press(harness.component, "e", "?");
+  assert.match(renderText(harness), /Review workflow/);
+
+  press(harness.component, "G");
+  assert.match(renderText(harness), /Pause: Esc/);
+
+  press(harness.component, "g", "g");
+  assert.match(renderText(harness), /Review workflow/);
+
+  press(harness.component, "\u001b");
+  assert.match(renderText(harness), /Agent explanation/);
+});
+
+test("keeps question marks as text in the comment editor", () => {
+  const harness = createHarness(80, 24);
+  press(harness.component, "c", "W", "h", "y", "?", "\r");
+
+  assert.deepEqual(
+    harness.state.review.comments.map((comment) => comment.body),
+    ["Why?"],
+  );
+  assert.doesNotMatch(renderText(harness), /Keyboard help/);
+});
+
 test("renders every component row as one terminal line", () => {
   const harness = createHarness(100, 30);
   const lines = harness.component.render(harness.terminal.columns);
