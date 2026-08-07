@@ -178,12 +178,18 @@ test("renders Agent responses at frozen anchors and omits unrelated lines", () =
   const { component } = createComponent(answered, 40);
   const output = component.render(100).join("\n");
 
-  assert.match(output, /\+first changed[\s\S]*\[C1 • T1 • open • You\]/);
+  assert.match(
+    output,
+    /\+first changed[\s\S]*\[C1 • open\][\s\S]*\[T1 • You\]/,
+  );
   assert.match(
     output,
     /Why is the first line needed\?[\s\S]*\[T1 • Agent response\][\s\S]*first line validates/,
   );
-  assert.match(output, /\+second changed[\s\S]*\[C2 • T1 • open • You\]/);
+  assert.match(
+    output,
+    /\+second changed[\s\S]*\[C2 • open\][\s\S]*\[T1 • You\]/,
+  );
   assert.match(output, /contract test guarantees the second/);
   assert.doesNotMatch(output, /outside start|outside end|unrelated 10/);
 });
@@ -209,9 +215,10 @@ test("renders multiple turns in order under the same inline thread", () => {
   const { component } = createComponent(multiTurn, 40);
   const output = component.render(100).join("\n");
 
+  assert.equal(output.match(/\[C1 • open\]/g)?.length, 1);
   assert.match(
     output,
-    /T1 • Agent response[\s\S]*T2 • open • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
+    /T1 • You[\s\S]*T1 • Agent response[\s\S]*T2 • You[\s\S]*validation sufficient[\s\S]*T2 • Agent response[\s\S]*parser rejects/,
   );
 });
 
@@ -242,9 +249,8 @@ test("renders full-width reviewer and Agent cards with readable wrapping", () =>
   );
   const agentRows = lines.filter((line) => line.startsWith(agentBackground));
 
-  assert.ok(
-    reviewerRows.some((line) => line.includes("▌ [C1 • T1 • open • You]")),
-  );
+  assert.ok(reviewerRows.some((line) => line.includes("▌ [C1 • open]")));
+  assert.ok(reviewerRows.some((line) => line.includes("[T1 • You]")));
   assert.ok(agentRows.some((line) => line.includes("[T1 • Agent response]")));
   assert.ok(
     agentRows.some((line) =>
@@ -317,13 +323,10 @@ test("hides previously resolved threads in later follow-up views", () => {
   const firstOutput = firstView.component.render(100).join("\n");
 
   assert.doesNotMatch(firstOutput, /C1|Why is the first line needed/);
-  assert.match(firstOutput, /C2 • T1 • open/);
+  assert.match(firstOutput, /\[C2 • open\]/);
 
   press(firstView.component, "r");
-  assert.match(
-    firstView.component.render(100).join("\n"),
-    /C2 • T1 • resolved/,
-  );
+  assert.match(firstView.component.render(100).join("\n"), /\[C2 • resolved\]/);
   press(firstView.component, "\r");
 
   const completed = firstView.outcomes[0];
@@ -342,7 +345,7 @@ test("lets only the reviewer resolve answered threads without drafts", () => {
 
   press(component, "r");
   assert.equal(changes.at(-1)?.threads[0]?.resolved, true);
-  assert.match(component.render(90).join("\n"), /C1 • T1 • resolved/);
+  assert.match(component.render(90).join("\n"), /\[C1 • resolved\]/);
 
   press(component, "c");
   assert.match(component.render(90).join("\n"), /must be reopened/);

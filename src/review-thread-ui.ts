@@ -787,22 +787,32 @@ function renderThread(
   const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
   const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
   const status = thread.resolved ? "resolved" : "open";
-  let first = true;
+  const selectionMarker = selected ? "▌" : " ";
+  const threadRows = wrapStyled(
+    theme.fg(
+      "accent",
+      theme.bold(`${selectionMarker} [${thread.id} • ${status}]`),
+    ),
+    contentWidth,
+  );
+  rows.push(
+    ...renderBackgroundBlock(
+      threadRows,
+      "userMessageBg",
+      theme,
+      width,
+      DIFF_GUTTER_WIDTH,
+    ).map((text) => ({ text, commentId: thread.id })),
+  );
 
   for (const turn of batch.turns) {
     const item = turn.items.find(
       (candidate) => candidate.threadId === thread.id,
     );
     if (item === undefined) continue;
-    const selectionMarker = selected && first ? "▌" : " ";
     const reviewerRows = [
       ...wrapStyled(
-        theme.fg(
-          "accent",
-          theme.bold(
-            `${selectionMarker} [${thread.id} • ${turn.id} • ${status} • You]`,
-          ),
-        ),
+        theme.fg("accent", theme.bold(`  [${turn.id} • You]`)),
         contentWidth,
       ),
       ...wrapWithPrefix(
@@ -844,7 +854,6 @@ function renderThread(
       ).map((text) => ({ text, commentId: thread.id })),
       { text: "", commentId: thread.id },
     );
-    first = false;
   }
 
   if (thread.draftReply !== undefined) {
