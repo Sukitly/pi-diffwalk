@@ -22,6 +22,12 @@ export interface ReviewCommentInput extends ReviewCommentAnchor {
   readonly body: string;
 }
 
+export interface ReviewCommentTargetContext {
+  readonly lines: readonly DiffLine[];
+  readonly anchorIndex: number;
+  readonly fileStartIndex: number;
+}
+
 /** A line the reviewer may comment on, together with everything needed to display it. */
 export interface ReviewCommentTarget extends ReviewCommentAnchor {
   readonly snapshotId: SnapshotIdOf;
@@ -29,6 +35,7 @@ export interface ReviewCommentTarget extends ReviewCommentAnchor {
   readonly oldPath?: string;
   readonly newPath?: string;
   readonly diffLine: DiffLine;
+  readonly context: ReviewCommentTargetContext;
 }
 
 type SnapshotIdOf = ReviewSnapshot["id"];
@@ -58,8 +65,6 @@ export class ReviewSessionError extends Error {
 }
 
 interface InternalTarget extends ReviewCommentTarget {
-  readonly fileLines: readonly DiffLine[];
-  readonly lineIndex: number;
   readonly order: number;
 }
 
@@ -197,8 +202,7 @@ function buildCommentTargets(
           oldPath: change.oldPath,
           newPath: change.newPath,
           diffLine: { ...diffLine },
-          fileLines: content.lines,
-          lineIndex,
+          context: frozenTargetContext(content.lines, lineIndex),
           order: targets.length,
         });
       }
@@ -236,15 +240,26 @@ function commentFilePath(change: FileChange, side: ChangeSide): string {
   return filePath;
 }
 
+function frozenTargetContext(
+  lines: readonly DiffLine[],
+  lineIndex: number,
+): ReviewCommentTargetContext {
+  const fileStartIndex = Math.max(0, lineIndex - REVIEW_COMMENT_CONTEXT_RADIUS);
+  const end = Math.min(
+    lines.length,
+    lineIndex + REVIEW_COMMENT_CONTEXT_RADIUS + 1,
+  );
+  return {
+    lines: lines.slice(fileStartIndex, end).map((line) => ({ ...line })),
+    anchorIndex: lineIndex - fileStartIndex,
+    fileStartIndex,
+  };
+}
+
 function materializeComment(
   target: InternalTarget,
   body: string,
 ): ReviewComment {
-  const start = Math.max(0, target.lineIndex - REVIEW_COMMENT_CONTEXT_RADIUS);
-  const end = Math.min(
-    target.fileLines.length,
-    target.lineIndex + REVIEW_COMMENT_CONTEXT_RADIUS + 1,
-  );
   return {
     snapshotId: target.snapshotId,
     reviewUnitId: target.reviewUnitId,
@@ -257,9 +272,7 @@ function materializeComment(
     oldLine: target.diffLine.oldLine,
     newLine: target.diffLine.newLine,
     selectedText: target.diffLine.text,
-    nearbyContext: target.fileLines.slice(start, end).map((line) => ({
-      ...line,
-    })),
+    nearbyContext: target.context.lines.map((line) => ({ ...line })),
     body,
   };
 }
@@ -275,6 +288,11 @@ function copyTarget(target: InternalTarget): ReviewCommentTarget {
     oldPath: target.oldPath,
     newPath: target.newPath,
     diffLine: { ...target.diffLine },
+    context: {
+      lines: target.context.lines.map((line) => ({ ...line })),
+      anchorIndex: target.context.anchorIndex,
+      fileStartIndex: target.context.fileStartIndex,
+    },
   };
 }
 
