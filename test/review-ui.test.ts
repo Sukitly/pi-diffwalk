@@ -496,8 +496,11 @@ test("shows complete responsive header information when height permits", () => {
 
   let lines = harness.component.render(120).map((line) => line.trimEnd());
   assert.match(lines[0] ?? "", /^DiffWalk \/ Review.*Unit 1\/2$/);
-  assert.match(lines[1] ?? "", /Request entry point/);
-  assert.match(lines[2] ?? "", /0\/2 reviewed.*0 comments.*1 skipped/);
+  assert.equal(lines[1], "Request entry point\\nsecondary heading");
+  assert.match(
+    lines[2] ?? "",
+    /^0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+░{12}$/,
+  );
   assert.doesNotMatch(lines.slice(0, 3).join("\n"), /snapshot/);
 
   harness.terminal.columns = 80;
@@ -520,6 +523,17 @@ test("shows complete responsive header information when height permits", () => {
   assert.match(lines.slice(2, 7).join("\n"), /0 comments/);
   assert.match(lines.slice(2, 7).join("\n"), /1 skipped/);
   assert.match(lines.slice(2, 7).join("\n"), /2 unsupported/);
+});
+
+test("drops wide status when the comment editor reserves its body", () => {
+  const harness = createHarness(100, 8);
+
+  press(harness.component, "c");
+  const output = renderText(harness);
+
+  assert.doesNotMatch(output, /reviewed|comments|skipped|unsupported/);
+  assert.match(output, /src\/entry/);
+  assert.match(output.split("\n").at(-1) ?? "", /Enter save/);
 });
 
 test("keeps core workflow actions in the responsive walkthrough footer", () => {
@@ -1523,6 +1537,27 @@ test("navigates the inventory with vim keys", () => {
   assert.match(renderText(harness), /Review inventory/);
   press(harness.component, "h");
   assert.match(renderText(harness), /Review checks/);
+});
+
+test("comment editor repeats the walkthrough highlighted file header", () => {
+  const harness = createHarness(80, 24, makeUiFixture(), {
+    theme: spanHeaderTheme,
+  });
+  const styledPath =
+    "\u001b[35m\u001b[1msrc/entry 文\\nfile.ts\u001b[22m\u001b[39m";
+  const walkthroughPath = harness.component
+    .render(80)
+    .find((line) => line.includes("src/entry"));
+  assert.ok(walkthroughPath);
+  assert.ok(walkthroughPath.includes(styledPath));
+
+  press(harness.component, "c");
+  const editorPath = harness.component
+    .render(80)
+    .find((line) => line.includes("src/entry"));
+  assert.ok(editorPath);
+  assert.equal(editorPath.trimEnd(), walkthroughPath.trimEnd());
+  assert.doesNotMatch(editorPath, /\b(?:old|new)\b|"/);
 });
 
 test("renders the frozen context window around the anchored line", () => {

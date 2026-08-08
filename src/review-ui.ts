@@ -894,6 +894,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
     if (width >= WIDE_HEADER_WIDTH) {
       const progressBar = renderProgressBar(reviewed, unitCount, this.theme);
+      const status = `${this.theme.fg("muted", progress)}    ${this.theme.fg("muted", statusParts.join(" · "))}    ${progressBar}`;
       groups.push(
         {
           lines: [fitColumns(brand, this.theme.fg("muted", position), width)],
@@ -901,12 +902,7 @@ export class GuidedReviewComponent implements Component, Focusable {
         },
         { lines: [fitLine(title, width)], priority: 80 },
         {
-          lines: [
-            fitLine(
-              `${progressBar}  ${this.theme.fg("muted", progress)}    ${this.theme.fg("muted", statusParts.join(" · "))}`,
-              width,
-            ),
-          ],
+          lines: [fitLine(status, width)],
           priority: 50,
           minimumRows: 5,
         },
@@ -3079,7 +3075,12 @@ function buildCommentTargetPreview(
     );
   }
   const change = changesById.get(target.fileChangeId);
-  const content = change === undefined ? undefined : textContent(change);
+  if (change === undefined) {
+    throw new GuidedReviewUiInvariantError(
+      `Comment target ${target.fileChangeId}:${target.side}:${target.line} references file change ${target.fileChangeId}, which is not in the frozen snapshot.`,
+    );
+  }
+  const content = textContent(change);
   if (content === undefined) {
     throw new GuidedReviewUiInvariantError(
       `Comment target ${target.fileChangeId}:${target.side}:${target.line} has no frozen text content.`,
@@ -3150,12 +3151,7 @@ function buildCommentTargetPreview(
     ];
   });
   return {
-    path: truncateToWidth(
-      `${theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.diffLine)}`,
-      width,
-      "…",
-      true,
-    ),
+    path: truncateToWidth(renderChangeHeader(change, theme), width, "…", true),
     anchorRows: rows[target.context.anchorIndex] ?? [],
     beforeRows: rows.slice(0, target.context.anchorIndex).flat(),
     afterRows: rows.slice(target.context.anchorIndex + 1).flat(),
@@ -4117,10 +4113,6 @@ function nonTextChangeDetail(change: FileChange): string {
   }
   details.push(change.content.unsupportedReason);
   return details.join(" ");
-}
-
-function renderLineAnchor(line: DiffLine): string {
-  return `(old ${line.oldLine ?? "-"}, new ${line.newLine ?? "-"})`;
 }
 
 function displayCommentPath(comment: ReviewComment): string {
