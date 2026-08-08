@@ -4055,9 +4055,12 @@ function renderProgressBar(
   theme: ReviewUiTheme,
 ): string {
   const segments = progressBarSegments(reviewed, total);
-  return `${theme.fg("accent", "█".repeat(segments.completed))}${theme.fg(
-    "borderMuted",
-    "░".repeat(segments.remaining),
+  const completed = "█".repeat(segments.completed);
+  return `${theme.fg("border", segments.leftBoundary)}${
+    completed.length === 0 ? "" : theme.fg("accent", completed)
+  }${" ".repeat(segments.remaining)}${theme.fg(
+    "border",
+    segments.rightBoundary,
   )}`;
 }
 
