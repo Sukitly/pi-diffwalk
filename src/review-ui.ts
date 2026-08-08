@@ -562,7 +562,10 @@ export class GuidedReviewComponent implements Component, Focusable {
     const preview = summary.slice(0, previewHeight);
     if (preview.length > 0 && preview.length < summary.length) {
       preview[preview.length - 1] = fitLine(
-        this.theme.fg("dim", "… press e for complete context and questions"),
+        this.theme.fg(
+          "dim",
+          "      … press e for complete context and questions",
+        ),
         width,
       );
     }
@@ -899,6 +902,11 @@ export class GuidedReviewComponent implements Component, Focusable {
         {
           lines: [fitColumns(brand, this.theme.fg("muted", position), width)],
           priority: 90,
+        },
+        {
+          lines: this.screen === "walkthrough" ? [""] : [],
+          priority: 70,
+          minimumRows: 12,
         },
         { lines: [fitLine(title, width)], priority: 80 },
         {
@@ -2175,16 +2183,25 @@ function renderWalkthroughSummary(
   theme: ReviewUiTheme,
   width: number,
 ): string[] {
+  const summaryRail = theme.fg("borderMuted", "│ ");
+  const summaryWidth = Math.max(1, width - visibleWidth(summaryRail));
+  const summary = wrapStyled(
+    theme.fg("text", safeText(unit.changeSummary)),
+    summaryWidth,
+  ).map((line) => fitLine(`${summaryRail}${line}`, width));
+  const questionIndent = "  ";
+  const questionNumberWidth = 4;
+  const hintIndent = " ".repeat(questionIndent.length + questionNumberWidth);
   const lines = [
     "",
-    ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
+    ...summary,
     "",
-    theme.fg("muted", theme.bold("Review checks")),
+    theme.fg("accent", theme.bold("Review checks")),
   ];
   for (const [index, focus] of unit.reviewFocus.slice(0, 2).entries()) {
     lines.push(
       ...wrapWithPrefix(
-        theme.fg("accent", `${String(index + 1).padStart(2, "0")}  `),
+        `${questionIndent}${theme.fg("accent", `${String(index + 1).padStart(2, "0")}  `)}`,
         theme.fg("text", safeText(focus)),
         width,
       ),
@@ -2192,13 +2209,23 @@ function renderWalkthroughSummary(
   }
   if (unit.reviewFocus.length > 2) {
     lines.push(
-      theme.fg(
-        "dim",
-        `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`,
+      ...wrapWithPrefix(
+        hintIndent,
+        theme.fg(
+          "dim",
+          `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`,
+        ),
+        width,
       ),
     );
   } else {
-    lines.push(theme.fg("dim", "Press e for complete context."));
+    lines.push(
+      ...wrapWithPrefix(
+        hintIndent,
+        theme.fg("dim", "Press e for complete context."),
+        width,
+      ),
+    );
   }
   return lines;
 }

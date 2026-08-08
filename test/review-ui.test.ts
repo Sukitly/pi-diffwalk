@@ -477,6 +477,21 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   const walkthrough = renderText(harness);
 
   assert.match(walkthrough, /Review checks/);
+  const walkthroughLines = harness.component
+    .render(100)
+    .map((line) => line.trimEnd());
+  const summaryIndex = walkthroughLines.findIndex((line) =>
+    line.startsWith("│ The request path"),
+  );
+  assert.ok(summaryIndex > 0);
+  assert.equal(walkthroughLines[summaryIndex - 1], "");
+  assert.equal(walkthroughLines[summaryIndex + 1], "");
+  assert.equal(walkthroughLines[summaryIndex + 2], "Review checks");
+  assert.match(
+    walkthroughLines[summaryIndex + 3] ?? "",
+    /^ {2}01 {2}Does validation preserve compatibility\?/,
+  );
+  assert.match(walkthroughLines[summaryIndex + 4] ?? "", /^ {6}… press e/);
   assert.match(walkthrough, /src\/entry 文\\nfile\.ts/);
   assert.doesNotMatch(walkthrough, /Git snapshot diff/);
   assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
@@ -496,12 +511,13 @@ test("shows complete responsive header information when height permits", () => {
 
   let lines = harness.component.render(120).map((line) => line.trimEnd());
   assert.match(lines[0] ?? "", /^DiffWalk \/ Review.*Unit 1\/2$/);
-  assert.equal(lines[1], "Request entry point\\nsecondary heading");
+  assert.equal(lines[1], "");
+  assert.equal(lines[2], "Request entry point\\nsecondary heading");
   assert.match(
-    lines[2] ?? "",
+    lines[3] ?? "",
     /^0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+░{12}$/,
   );
-  assert.doesNotMatch(lines.slice(0, 3).join("\n"), /snapshot/);
+  assert.doesNotMatch(lines.slice(0, 4).join("\n"), /snapshot/);
 
   harness.terminal.columns = 80;
   harness.terminal.rows = 24;
