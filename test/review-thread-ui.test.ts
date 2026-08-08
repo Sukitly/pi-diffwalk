@@ -68,6 +68,15 @@ const cardTheme = {
   },
 } satisfies Pick<Theme, "fg" | "bg" | "bold">;
 
+const statusTheme = {
+  ...plainTheme,
+  fg: (color: ThemeColor, text: string) => {
+    if (color === "warning") return `\u001b[33m${text}\u001b[39m`;
+    if (color === "success") return `\u001b[32m${text}\u001b[39m`;
+    return text;
+  },
+} satisfies Pick<Theme, "fg" | "bg" | "bold">;
+
 function fixture(): {
   readonly snapshot: ReturnType<typeof makeSnapshot>;
   readonly pending: ReviewThreadBatch;
@@ -206,12 +215,12 @@ test("renders Agent responses at frozen anchors and omits unrelated lines", () =
   const { component } = createComponent(answered, 40);
   const output = component.render(100).join("\n");
 
-  assert.match(output, /\+first changed[\s\S]*C1 · Open · Turn 1/);
+  assert.match(output, /\+first changed[\s\S]*C1 · ○ Open · Turn 1/);
   assert.match(
     output,
     /You[\s\S]*Why is the first line needed\?[\s\S]*Agent[\s\S]*first line validates/,
   );
-  assert.match(output, /\+second changed[\s\S]*C2 · Open · Turn 1/);
+  assert.match(output, /\+second changed[\s\S]*C2 · ○ Open · Turn 1/);
   assert.match(output, /contract test guarantees the second/);
   assert.doesNotMatch(output, /outside start|outside end|unrelated 10/);
 });
@@ -222,20 +231,32 @@ test("shows complete responsive thread header information when height permits", 
 
   let lines = component.render(100).map((line) => line.trimEnd());
   assert.match(lines[0] ?? "", /^DiffWalk \/ Threads.*Thread 1\/2$/);
-  assert.match(lines[1] ?? "", /^C1 · Open.*2\/2 answered.*0\/2 resolved/);
+  assert.match(lines[1] ?? "", /^C1 · ○ Open.*2\/2 answered.*0\/2 resolved/);
 
   lines = component.render(60).map((line) => line.trimEnd());
   assert.equal(lines[0], "DiffWalk / Threads · Thread 1/2");
-  assert.equal(lines[1], "C1 · Open");
+  assert.equal(lines[1], "C1 · ○ Open");
   assert.match(lines[2] ?? "", /2\/2 answered.*0\/2 resolved.*0 drafts/);
 
   lines = component.render(30).map((line) => line.trimEnd());
   assert.equal(lines[0], "DiffWalk / Threads");
   assert.equal(lines[1], "Thread 1/2");
-  assert.equal(lines[2], "C1 · Open");
+  assert.equal(lines[2], "C1 · ○ Open");
   assert.match(lines.slice(3, 6).join("\n"), /2\/2 answered/);
   assert.match(lines.slice(3, 6).join("\n"), /0\/2 resolved/);
   assert.match(lines.slice(3, 6).join("\n"), /0 drafts/);
+});
+
+test("visually distinguishes open and resolved thread statuses", () => {
+  const { answered } = fixture();
+  const { component } = createComponent(answered, 30, statusTheme);
+
+  const openOutput = component.render(100).join("\n");
+  assert.ok(openOutput.includes("C1 · \u001b[33m○ Open\u001b[39m"));
+
+  press(component, "r");
+  const resolvedOutput = component.render(100).join("\n");
+  assert.ok(resolvedOutput.includes("C1 · \u001b[32m✓ Resolved\u001b[39m"));
 });
 
 test("renders multiple turns in order under the same inline thread", () => {
@@ -252,7 +273,7 @@ test("renders multiple turns in order under the same inline thread", () => {
 
   assert.match(
     output,
-    /C1 · Open · Turn 1[\s\S]*You[\s\S]*Agent[\s\S]*C1 · Turn 2[\s\S]*validation sufficient[\s\S]*Agent[\s\S]*parser rejects/,
+    /C1 · ○ Open · Turn 1[\s\S]*You[\s\S]*Agent[\s\S]*C1 · Turn 2[\s\S]*validation sufficient[\s\S]*Agent[\s\S]*parser rejects/,
   );
 });
 
@@ -285,8 +306,8 @@ test("renders thread status only on the first turn header", () => {
   const { component } = createComponent(multiTurn, 40);
   const output = component.render(100).join("\n");
 
-  assert.equal(output.match(/C1 · Open · Turn \d+/g)?.length, 1);
-  assert.match(output, /C1 · Open · Turn 1/);
+  assert.equal(output.match(/C1 · ○ Open · Turn \d+/g)?.length, 1);
+  assert.match(output, /C1 · ○ Open · Turn 1/);
   assert.match(output, /C1 · Turn 2/);
 });
 
@@ -317,8 +338,8 @@ test("keeps thread ownership visible when paging through later turns", () => {
     output = component.render(100).join("\n");
   }
 
-  assert.match(output, /C2 · Open/);
-  assert.doesNotMatch(output, /C1 · Open · Turn 1/);
+  assert.match(output, /C2 · ○ Open/);
+  assert.doesNotMatch(output, /C1 · ○ Open · Turn 1/);
   assert.match(output, /C1 · Turn 2/);
 });
 
@@ -349,7 +370,9 @@ test("renders full-width reviewer and Agent cards with readable wrapping", () =>
   );
   const agentRows = lines.filter((line) => line.startsWith(agentBackground));
 
-  assert.ok(reviewerRows.some((line) => line.includes("▌ C1 · Open · Turn 1")));
+  assert.ok(
+    reviewerRows.some((line) => line.includes("▌ C1 · ○ Open · Turn 1")),
+  );
   assert.ok(agentRows.some((line) => line.includes("  Agent")));
   assert.ok(
     agentRows.some((line) =>
@@ -429,12 +452,12 @@ test("hides previously resolved threads in later follow-up views", () => {
   const firstOutput = firstView.component.render(100).join("\n");
 
   assert.doesNotMatch(firstOutput, /C1|Why is the first line needed/);
-  assert.match(firstOutput, /C2 · Open · Turn 1/);
+  assert.match(firstOutput, /C2 · ○ Open · Turn 1/);
 
   press(firstView.component, "r");
   assert.match(
     firstView.component.render(100).join("\n"),
-    /C2 · Resolved · Turn 1/,
+    /C2 · ✓ Resolved · Turn 1/,
   );
   press(firstView.component, "\r");
 
@@ -454,7 +477,7 @@ test("lets only the reviewer resolve answered threads without drafts", () => {
 
   press(component, "r");
   assert.equal(changes.at(-1)?.threads[0]?.resolved, true);
-  assert.match(component.render(90).join("\n"), /C1 · Resolved · Turn 1/);
+  assert.match(component.render(90).join("\n"), /C1 · ✓ Resolved · Turn 1/);
 
   press(component, "c");
   assert.match(component.render(90).join("\n"), /must be reopened/);
