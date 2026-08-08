@@ -114,6 +114,17 @@ const ansiTheme = {
   inverse: (text: string) => `\u001b[7m${text}\u001b[27m`,
 } satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 
+const progressBarTheme = {
+  ...plainTheme,
+  fg: (color: ThemeColor, text: string) => {
+    if (color === "border") return `\u001b[34m${text}\u001b[39m`;
+    if (color === "accent") return `\u001b[35m${text}\u001b[39m`;
+    if (color === "muted") return `\u001b[90m${text}\u001b[39m`;
+    if (color === "borderMuted") return `\u001b[36m${text}\u001b[39m`;
+    return text;
+  },
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
+
 const spanHeaderTheme = {
   fg: (color: ThemeColor, text: string) => {
     if (color === "accent") return `\u001b[35m${text}\u001b[39m`;
@@ -595,7 +606,7 @@ test("shows complete responsive header information when height permits", () => {
   assert.match(wideHeader, /Request entry point\\nsecondary heading/);
   assert.match(
     wideHeader,
-    /0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+\[ {12}\]/,
+    /0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+\[ {10}\]/,
   );
   assert.doesNotMatch(wideHeader, /snapshot/);
 
@@ -621,16 +632,24 @@ test("shows complete responsive header information when height permits", () => {
   assert.match(lines.slice(2, 7).join("\n"), /2 unsupported/);
 });
 
-test("keeps progress bar boundaries visible at every completion state", () => {
-  const harness = createHarness(120, 30);
-
-  assert.match(renderText(harness), /0\/2 reviewed.*\[ {12}\]/);
-
-  press(harness.component, "n");
-  assert.match(renderText(harness), /1\/2 reviewed.*\[█{6} {6}\]/);
+test("renders bounded progress with distinct boundary and fill roles", () => {
+  const harness = createHarness(120, 30, makeUiFixture(), {
+    theme: progressBarTheme,
+  });
 
   press(harness.component, "n");
-  assert.match(renderText(harness), /2\/2 reviewed.*\[█{12}\]/);
+  assert.ok(
+    renderText(harness).includes(
+      "\u001b[34m[\u001b[39m\u001b[35m█████\u001b[39m     \u001b[34m]\u001b[39m",
+    ),
+  );
+
+  press(harness.component, "n");
+  assert.ok(
+    renderText(harness).includes(
+      "\u001b[34m[\u001b[39m\u001b[35m██████████\u001b[39m\u001b[34m]\u001b[39m",
+    ),
+  );
 });
 
 test("drops wide status when the comment editor reserves its body", () => {

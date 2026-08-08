@@ -146,7 +146,7 @@ The walkthrough keeps the default screen focused on the review task and frozen d
 DiffWalk / Review                                  Unit 3/12
 
 Authentication request validation
-2/12 reviewed    1 comment · 1 skipped    [██          ]
+2/12 reviewed    1 comment · 1 skipped    [██        ]
 
 │ The handler now validates issuer and audience.
 

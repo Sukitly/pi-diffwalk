@@ -10,8 +10,10 @@ export interface PrioritizedLineGroup {
 }
 
 export interface ProgressBarSegments {
+  readonly leftBoundary: string;
   readonly completed: number;
   readonly remaining: number;
+  readonly rightBoundary: string;
 }
 
 export function fitLine(line: string, width: number): string {
@@ -88,13 +90,27 @@ export function progressBarSegments(
   width = 12,
 ): ProgressBarSegments {
   const available = Math.max(0, Math.floor(width));
+  const leftBoundary = available >= 1 ? "[" : "";
+  const rightBoundary = available >= 2 ? "]" : "";
+  const trackWidth = Math.max(
+    0,
+    available - leftBoundary.length - rightBoundary.length,
+  );
   const boundedTotal = Math.max(0, total);
   const boundedReviewed = Math.max(0, Math.min(reviewed, boundedTotal));
-  const completed =
-    boundedTotal === 0
-      ? 0
-      : Math.round((boundedReviewed / boundedTotal) * available);
-  return { completed, remaining: available - completed };
+  let completed = 0;
+  if (boundedTotal > 0 && boundedReviewed >= boundedTotal) {
+    completed = trackWidth;
+  } else if (boundedReviewed > 0 && trackWidth > 1) {
+    const rounded = Math.round((boundedReviewed / boundedTotal) * trackWidth);
+    completed = Math.max(1, Math.min(trackWidth - 1, rounded));
+  }
+  return {
+    leftBoundary,
+    completed,
+    remaining: trackWidth - completed,
+    rightBoundary,
+  };
 }
 
 export function countNoun(count: number, noun: string): string {

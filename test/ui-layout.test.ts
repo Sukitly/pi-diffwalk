@@ -2,22 +2,54 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { progressBarSegments, selectHeaderGroups } from "../src/ui-layout.ts";
 
-test("calculates progress bar segments for empty, partial, and complete review", () => {
+test("calculates bounded progress segments within the total width", () => {
   assert.deepEqual(progressBarSegments(0, 2), {
+    leftBoundary: "[",
     completed: 0,
-    remaining: 12,
+    remaining: 10,
+    rightBoundary: "]",
   });
   assert.deepEqual(progressBarSegments(1, 2), {
-    completed: 6,
-    remaining: 6,
+    leftBoundary: "[",
+    completed: 5,
+    remaining: 5,
+    rightBoundary: "]",
   });
   assert.deepEqual(progressBarSegments(2, 2), {
-    completed: 12,
+    leftBoundary: "[",
+    completed: 10,
     remaining: 0,
+    rightBoundary: "]",
   });
   assert.deepEqual(progressBarSegments(0, 0), {
+    leftBoundary: "[",
     completed: 0,
-    remaining: 12,
+    remaining: 10,
+    rightBoundary: "]",
+  });
+
+  const narrow = progressBarSegments(1, 2, 8);
+  assert.equal(
+    narrow.leftBoundary.length +
+      narrow.completed +
+      narrow.remaining +
+      narrow.rightBoundary.length,
+    8,
+  );
+});
+
+test("keeps partial progress distinct from empty and complete endpoints", () => {
+  assert.deepEqual(progressBarSegments(1, 30), {
+    leftBoundary: "[",
+    completed: 1,
+    remaining: 9,
+    rightBoundary: "]",
+  });
+  assert.deepEqual(progressBarSegments(29, 30), {
+    leftBoundary: "[",
+    completed: 9,
+    remaining: 1,
+    rightBoundary: "]",
   });
 });
 
