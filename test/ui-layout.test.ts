@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { progressBarSegments, selectHeaderGroups } from "../src/ui-layout.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+  fitRight,
+  progressBarSegments,
+  selectHeaderGroups,
+} from "../src/ui-layout.ts";
 
 test("calculates progress bar segments for empty, partial, and complete review", () => {
   assert.deepEqual(progressBarSegments(0, 2), {
@@ -19,6 +24,18 @@ test("calculates progress bar segments for empty, partial, and complete review",
     completed: 0,
     remaining: 12,
   });
+});
+
+test("right-aligns styled lines and safely truncates long lines", () => {
+  assert.equal(fitRight("status", 10), "    status");
+
+  const styled = fitRight("\u001b[31mok\u001b[39m", 6);
+  assert.equal(visibleWidth(styled), 6);
+  assert.ok(styled.startsWith("    \u001b[31mok"));
+
+  const truncated = fitRight("123456789", 5);
+  assert.equal(visibleWidth(truncated), 5);
+  assert.match(truncated, /^12345/);
 });
 
 test("drops complete low-priority header groups before reserved body rows", () => {

@@ -59,6 +59,7 @@ import {
   countNoun,
   fitColumns,
   fitLine,
+  fitRight,
   MEDIUM_HEADER_WIDTH,
   type PrioritizedLineGroup,
   packStatusParts,
@@ -888,7 +889,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     );
     const title = this.theme.fg(
       "text",
-      this.theme.bold(oneTerminalLine(safeText(this.screenTitle()))),
+      this.theme.bold(safeText(this.screenTitle())),
     );
     const groups: PrioritizedLineGroup[] = [];
 
@@ -900,13 +901,11 @@ export class GuidedReviewComponent implements Component, Focusable {
           lines: [fitColumns(brand, this.theme.fg("muted", position), width)],
           priority: 90,
         },
+        { lines: [fitLine(title, width)], priority: 80 },
         {
-          lines: [
-            rows >= 5
-              ? fitColumns(title, status, width)
-              : fitLine(title, width),
-          ],
-          priority: 80,
+          lines: [fitRight(status, width)],
+          priority: 50,
+          minimumRows: 5,
         },
       );
     } else if (width >= MEDIUM_HEADER_WIDTH) {
@@ -3079,7 +3078,7 @@ function buildCommentTargetPreview(
   const change = changesById.get(target.fileChangeId);
   if (change === undefined) {
     throw new GuidedReviewUiInvariantError(
-      `Comment target ${target.fileChangeId}:${target.side}:${target.line} has no frozen text content.`,
+      `Comment target ${target.fileChangeId}:${target.side}:${target.line} references file change ${target.fileChangeId}, which is not in the frozen snapshot.`,
     );
   }
   const content = textContent(change);

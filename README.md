@@ -145,7 +145,7 @@ The walkthrough keeps the default screen focused on the review task and frozen d
 ```text
 DiffWalk / Review                                  Unit 3/12
 Authentication request validation
-██░░░░░░░░░░  2/12 reviewed    1 comment · 1 skipped
+        ██░░░░░░░░░░  2/12 reviewed    1 comment · 1 skipped
 
 The handler now validates issuer and audience.
 
@@ -167,7 +167,7 @@ test/auth/handler.test.ts
 j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • ? help
 ```
 
-The header separates the current screen, unit title, and review totals. Wide terminals add a progress bar and right-align the unit position. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked. Short terminals remove status and progress rows before content, preserving the footer and at least one content row.
+The header separates the current screen, unit title, and review totals. Wide terminals add a progress bar, right-align the unit position, and right-align the review totals on their own status row. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked. Short terminals remove status and progress rows before content, preserving the footer and at least one content row.
 
 One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. A viewport too short to pin a file title keeps that line available for diff content.
 
@@ -199,7 +199,7 @@ On secondary pages `h` and `l` follow `Left` and `Right`: `h` returns from the e
 
 The inventory lists one entry per changed file with its planned, skipped, and carried-forward line counts, plus metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Any changed region can be opened for explicit read-only inspection, including regions outside the planned route.
 
-A comment retains its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context. While editing, DiffWalk shows the frozen path, the anchored diff line, and up to three surrounding lines on each side. Short terminals remove surrounding context before the anchor or editor; compact path and context rows use an explicit ellipsis when truncated. Changed lines owned by another unit, skipped, or carried forward use the same visible omission vocabulary as the walkthrough. After saving, the complete draft body appears directly below the selected diff line.
+A comment retains its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context. While editing, DiffWalk repeats the walkthrough's highlighted frozen file header, shows renames as `old -> new`, and keeps the anchor visible in the diff gutter with up to three surrounding lines on each side. Short terminals remove surrounding context before the anchor or editor; compact path and context rows use an explicit ellipsis when truncated. Changed lines owned by another unit, skipped, or carried forward use the same visible omission vocabulary as the walkthrough. After saving, the complete draft body appears directly below the selected diff line.
 
 ## Comment Submission
 
