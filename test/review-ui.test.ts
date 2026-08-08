@@ -1529,9 +1529,15 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
   const harness = createHarness(80, 24);
 
   press(harness.component, "c");
-  assert.match(renderText(harness), /Review comment/);
-  assert.equal(renderText(harness).match(/Review comment/g)?.length, 1);
-  assert.ok(renderText(harness).includes(CURSOR_MARKER));
+  const editor = renderText(harness);
+  assert.match(editor, /Review comment/);
+  assert.equal(editor.match(/Review comment/g)?.length, 1);
+  assert.match(editor, /context line 1/);
+  assert.match(editor, />\s+5\s+-const value = request\.value/);
+  assert.match(editor, /\+const value = validate/);
+  assert.match(editor, /context line 7/);
+  assert.doesNotMatch(editor, /context line [08]/);
+  assert.ok(editor.includes(CURSOR_MARKER));
 
   press(
     harness.component,
@@ -1555,6 +1561,17 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
     renderText(harness),
     /\[Draft comment\][\s\S]*请检查[\s\S]*失败路径/,
   );
+});
+
+test("keeps the selected comment target and editor cursor on a short screen", () => {
+  const harness = createHarness(30, 8);
+
+  press(harness.component, "c");
+  const output = renderText(harness);
+
+  assert.match(output, />\s+5\s+-const value/);
+  assert.ok(output.includes(CURSOR_MARKER));
+  assert.match(output.split("\n").at(-1) ?? "", /Enter save/);
 });
 
 test("renders a saved draft as a full-width message card", () => {

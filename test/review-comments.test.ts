@@ -209,9 +209,13 @@ test("retains old and new paths when commenting on a renamed file", () => {
   assert.equal(added.filePath, "src/new-name.ts");
 });
 
-test("captures nearby context from the whole frozen file", () => {
+test("offers and saves nearby context from the whole frozen file", () => {
   const fixture = commentFixture();
   const session = new ReviewSession(fixture.snapshot, fixture.route);
+  const target = session
+    .listCommentableLines()
+    .find((candidate) => candidate.side === "new" && candidate.line === 4);
+  assert.ok(target);
 
   const comment = session.upsertComment({
     ...anchor(fixture, COMMENT_PATH, "new", 4),
@@ -220,7 +224,7 @@ test("captures nearby context from the whole frozen file", () => {
 
   assert.equal(REVIEW_COMMENT_CONTEXT_RADIUS, 3);
   assert.deepEqual(
-    comment.nearbyContext.map((line) => line.text),
+    target.nearbyContext.map((line) => line.text),
     [
       "const added = 1",
       "callContract()",
@@ -230,6 +234,7 @@ test("captures nearby context from the whole frozen file", () => {
       "export { result }",
     ],
   );
+  assert.deepEqual(comment.nearbyContext, target.nearbyContext);
 });
 
 test("orders comments by route order across units and files", () => {

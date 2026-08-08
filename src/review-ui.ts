@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
+  CURSOR_MARKER,
   Editor,
   type EditorTheme,
   type Focusable,
@@ -617,32 +618,31 @@ export class GuidedReviewComponent implements Component, Focusable {
       "Enter save • Shift+Enter newline • Esc discard edit",
     );
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
-    const body: string[] = [];
-    if (target !== undefined) {
-      body.push(
-        ...wrapStyled(
-          `${this.theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.diffLine)}`,
-          width,
-        ),
-      );
-      body.push(renderSelectedDiffText(target.diffLine, this.theme, width));
-    }
-    if (this.commentInputError !== undefined) {
-      body.push(
-        ...wrapStyled(
-          this.theme.fg("warning", safeText(this.commentInputError)),
-          width,
-        ),
-      );
-    }
-    const remaining = Math.max(0, bodyHeight - body.length);
     const editorLines = this.editor.render(width);
-    if (editorLines.length <= remaining) {
-      body.push(...editorLines);
-    } else if (remaining > 0) {
-      body.push(...editorLines.slice(editorLines.length - remaining));
-    }
-    return [...header, ...body.slice(0, bodyHeight), ...footer];
+    const editorHeight = Math.min(editorLines.length, bodyHeight);
+    const errorLines =
+      this.commentInputError === undefined
+        ? []
+        : wrapStyled(
+            this.theme.fg("warning", safeText(this.commentInputError)),
+            width,
+          );
+    const errorHeight = Math.min(
+      errorLines.length,
+      Math.max(0, bodyHeight - editorHeight),
+    );
+    const previewHeight = Math.max(0, bodyHeight - editorHeight - errorHeight);
+    const preview =
+      target === undefined
+        ? []
+        : renderCommentTargetPreview(target, this.theme, width, previewHeight);
+    return [
+      ...header,
+      ...preview,
+      ...errorLines.slice(0, errorHeight),
+      ...sliceEditorRows(editorLines, editorHeight),
+      ...footer,
+    ];
   }
 
   private renderExplanation(width: number, rows: number): readonly string[] {
@@ -2997,15 +2997,80 @@ function renderInlineDraftComment(
   ];
 }
 
-function renderSelectedDiffText(
-  line: DiffLine,
+function renderCommentTargetPreview(
+  target: ReviewCommentTarget,
   theme: ReviewUiTheme,
   width: number,
-): string {
-  return fitLine(
-    theme.fg(diffColor(line), safeText(diffLineText(line))),
-    width,
+  maxRows: number,
+): readonly string[] {
+  if (maxRows <= 0) return [];
+  const contextContainsTarget = target.nearbyContext.some((line) =>
+    isCommentTargetLine(target, line),
   );
+  const context = contextContainsTarget
+    ? target.nearbyContext
+    : [target.diffLine];
+  const selectedIndex = context.findIndex((line) =>
+    isCommentTargetLine(target, line),
+  );
+  const showPath = maxRows > 1;
+  const diffHeight = Math.max(1, maxRows - (showPath ? 1 : 0));
+  const windowHeight = Math.min(diffHeight, context.length);
+  const start = clamp(
+    selectedIndex - Math.floor(windowHeight / 2),
+    0,
+    context.length - windowHeight,
+  );
+  const inlineTextByIndex = buildInlineDiffText(context, theme);
+  const diffRows = context
+    .slice(start, start + windowHeight)
+    .map((line, index) => {
+      const contextIndex = start + index;
+      return (
+        renderDiffLine(
+          line,
+          contextIndex === selectedIndex,
+          false,
+          false,
+          theme,
+          width,
+          inlineTextByIndex.get(contextIndex),
+        )[0] ?? ""
+      );
+    });
+  if (!showPath) return diffRows;
+  return [
+    fitLine(
+      `${theme.fg("muted", displayPath(target.filePath))} ${renderLineAnchor(target.diffLine)}`,
+      width,
+    ),
+    ...diffRows,
+  ];
+}
+
+function isCommentTargetLine(
+  target: ReviewCommentTarget,
+  line: DiffLine,
+): boolean {
+  return target.side === "old"
+    ? line.type === "removed" && line.oldLine === target.line
+    : line.type === "added" && line.newLine === target.line;
+}
+
+function sliceEditorRows(
+  lines: readonly string[],
+  height: number,
+): readonly string[] {
+  if (height <= 0) return [];
+  if (lines.length <= height) return [...lines];
+  const cursorIndex = lines.findIndex((line) => line.includes(CURSOR_MARKER));
+  if (cursorIndex < 0) return lines.slice(lines.length - height);
+  const start = clamp(
+    cursorIndex - Math.floor(height / 2),
+    0,
+    lines.length - height,
+  );
+  return lines.slice(start, start + height);
 }
 
 function renderInventoryRows(

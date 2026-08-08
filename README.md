@@ -374,7 +374,7 @@ The current version includes:
 - global and trusted project review preferences from DiffWalk rules files
 - complete changed-line coverage validation
 - line-oriented diff navigation
-- inline comment editing and anchored draft display
+- inline comment editing with frozen diff context and anchored draft display
 - comment summary and batch submission
 - multi-turn inline reviewer and agent conversations in an automatically opened filtered thread UI
 - per-turn discussion or change-request submission modes

@@ -29,6 +29,7 @@ export interface ReviewCommentTarget extends ReviewCommentAnchor {
   readonly oldPath?: string;
   readonly newPath?: string;
   readonly diffLine: DiffLine;
+  readonly nearbyContext: readonly DiffLine[];
 }
 
 type SnapshotIdOf = ReviewSnapshot["id"];
@@ -58,8 +59,6 @@ export class ReviewSessionError extends Error {
 }
 
 interface InternalTarget extends ReviewCommentTarget {
-  readonly fileLines: readonly DiffLine[];
-  readonly lineIndex: number;
   readonly order: number;
 }
 
@@ -197,8 +196,7 @@ function buildCommentTargets(
           oldPath: change.oldPath,
           newPath: change.newPath,
           diffLine: { ...diffLine },
-          fileLines: content.lines,
-          lineIndex,
+          nearbyContext: frozenNearbyContext(content.lines, lineIndex),
           order: targets.length,
         });
       }
@@ -236,15 +234,22 @@ function commentFilePath(change: FileChange, side: ChangeSide): string {
   return filePath;
 }
 
+function frozenNearbyContext(
+  lines: readonly DiffLine[],
+  lineIndex: number,
+): readonly DiffLine[] {
+  const start = Math.max(0, lineIndex - REVIEW_COMMENT_CONTEXT_RADIUS);
+  const end = Math.min(
+    lines.length,
+    lineIndex + REVIEW_COMMENT_CONTEXT_RADIUS + 1,
+  );
+  return lines.slice(start, end).map((line) => ({ ...line }));
+}
+
 function materializeComment(
   target: InternalTarget,
   body: string,
 ): ReviewComment {
-  const start = Math.max(0, target.lineIndex - REVIEW_COMMENT_CONTEXT_RADIUS);
-  const end = Math.min(
-    target.fileLines.length,
-    target.lineIndex + REVIEW_COMMENT_CONTEXT_RADIUS + 1,
-  );
   return {
     snapshotId: target.snapshotId,
     reviewUnitId: target.reviewUnitId,
@@ -257,9 +262,7 @@ function materializeComment(
     oldLine: target.diffLine.oldLine,
     newLine: target.diffLine.newLine,
     selectedText: target.diffLine.text,
-    nearbyContext: target.fileLines.slice(start, end).map((line) => ({
-      ...line,
-    })),
+    nearbyContext: target.nearbyContext.map((line) => ({ ...line })),
     body,
   };
 }
@@ -275,6 +278,7 @@ function copyTarget(target: InternalTarget): ReviewCommentTarget {
     oldPath: target.oldPath,
     newPath: target.newPath,
     diffLine: { ...target.diffLine },
+    nearbyContext: target.nearbyContext.map((line) => ({ ...line })),
   };
 }
 
