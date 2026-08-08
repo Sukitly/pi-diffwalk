@@ -199,7 +199,7 @@ On secondary pages `h` and `l` follow `Left` and `Right`: `h` returns from the e
 
 The inventory lists one entry per changed file with its planned, skipped, and carried-forward line counts, plus metadata-only, binary, unsupported, and notice entries. Metadata entries include file status and mode transitions. Any changed region can be opened for explicit read-only inspection, including regions outside the planned route.
 
-A comment retains its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context. After saving, the complete draft body appears directly below the selected diff line.
+A comment retains its selected file path, old and new paths for renames, the side and line number it is anchored to, the selected line text, its review unit, and nearby file context. While editing, DiffWalk shows the frozen path, the anchored diff line, and up to three surrounding lines on each side. Short terminals remove surrounding context before the anchor or editor; compact path and context rows use an explicit ellipsis when truncated. Changed lines owned by another unit, skipped, or carried forward use the same visible omission vocabulary as the walkthrough. After saving, the complete draft body appears directly below the selected diff line.
 
 ## Comment Submission
 

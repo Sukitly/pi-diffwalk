@@ -1525,6 +1525,32 @@ test("navigates the inventory with vim keys", () => {
   assert.match(renderText(harness), /Review checks/);
 });
 
+test("renders the frozen context window around the anchored line", () => {
+  const harness = createHarness(80, 24);
+
+  press(harness.component, "c");
+  const editor = renderText(harness);
+  const compactAdded = editor
+    .split("\n")
+    .find((line) => line.includes("+const value = validate"));
+
+  assert.match(editor, /context line 1/);
+  assert.match(editor, />\s+5\s+-const value = request\.value/);
+  assert.match(compactAdded ?? "", /…/);
+  assert.match(editor, /context line 7/);
+  assert.doesNotMatch(editor, /context line [08]/);
+});
+
+test("shows every wrapped row of a long anchored line in the comment editor", () => {
+  const harness = createHarness(80, 24);
+
+  press(harness.component, "j", "c");
+  const editor = renderText(harness);
+
+  assert.match(editor, />\s+5\s+\+const value = validate/);
+  assert.match(editor, /TAIL_END/);
+});
+
 test("uses the embedded Editor for multiline Chinese comments with IME focus", () => {
   const harness = createHarness(80, 24);
 
@@ -1532,11 +1558,6 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
   const editor = renderText(harness);
   assert.match(editor, /Review comment/);
   assert.equal(editor.match(/Review comment/g)?.length, 1);
-  assert.match(editor, /context line 1/);
-  assert.match(editor, />\s+5\s+-const value = request\.value/);
-  assert.match(editor, /\+const value = validate/);
-  assert.match(editor, /context line 7/);
-  assert.doesNotMatch(editor, /context line [08]/);
   assert.ok(editor.includes(CURSOR_MARKER));
 
   press(
@@ -1563,15 +1584,134 @@ test("uses the embedded Editor for multiline Chinese comments with IME focus", (
   );
 });
 
-test("keeps the selected comment target and editor cursor on a short screen", () => {
+test("keeps the anchor and editor viewport semantics on a short screen", () => {
   const harness = createHarness(30, 8);
 
-  press(harness.component, "c");
+  press(
+    harness.component,
+    "c",
+    "o",
+    "n",
+    "e",
+    "\n",
+    "t",
+    "w",
+    "o",
+    "\n",
+    "t",
+    "h",
+    "r",
+    "e",
+    "e",
+  );
   const output = renderText(harness);
+  const borderRows = output.split("\n").filter((line) => line.includes("─"));
 
+  assert.match(output, /src\/entry/);
   assert.match(output, />\s+5\s+-const value/);
   assert.ok(output.includes(CURSOR_MARKER));
+  assert.equal(borderRows.length, 2);
+  assert.match(borderRows[0] ?? "", /↑ 2 more/);
   assert.match(output.split("\n").at(-1) ?? "", /Enter save/);
+});
+
+test("marks a truncated comment path explicitly", () => {
+  const harness = createHarness(20, 24);
+
+  press(harness.component, "c");
+  const pathRow = renderText(harness)
+    .split("\n")
+    .find((line) => line.includes("src/"));
+
+  assert.match(pathRow ?? "", /…/);
+});
+
+test("preserves ownership and adjacent draft markers in comment context", () => {
+  const harness = createHarness(100, 24, makeOtherUnitInsideSpanFixture());
+
+  press(harness.component, "c");
+  let editor = renderText(harness);
+  assert.match(editor, /routed to unit "Fallback removal"/);
+  assert.doesNotMatch(editor, /inner removal/);
+
+  press(
+    harness.component,
+    "\u001b",
+    "j",
+    "c",
+    "D",
+    "r",
+    "a",
+    "f",
+    "t",
+    "\r",
+    "g",
+    "g",
+    "c",
+  );
+  editor = renderText(harness);
+  assert.match(editor, /●\s+4\s+\+outer end/);
+});
+
+test("uses the walkthrough skip vocabulary in comment context", () => {
+  const harness = createHarness(100, 24, makeSkippedInsideSpanFixture());
+
+  press(harness.component, "c");
+  const editor = renderText(harness);
+
+  assert.match(editor, /skipped: Generated output is reviewed at its source/);
+  assert.doesNotMatch(editor, /generated removed/);
+});
+
+test("uses the walkthrough carried-forward vocabulary in comment context", () => {
+  const harness = createHarness(100, 24, makeMixedSideOverlapFixture());
+
+  press(harness.component, "c");
+  const editor = renderText(harness);
+
+  assert.match(editor, /reviewed in an earlier round/);
+  assert.doesNotMatch(editor, /carried one|carried two/);
+});
+
+test("keeps valid one-line replacement highlighting in comment context", () => {
+  const harness = createHarness(
+    100,
+    24,
+    makeInlineDiffFixture([
+      " head",
+      "-return oldValue",
+      "+return newValue",
+      " tail",
+    ]),
+    { theme: inlineTheme },
+  );
+
+  press(harness.component, "c");
+  const editor = renderText(harness);
+
+  assert.match(editor, /return \[\[oldValue\]\]/);
+  assert.match(editor, /return \[\[newValue\]\]/);
+});
+
+test("does not invent inline pairs when the context cuts a larger replacement", () => {
+  const harness = createHarness(
+    100,
+    24,
+    makeInlineDiffFixture([
+      "-old alpha",
+      "-old beta",
+      "+new beta",
+      " context a",
+      "+target line",
+      " context b",
+      " context c",
+    ]),
+    { theme: inlineTheme },
+  );
+
+  press(harness.component, "j", "j", "j", "c");
+
+  assert.doesNotMatch(renderText(harness), /\[\[/);
 });
 
 test("renders a saved draft as a full-width message card", () => {

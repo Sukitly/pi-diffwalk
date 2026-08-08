@@ -224,7 +224,7 @@ test("offers and saves nearby context from the whole frozen file", () => {
 
   assert.equal(REVIEW_COMMENT_CONTEXT_RADIUS, 3);
   assert.deepEqual(
-    target.nearbyContext.map((line) => line.text),
+    target.context.lines.map((line) => line.text),
     [
       "const added = 1",
       "callContract()",
@@ -234,7 +234,9 @@ test("offers and saves nearby context from the whole frozen file", () => {
       "export { result }",
     ],
   );
-  assert.deepEqual(comment.nearbyContext, target.nearbyContext);
+  assert.equal(target.context.anchorIndex, 3);
+  assert.equal(target.context.fileStartIndex, 2);
+  assert.deepEqual(comment.nearbyContext, target.context.lines);
 });
 
 test("orders comments by route order across units and files", () => {
