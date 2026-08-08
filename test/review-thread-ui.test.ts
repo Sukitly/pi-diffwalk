@@ -68,14 +68,20 @@ const cardTheme = {
   },
 } satisfies Pick<Theme, "fg" | "bg" | "bold">;
 
-const statusTheme = {
-  ...plainTheme,
-  fg: (color: ThemeColor, text: string) => {
-    if (color === "warning") return `\u001b[33m${text}\u001b[39m`;
-    if (color === "success") return `\u001b[32m${text}\u001b[39m`;
-    return text;
-  },
-} satisfies Pick<Theme, "fg" | "bg" | "bold">;
+interface ForegroundCall {
+  readonly color: ThemeColor;
+  readonly text: string;
+}
+
+function recordingTheme(calls: ForegroundCall[]) {
+  return {
+    ...plainTheme,
+    fg: (color: ThemeColor, text: string) => {
+      calls.push({ color, text });
+      return text;
+    },
+  } satisfies Pick<Theme, "fg" | "bg" | "bold">;
+}
 
 function fixture(): {
   readonly snapshot: ReturnType<typeof makeSnapshot>;
@@ -247,16 +253,30 @@ test("shows complete responsive thread header information when height permits", 
   assert.match(lines.slice(3, 6).join("\n"), /0 drafts/);
 });
 
-test("visually distinguishes open and resolved thread statuses", () => {
+test("uses neutral and success roles for thread status surfaces", () => {
   const { answered } = fixture();
-  const { component } = createComponent(answered, 30, statusTheme);
+  const calls: ForegroundCall[] = [];
+  const { component } = createComponent(answered, 30, recordingTheme(calls));
 
-  const openOutput = component.render(100).join("\n");
-  assert.ok(openOutput.includes("C1 · \u001b[33m○ Open\u001b[39m"));
+  component.render(100);
+  assert.deepEqual(
+    calls.filter((call) => call.text === "○ Open"),
+    Array.from({ length: 3 }, () => ({
+      color: "accent",
+      text: "○ Open",
+    })),
+  );
 
+  calls.length = 0;
   press(component, "r");
-  const resolvedOutput = component.render(100).join("\n");
-  assert.ok(resolvedOutput.includes("C1 · \u001b[32m✓ Resolved\u001b[39m"));
+  component.render(100);
+  assert.deepEqual(
+    calls.filter((call) => call.text === "✓ Resolved"),
+    Array.from({ length: 2 }, () => ({
+      color: "success",
+      text: "✓ Resolved",
+    })),
+  );
 });
 
 test("renders multiple turns in order under the same inline thread", () => {
@@ -274,6 +294,26 @@ test("renders multiple turns in order under the same inline thread", () => {
   assert.match(
     output,
     /C1 · ○ Open · Turn 1[\s\S]*You[\s\S]*Agent[\s\S]*C1 · Turn 2[\s\S]*validation sufficient[\s\S]*Agent[\s\S]*parser rejects/,
+  );
+});
+
+test("uses one delimiter role across header and thread turns", () => {
+  const { answered } = fixture();
+  const multiTurn = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "Why is that validation sufficient?",
+      agentBody: "The parser rejects every other shape.",
+    },
+  ]);
+  const calls: ForegroundCall[] = [];
+  const { component } = createComponent(multiTurn, 40, recordingTheme(calls));
+
+  component.render(100);
+
+  assert.deepEqual(
+    calls.filter((call) => call.text === " · "),
+    Array.from({ length: 4 }, () => ({ color: "dim", text: " · " })),
   );
 });
 
@@ -465,9 +505,14 @@ test("hides previously resolved threads in later follow-up views", () => {
   assert.equal(completed?.status, "closed");
   if (completed === undefined) throw new Error("Expected a completed view.");
 
-  const laterView = createComponent(completed.batch, 30);
+  const calls: ForegroundCall[] = [];
+  const laterView = createComponent(completed.batch, 30, recordingTheme(calls));
   const laterOutput = laterView.component.render(100).join("\n");
   assert.match(laterOutput, /All conversations resolved/);
+  assert.deepEqual(
+    calls.filter((call) => call.text === "All conversations resolved"),
+    [{ color: "success", text: "All conversations resolved" }],
+  );
   assert.doesNotMatch(laterOutput, /C1|C2|first changed|second changed/);
 });
 

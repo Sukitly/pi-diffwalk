@@ -393,8 +393,14 @@ export class ReviewThreadComponent implements Component, Focusable {
         : `Thread ${this.threadIndex + 1}/${visible}`;
     const title =
       current === undefined
-        ? this.theme.fg("text", this.theme.bold("All conversations resolved"))
-        : `${this.theme.fg("text", this.theme.bold(current.id))}${this.theme.fg("dim", " · ")}${renderThreadStatus(current.resolved, this.theme)}`;
+        ? this.theme.fg(
+            "success",
+            this.theme.bold("All conversations resolved"),
+          )
+        : renderThreadHeadline(
+            { id: current.id, resolved: current.resolved },
+            this.theme,
+          );
     const statusParts = [
       `${answered}/${total} answered`,
       `${resolved}/${total} resolved`,
@@ -860,12 +866,15 @@ function renderThread(
     if (item === undefined) continue;
     const selectionMarker = selected && first ? "▌" : " ";
     const turnLabel = `Turn ${turn.sequence}`;
-    const reviewerMetadata = first
-      ? `${theme.fg("accent", theme.bold(`${selectionMarker} ${thread.id}`))}${theme.fg("dim", " · ")}${renderThreadStatus(thread.resolved, theme)}${theme.fg("dim", " · ")}${theme.fg("accent", theme.bold(turnLabel))}`
-      : theme.fg(
-          "accent",
-          theme.bold(`${selectionMarker} ${thread.id} · ${turnLabel}`),
-        );
+    const reviewerMetadata = renderThreadHeadline(
+      {
+        marker: selectionMarker,
+        id: thread.id,
+        ...(first ? { resolved: thread.resolved } : {}),
+        turnLabel,
+      },
+      theme,
+    );
     const reviewerRows = [
       ...wrapStyled(reviewerMetadata, contentWidth),
       theme.fg("muted", theme.bold("  You")),
@@ -950,9 +959,36 @@ function renderDiffLine(
   );
 }
 
+interface ThreadHeadlineOptions {
+  readonly marker?: string;
+  readonly id: ReviewCommentId;
+  readonly resolved?: boolean;
+  readonly turnLabel?: string;
+}
+
+function renderThreadHeadline(
+  options: ThreadHeadlineOptions,
+  theme: ThreadUiTheme,
+): string {
+  const marker =
+    options.marker === undefined
+      ? ""
+      : `${theme.fg("accent", theme.bold(options.marker))} `;
+  const segments = [
+    `${marker}${theme.fg("text", theme.bold(options.id))}`,
+    ...(options.resolved === undefined
+      ? []
+      : [renderThreadStatus(options.resolved, theme)]),
+    ...(options.turnLabel === undefined
+      ? []
+      : [theme.fg("accent", theme.bold(options.turnLabel))]),
+  ];
+  return segments.join(theme.fg("dim", " · "));
+}
+
 function renderThreadStatus(resolved: boolean, theme: ThreadUiTheme): string {
   return theme.fg(
-    resolved ? "success" : "warning",
+    resolved ? "success" : "accent",
     theme.bold(resolved ? "✓ Resolved" : "○ Open"),
   );
 }
