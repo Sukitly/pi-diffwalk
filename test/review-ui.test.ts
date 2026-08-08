@@ -496,9 +496,11 @@ test("shows complete responsive header information when height permits", () => {
 
   let lines = harness.component.render(120).map((line) => line.trimEnd());
   assert.match(lines[0] ?? "", /^DiffWalk \/ Review.*Unit 1\/2$/);
-  assert.match(lines[1] ?? "", /Request entry point/);
-  assert.match(lines[2] ?? "", /0\/2 reviewed.*0 comments.*1 skipped/);
-  assert.doesNotMatch(lines.slice(0, 3).join("\n"), /snapshot/);
+  assert.match(
+    lines[1] ?? "",
+    /^Request entry point.*0\/2 reviewed.*0 comments.*1 skipped.*2 unsupported$/,
+  );
+  assert.doesNotMatch(lines.slice(0, 2).join("\n"), /snapshot/);
 
   harness.terminal.columns = 80;
   harness.terminal.rows = 24;
@@ -1527,13 +1529,22 @@ test("navigates the inventory with vim keys", () => {
 
 test("renders the frozen context window around the anchored line", () => {
   const harness = createHarness(80, 24);
+  const walkthroughPath = harness.component
+    .render(80)
+    .map((line) => line.trimEnd())
+    .find((line) => line.includes("src/entry"));
 
   press(harness.component, "c");
   const editor = renderText(harness);
+  const editorPath = harness.component
+    .render(80)
+    .map((line) => line.trimEnd())
+    .find((line) => line.includes("src/entry"));
   const compactAdded = editor
     .split("\n")
     .find((line) => line.includes("+const value = validate"));
 
+  assert.equal(editorPath, walkthroughPath);
   assert.match(editor, /context line 1/);
   assert.match(editor, />\s+5\s+-const value = request\.value/);
   assert.match(compactAdded ?? "", /…/);
