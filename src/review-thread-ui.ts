@@ -393,8 +393,14 @@ export class ReviewThreadComponent implements Component, Focusable {
         : `Thread ${this.threadIndex + 1}/${visible}`;
     const title =
       current === undefined
-        ? "All conversations resolved"
-        : `${current.id} · ${current.resolved ? "Resolved" : "Open"}`;
+        ? this.theme.fg(
+            "success",
+            this.theme.bold("All conversations resolved"),
+          )
+        : renderThreadHeadline(
+            { id: current.id, resolved: current.resolved },
+            this.theme,
+          );
     const statusParts = [
       `${answered}/${total} answered`,
       `${resolved}/${total} resolved`,
@@ -415,7 +421,7 @@ export class ReviewThreadComponent implements Component, Focusable {
         {
           lines: [
             fitColumns(
-              this.theme.fg("text", this.theme.bold(title)),
+              title,
               this.theme.fg("muted", statusParts.join(" · ")),
               width,
             ),
@@ -432,9 +438,7 @@ export class ReviewThreadComponent implements Component, Focusable {
           priority: 90,
         },
         {
-          lines: [
-            fitLine(this.theme.fg("text", this.theme.bold(title)), width),
-          ],
+          lines: [fitLine(title, width)],
           priority: 80,
         },
         {
@@ -453,9 +457,7 @@ export class ReviewThreadComponent implements Component, Focusable {
           priority: 70,
         },
         {
-          lines: [
-            fitLine(this.theme.fg("text", this.theme.bold(title)), width),
-          ],
+          lines: [fitLine(title, width)],
           priority: 80,
         },
         {
@@ -855,7 +857,6 @@ function renderThread(
   const rows: RenderedThreadRow[] = [];
   const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
   const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
-  const status = thread.resolved ? "resolved" : "open";
   let first = true;
 
   for (const turn of batch.turns) {
@@ -865,17 +866,17 @@ function renderThread(
     if (item === undefined) continue;
     const selectionMarker = selected && first ? "▌" : " ";
     const turnLabel = `Turn ${turn.sequence}`;
-    const reviewerMetadata = first
-      ? `${thread.id} · ${status === "open" ? "Open" : "Resolved"} · ${turnLabel}`
-      : `${thread.id} · ${turnLabel}`;
+    const reviewerMetadata = renderThreadHeadline(
+      {
+        marker: selectionMarker,
+        id: thread.id,
+        ...(first ? { resolved: thread.resolved } : {}),
+        turnLabel,
+      },
+      theme,
+    );
     const reviewerRows = [
-      ...wrapStyled(
-        theme.fg(
-          "accent",
-          theme.bold(`${selectionMarker} ${reviewerMetadata}`),
-        ),
-        contentWidth,
-      ),
+      ...wrapStyled(reviewerMetadata, contentWidth),
       theme.fg("muted", theme.bold("  You")),
       ...wrapWithPrefix(
         "  ",
@@ -955,6 +956,40 @@ function renderDiffLine(
     prefix,
     theme.fg(diffColor(line), `${marker}${safeText(line.text)}`),
     width,
+  );
+}
+
+interface ThreadHeadlineOptions {
+  readonly marker?: string;
+  readonly id: ReviewCommentId;
+  readonly resolved?: boolean;
+  readonly turnLabel?: string;
+}
+
+function renderThreadHeadline(
+  options: ThreadHeadlineOptions,
+  theme: ThreadUiTheme,
+): string {
+  const marker =
+    options.marker === undefined
+      ? ""
+      : `${theme.fg("accent", theme.bold(options.marker))} `;
+  const segments = [
+    `${marker}${theme.fg("text", theme.bold(options.id))}`,
+    ...(options.resolved === undefined
+      ? []
+      : [renderThreadStatus(options.resolved, theme)]),
+    ...(options.turnLabel === undefined
+      ? []
+      : [theme.fg("accent", theme.bold(options.turnLabel))]),
+  ];
+  return segments.join(theme.fg("dim", " · "));
+}
+
+function renderThreadStatus(resolved: boolean, theme: ThreadUiTheme): string {
+  return theme.fg(
+    resolved ? "success" : "accent",
+    theme.bold(resolved ? "✓ Resolved" : "○ Open"),
   );
 }
 
