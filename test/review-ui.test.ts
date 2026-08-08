@@ -595,7 +595,7 @@ test("shows complete responsive header information when height permits", () => {
   assert.match(wideHeader, /Request entry point\\nsecondary heading/);
   assert.match(
     wideHeader,
-    /0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+░{12}/,
+    /0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+\[ {12}\]/,
   );
   assert.doesNotMatch(wideHeader, /snapshot/);
 
@@ -619,6 +619,18 @@ test("shows complete responsive header information when height permits", () => {
   assert.match(lines.slice(2, 7).join("\n"), /0 comments/);
   assert.match(lines.slice(2, 7).join("\n"), /1 skipped/);
   assert.match(lines.slice(2, 7).join("\n"), /2 unsupported/);
+});
+
+test("keeps progress bar boundaries visible at every completion state", () => {
+  const harness = createHarness(120, 30);
+
+  assert.match(renderText(harness), /0\/2 reviewed.*\[ {12}\]/);
+
+  press(harness.component, "n");
+  assert.match(renderText(harness), /1\/2 reviewed.*\[█{6} {6}\]/);
+
+  press(harness.component, "n");
+  assert.match(renderText(harness), /2\/2 reviewed.*\[█{12}\]/);
 });
 
 test("drops wide status when the comment editor reserves its body", () => {

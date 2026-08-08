@@ -146,7 +146,7 @@ The walkthrough keeps the default screen focused on the review task and frozen d
 DiffWalk / Review                                  Unit 3/12
 
 Authentication request validation
-2/12 reviewed    1 comment · 1 skipped    ██░░░░░░░░░░
+2/12 reviewed    1 comment · 1 skipped    [██          ]
 
 │ The handler now validates issuer and audience.
 
@@ -169,7 +169,7 @@ test/auth/handler.test.ts
 j/k line • ←/→ unit • c comment • n complete • e details • i inventory • s summary • ? help
 ```
 
-The header separates the current screen, unit title, and review totals. Wide terminals put review totals on their own left-aligned status row followed by a progress bar, and right-align the unit position. When the summary preview fits, a wide walkthrough separates the navigation row from the unit header, marks the change summary with a subtle rail, and indents review questions beneath their section heading. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked. Short wide terminals drop the navigation gap and summary preview together. Short terminals then remove status and progress rows before diff content, preserving the footer and at least one content row.
+The header separates the current screen, unit title, and review totals. Wide terminals put review totals on their own left-aligned status row followed by a bounded progress bar, and right-align the unit position. When the summary preview fits, a wide walkthrough separates the navigation row from the unit header, marks the change summary with a subtle rail, and indents review questions beneath their section heading. Medium terminals use one compact status row. Narrow terminals split progress from comment and skip counts instead of truncating them. Unsupported changes appear only when present. Snapshot status appears only while a check is active or submission is blocked. Short wide terminals drop the navigation gap and summary preview together. Short terminals then remove status and progress rows before diff content, preserving the footer and at least one content row.
 
 One unit can cover several files, so the implementation and the test that proves it are read together. A highlighted header identifies each region's file. When a region is taller than the screen, the file header of the region at the top of the viewport stays pinned above the diff while scrolling, so the current file name never disappears. The read-only inventory view pins its file title the same way. A viewport too short to pin a file title keeps that line available for diff content.
 

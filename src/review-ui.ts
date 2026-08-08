@@ -4055,10 +4055,11 @@ function renderProgressBar(
   theme: ReviewUiTheme,
 ): string {
   const segments = progressBarSegments(reviewed, total);
-  return `${theme.fg("accent", "█".repeat(segments.completed))}${theme.fg(
-    "borderMuted",
-    "░".repeat(segments.remaining),
-  )}`;
+  const border = (text: string): string => theme.fg("muted", text);
+  return `${border("[")}${theme.fg(
+    "accent",
+    "█".repeat(segments.completed),
+  )}${" ".repeat(segments.remaining)}${border("]")}`;
 }
 
 function renderSnapshotHeaderAlert(
