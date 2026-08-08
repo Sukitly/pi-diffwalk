@@ -59,7 +59,6 @@ import {
   countNoun,
   fitColumns,
   fitLine,
-  fitRight,
   MEDIUM_HEADER_WIDTH,
   type PrioritizedLineGroup,
   packStatusParts,
@@ -895,7 +894,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
     if (width >= WIDE_HEADER_WIDTH) {
       const progressBar = renderProgressBar(reviewed, unitCount, this.theme);
-      const status = `${progressBar}  ${this.theme.fg("muted", progress)}    ${this.theme.fg("muted", statusParts.join(" · "))}`;
+      const status = `${this.theme.fg("muted", progress)}    ${this.theme.fg("muted", statusParts.join(" · "))}    ${progressBar}`;
       groups.push(
         {
           lines: [fitColumns(brand, this.theme.fg("muted", position), width)],
@@ -903,7 +902,7 @@ export class GuidedReviewComponent implements Component, Focusable {
         },
         { lines: [fitLine(title, width)], priority: 80 },
         {
-          lines: [fitRight(status, width)],
+          lines: [fitLine(status, width)],
           priority: 50,
           minimumRows: 5,
         },

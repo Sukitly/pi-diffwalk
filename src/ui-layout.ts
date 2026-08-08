@@ -18,12 +18,6 @@ export function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width), "");
 }
 
-export function fitRight(line: string, width: number): string {
-  const available = Math.max(1, width);
-  const fitted = truncateToWidth(line, available, "");
-  return `${" ".repeat(Math.max(0, available - visibleWidth(fitted)))}${fitted}`;
-}
-
 export function fitColumns(left: string, right: string, width: number): string {
   const available = Math.max(1, width);
   const rightWidth = visibleWidth(right);

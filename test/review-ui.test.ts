@@ -499,7 +499,7 @@ test("shows complete responsive header information when height permits", () => {
   assert.equal(lines[1], "Request entry point\\nsecondary heading");
   assert.match(
     lines[2] ?? "",
-    /^\s+░{12} {2}0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported$/,
+    /^0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+░{12}$/,
   );
   assert.doesNotMatch(lines.slice(0, 3).join("\n"), /snapshot/);
 
