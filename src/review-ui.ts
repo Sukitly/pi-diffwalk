@@ -540,12 +540,25 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private renderWalkthrough(width: number, rows: number): readonly string[] {
-    const header = this.renderHeader(width, rows);
+    const baseHeader = this.renderHeader(width, rows);
     const footer = this.renderFooter(width, walkthroughFooterText(width));
-    const bodyHeight = Math.max(0, rows - header.length - footer.length);
+    const unitView = this.currentUnit();
+    const summary =
+      unitView === undefined
+        ? []
+        : renderWalkthroughSummary(unitView.unit, this.theme, width);
+    const layout = resolveWalkthroughPreviewLayout(
+      summary.length,
+      Math.max(0, rows - baseHeader.length - footer.length),
+      width >= WIDE_HEADER_WIDTH,
+    );
+    const header =
+      layout.headerGap && baseHeader.length > 0
+        ? [baseHeader[0] ?? "", "", ...baseHeader.slice(1)]
+        : baseHeader;
+    const bodyHeight = layout.bodyHeight;
     if (bodyHeight === 0) return [...header, ...footer];
 
-    const unitView = this.currentUnit();
     if (unitView === undefined) {
       const empty = wrapStyled(
         this.theme.fg(
@@ -557,12 +570,12 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...header, ...empty, ...footer];
     }
 
-    const summary = renderWalkthroughSummary(unitView.unit, this.theme, width);
-    const previewHeight = walkthroughPreviewHeight(summary.length, bodyHeight);
-    const preview = summary.slice(0, previewHeight);
+    const previewRows = summary.slice(0, layout.previewHeight);
+    const preview = previewRows.map((row) => row.text);
     if (preview.length > 0 && preview.length < summary.length) {
-      preview[preview.length - 1] = fitLine(
-        this.theme.fg("dim", "… press e for complete context and questions"),
+      preview[preview.length - 1] = renderWalkthroughTruncationHint(
+        previewRows.at(-1)?.truncationPrefix ?? "",
+        this.theme,
         width,
       );
     }
@@ -1810,23 +1823,32 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private walkthroughDiffViewportHeight(width: number, rows: number): number {
-    const bodyHeight = Math.max(
+    const availableBodyHeight = Math.max(
       0,
       rows - this.renderHeader(width, rows).length - 1,
     );
     const unit = this.currentUnit();
-    if (unit === undefined) return bodyHeight;
-    const summary = renderWalkthroughSummary(unit.unit, this.theme, width);
-    const previewHeight = walkthroughPreviewHeight(summary.length, bodyHeight);
+    const summary =
+      unit === undefined
+        ? []
+        : renderWalkthroughSummary(unit.unit, this.theme, width);
+    const layout = resolveWalkthroughPreviewLayout(
+      summary.length,
+      availableBodyHeight,
+      width >= WIDE_HEADER_WIDTH,
+    );
     const feedbackHeight = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     ).length;
-    const separatorHeight = previewHeight > 0 ? 1 : 0;
+    const separatorHeight = layout.previewHeight > 0 ? 1 : 0;
     return Math.max(
       0,
-      bodyHeight - previewHeight - separatorHeight - feedbackHeight,
+      layout.bodyHeight -
+        layout.previewHeight -
+        separatorHeight -
+        feedbackHeight,
     );
   }
 
@@ -2161,6 +2183,17 @@ function orderTargetsFromDisplayPlan(
   return ordered;
 }
 
+interface WalkthroughPreviewLayout {
+  readonly headerGap: boolean;
+  readonly bodyHeight: number;
+  readonly previewHeight: number;
+}
+
+interface WalkthroughSummaryRow {
+  readonly text: string;
+  readonly truncationPrefix: string;
+}
+
 function walkthroughPreviewHeight(
   summaryLength: number,
   bodyHeight: number,
@@ -2170,36 +2203,114 @@ function walkthroughPreviewHeight(
     : 0;
 }
 
+function resolveWalkthroughPreviewLayout(
+  summaryLength: number,
+  availableBodyHeight: number,
+  separateWideHeader: boolean,
+): WalkthroughPreviewLayout {
+  const headerGapRows = separateWideHeader ? 1 : 0;
+  const bodyHeight = Math.max(0, availableBodyHeight - headerGapRows);
+  const previewHeight = walkthroughPreviewHeight(summaryLength, bodyHeight);
+  if (previewHeight === 0) {
+    return {
+      headerGap: false,
+      bodyHeight: Math.max(0, availableBodyHeight),
+      previewHeight: 0,
+    };
+  }
+  return {
+    headerGap: separateWideHeader,
+    bodyHeight,
+    previewHeight,
+  };
+}
+
+const REVIEW_QUESTION_LEADING_INDENT = "  ";
+const REVIEW_QUESTION_GAP = "  ";
+
+function reviewQuestionPrefix(index: number): string {
+  return `${REVIEW_QUESTION_LEADING_INDENT}${String(index + 1).padStart(2, "0")}${REVIEW_QUESTION_GAP}`;
+}
+
+const REVIEW_QUESTION_TEXT_INDENT = " ".repeat(
+  visibleWidth(reviewQuestionPrefix(0)),
+);
+
+function renderReviewQuestionPrefix(
+  index: number,
+  theme: ReviewUiTheme,
+): string {
+  const prefix = reviewQuestionPrefix(index);
+  return `${REVIEW_QUESTION_LEADING_INDENT}${theme.fg(
+    "accent",
+    prefix.slice(REVIEW_QUESTION_LEADING_INDENT.length),
+  )}`;
+}
+
+function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
+  return theme.fg("text", theme.bold(label));
+}
+
+function renderWalkthroughTruncationHint(
+  prefix: string,
+  theme: ReviewUiTheme,
+  width: number,
+): string {
+  return fitLine(
+    `${prefix}${theme.fg("dim", "… press e for complete context and questions")}`,
+    width,
+  );
+}
+
 function renderWalkthroughSummary(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
   width: number,
-): string[] {
-  const lines = [
-    "",
-    ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
-    "",
-    theme.fg("muted", theme.bold("Review checks")),
+): WalkthroughSummaryRow[] {
+  const summaryRail = theme.fg("borderMuted", "│ ");
+  const summaryWidth = Math.max(1, width - visibleWidth(summaryRail));
+  const summary = wrapStyled(
+    theme.fg("text", safeText(unit.changeSummary)),
+    summaryWidth,
+  ).map((line) => ({
+    text: fitLine(`${summaryRail}${line}`, width),
+    truncationPrefix: summaryRail,
+  }));
+  const lines: WalkthroughSummaryRow[] = [
+    { text: "", truncationPrefix: "" },
+    ...summary,
+    { text: "", truncationPrefix: summaryRail },
+    {
+      text: renderSectionHeading("Review checks", theme),
+      truncationPrefix: "",
+    },
   ];
   for (const [index, focus] of unit.reviewFocus.slice(0, 2).entries()) {
     lines.push(
       ...wrapWithPrefix(
-        theme.fg("accent", `${String(index + 1).padStart(2, "0")}  `),
+        renderReviewQuestionPrefix(index, theme),
         theme.fg("text", safeText(focus)),
         width,
-      ),
+      ).map((text) => ({
+        text,
+        truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
+      })),
     );
   }
-  if (unit.reviewFocus.length > 2) {
-    lines.push(
-      theme.fg(
-        "dim",
-        `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`,
-      ),
-    );
-  } else {
-    lines.push(theme.fg("dim", "Press e for complete context."));
-  }
+  const hint =
+    unit.reviewFocus.length > 2
+      ? `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`
+      : "Press e for complete context.";
+  lines.push(
+    ...wrapWithPrefix(
+      REVIEW_QUESTION_TEXT_INDENT,
+      theme.fg("dim", hint),
+      width,
+    ).map((text) => ({
+      text,
+      truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
+    })),
+  );
   return lines;
 }
 
@@ -2326,7 +2437,7 @@ function renderExplanationLines(
   addSectionText(lines, "Why this comes next", unit.whyHere, theme, width);
   addSectionText(lines, "Context to keep in mind", unit.context, theme, width);
   addSectionText(lines, "Change", unit.changeSummary, theme, width);
-  lines.push("", theme.fg("muted", theme.bold("Review checks")));
+  lines.push("", renderSectionHeading("Review checks", theme));
   for (const focus of unit.reviewFocus) {
     lines.push(
       ...wrapStyled(
@@ -2346,7 +2457,7 @@ function addSectionText(
   width: number,
 ): void {
   if (lines.length > 0) lines.push("");
-  lines.push(theme.fg("muted", theme.bold(label)));
+  lines.push(renderSectionHeading(label, theme));
   lines.push(...wrapStyled(theme.fg("text", safeText(value)), width));
 }
 

@@ -125,6 +125,19 @@ const spanHeaderTheme = {
   inverse: (text: string) => `\u001b[7m${text}\u001b[27m`,
 } satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
 
+const hierarchyTheme = {
+  fg: (color: ThemeColor, text: string) => {
+    if (color === "text") return `\u001b[37m${text}\u001b[39m`;
+    if (color === "accent") return `\u001b[35m${text}\u001b[39m`;
+    if (color === "muted") return `\u001b[90m${text}\u001b[39m`;
+    if (color === "borderMuted") return `\u001b[36m${text}\u001b[39m`;
+    return text;
+  },
+  bg: (_color: Parameters<Theme["bg"]>[0], text: string) => text,
+  bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
+  inverse: (text: string) => `\u001b[7m${text}\u001b[27m`,
+} satisfies Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
+
 const inlineTheme = {
   ...plainTheme,
   inverse: (text: string) => `[[${text}]]`,
@@ -301,6 +314,23 @@ function makeLongExplanationFixture(): UiFixture {
     { length: 20 },
     (_, index) => `Explanation line ${index + 1}`,
   ).join("\n");
+  return {
+    ...fixture,
+    routeCandidate,
+    route: validateReviewRoute(fixture.snapshot, fixture.delta, routeCandidate),
+  };
+}
+
+function makeLongSummaryFixture(): UiFixture {
+  const fixture = makeUiFixture();
+  const routeCandidate = structuredClone(fixture.routeCandidate);
+  const firstUnit = routeCandidate.units[0];
+  assert.ok(firstUnit);
+  firstUnit.changeSummary = Array.from(
+    { length: 8 },
+    (_, index) =>
+      `The boundary change affects downstream behavior ${index + 1}.`,
+  ).join(" ");
   return {
     ...fixture,
     routeCandidate,
@@ -491,17 +521,83 @@ test("keeps the walkthrough summary concise and full commentary separate", () =>
   assert.doesNotMatch(explanation, /src\/entry 文\\nfile\.ts/);
 });
 
+test("separates and aligns the wide walkthrough hierarchy", () => {
+  const harness = createHarness(100, 30);
+  const lines = harness.component.render(100).map((line) => line.trimEnd());
+  const summaryIndex = lines.findIndex((line) =>
+    line.startsWith("│ The request path"),
+  );
+
+  assert.equal(lines[1], "");
+  assert.ok(summaryIndex > 0);
+  assert.equal(lines[summaryIndex - 1], "");
+  assert.equal(lines[summaryIndex + 1], "");
+  assert.equal(lines[summaryIndex + 2], "Review checks");
+  assert.match(
+    lines[summaryIndex + 3] ?? "",
+    /^ {2}01 {2}Does validation preserve compatibility\?/,
+  );
+  assert.match(lines[summaryIndex + 4] ?? "", /^ {6}… press e/);
+});
+
+test("shows the wide walkthrough gap only with its summary preview", () => {
+  const harness = createHarness(100, 16);
+
+  let lines = harness.component.render(100).map((line) => line.trimEnd());
+  assert.equal(lines[1], "Request entry point\\nsecondary heading");
+  assert.doesNotMatch(lines.join("\n"), /│ The request path|Review checks/);
+
+  harness.terminal.rows = 17;
+  lines = harness.component.render(100).map((line) => line.trimEnd());
+  assert.equal(lines[1], "");
+  assert.match(lines.join("\n"), /│ The request path/);
+  assert.match(lines.join("\n"), /Review checks/);
+});
+
+test("keeps walkthrough spacing out of the details header", () => {
+  const harness = createHarness(100, 30);
+
+  press(harness.component, "e");
+  const lines = harness.component.render(100).map((line) => line.trimEnd());
+  assert.match(lines[0] ?? "", /^DiffWalk \/ Details.*Unit 1\/2$/);
+  assert.equal(lines[1], "Request entry point\\nsecondary heading");
+});
+
+test("aligns truncation hints with the summary block they replace", () => {
+  const harness = createHarness(60, 30, makeLongSummaryFixture());
+  const lines = harness.component.render(60).map((line) => line.trimEnd());
+  const hint = lines.find((line) => line.includes("press e for complete"));
+
+  assert.match(hint ?? "", /^│ … press e/);
+});
+
+test("uses one section heading role in walkthrough and details", () => {
+  const harness = createHarness(100, 30, makeUiFixture(), {
+    theme: hierarchyTheme,
+  });
+  const heading = "\u001b[37m\u001b[1mReview checks\u001b[22m\u001b[39m";
+  const questionNumber = "  \u001b[35m01  \u001b[39m";
+
+  const walkthrough = renderText(harness);
+  assert.ok(walkthrough.includes(heading));
+  assert.ok(walkthrough.includes(questionNumber));
+
+  press(harness.component, "e");
+  assert.ok(renderText(harness).includes(heading));
+});
+
 test("shows complete responsive header information when height permits", () => {
   const harness = createHarness(120, 30);
 
   let lines = harness.component.render(120).map((line) => line.trimEnd());
+  const wideHeader = lines.slice(0, 4).join("\n");
   assert.match(lines[0] ?? "", /^DiffWalk \/ Review.*Unit 1\/2$/);
-  assert.equal(lines[1], "Request entry point\\nsecondary heading");
+  assert.match(wideHeader, /Request entry point\\nsecondary heading/);
   assert.match(
-    lines[2] ?? "",
-    /^0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+░{12}$/,
+    wideHeader,
+    /0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+░{12}/,
   );
-  assert.doesNotMatch(lines.slice(0, 3).join("\n"), /snapshot/);
+  assert.doesNotMatch(wideHeader, /snapshot/);
 
   harness.terminal.columns = 80;
   harness.terminal.rows = 24;
