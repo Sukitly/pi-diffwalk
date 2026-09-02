@@ -26,7 +26,7 @@ import {
 import { formatGuidedReviewResult } from "../../src/extension/results.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
-import { ReviewSnapshotDriftError } from "../../src/git/snapshot.ts";
+import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
 import { registerDiffWalk } from "../../src/index.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {

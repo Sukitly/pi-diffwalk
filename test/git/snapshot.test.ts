@@ -15,13 +15,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
+  GitSnapshotError,
+  ReviewSnapshotDriftError,
+} from "../../src/git/errors.ts";
+import type { GitCommandResult, GitRunner } from "../../src/git/runner.ts";
+import {
   assertReviewSnapshotUnchanged,
   captureRepositoryState,
   captureReviewSnapshot,
-  type GitCommandResult,
-  type GitRunner,
-  GitSnapshotError,
-  ReviewSnapshotDriftError,
 } from "../../src/git/snapshot.ts";
 import type {
   FileChange,

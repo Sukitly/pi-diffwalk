@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { ReviewSnapshotDriftError } from "../git/snapshot.ts";
+import { ReviewSnapshotDriftError } from "../git/errors.ts";
 import { attachReviewRoute } from "../review/in-progress.ts";
 import { detectExactMoves } from "../review/moves.ts";
 import {

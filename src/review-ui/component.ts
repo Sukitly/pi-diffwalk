@@ -6,7 +6,7 @@ import {
   matchesKey,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { ReviewSnapshotDriftError } from "../git/snapshot.ts";
+import { ReviewSnapshotDriftError } from "../git/errors.ts";
 import {
   listCommentTargets,
   type ReviewCommentAnchor,

@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ReviewSnapshotDriftError } from "../git/snapshot.ts";
+import { ReviewSnapshotDriftError } from "../git/errors.ts";
 import {
   buildSubmittedReviewMessageDetails,
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,

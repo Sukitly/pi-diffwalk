@@ -1,5 +1,5 @@
 import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { GitRunner } from "../git/snapshot.ts";
+import type { GitRunner } from "../git/runner.ts";
 
 /** Runs Git through pi so the extension never spawns a shell of its own. */
 export function createPiGitRunner(

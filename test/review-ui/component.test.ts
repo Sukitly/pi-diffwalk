@@ -15,7 +15,7 @@ import {
   TuiMainScreen,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import { ReviewSnapshotDriftError } from "../../src/git/snapshot.ts";
+import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {
   attachReviewRoute,
