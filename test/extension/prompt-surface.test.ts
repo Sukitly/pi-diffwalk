@@ -11,7 +11,7 @@ import {
 import {
   formatGuidedReviewResult,
   formatReviewThreadFollowUp,
-} from "../../src/index.ts";
+} from "../../src/extension/results.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import { detectExactMoves } from "../../src/review/moves.ts";
 import {

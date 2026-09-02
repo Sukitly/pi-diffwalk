@@ -8,24 +8,26 @@ import type {
   ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
-import { ReviewSnapshotDriftError } from "../../src/git/snapshot.ts";
+import {
+  parseDiffWalkCommand,
+  parseReviewTarget,
+} from "../../src/extension/command.ts";
+import { createPiGitRunner } from "../../src/extension/git-runner.ts";
 import {
   buildKickoffMessageDetails,
-  createPiGitRunner,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
   DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
-  type DiffWalkDependencies,
-  formatGuidedReviewResult,
   type KickoffMessageDetails,
-  parseDiffWalkCommand,
-  parseReviewTarget,
-  registerDiffWalk,
   renderKickoffMessage,
   renderSubmittedReviewMessage,
   type SubmittedReviewMessageDetails,
-} from "../../src/index.ts";
+} from "../../src/extension/messages.ts";
+import { formatGuidedReviewResult } from "../../src/extension/results.ts";
+import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
+import type { DiffWalkDependencies } from "../../src/extension/session.ts";
+import { ReviewSnapshotDriftError } from "../../src/git/snapshot.ts";
+import { registerDiffWalk } from "../../src/index.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {
   markReviewUnitReviewed,
