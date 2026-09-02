@@ -32,7 +32,7 @@ npm ci --ignore-scripts             # install exactly the locked dependencies
 npx biome check .                   # formatting and lint checks
 npm run check                       # full static check
 npm test                            # all tests
-node --test test/git-diff.test.ts   # one focused test file
+node --test test/git/snapshot.test.ts   # one focused test file
 npm run format                      # only when formatting is within the approved scope
 ```
 

@@ -8,41 +8,50 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
+  buildReviewKickoffPrompt,
+  GUIDED_REVIEW_TOOL_DESCRIPTION,
+  GUIDED_REVIEW_TOOL_NAME,
+  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
+} from "./extension/prompts.ts";
+import {
+  DIFFWALK_RULES_SOURCE,
+  type DiffWalkRulesLoadResult,
+  type DiffWalkRulesScope,
+  type LoadedDiffWalkRules,
+  loadGlobalDiffWalkRules,
+  loadProjectDiffWalkRules,
+} from "./extension/rules.ts";
+import {
   assertReviewSnapshotUnchanged,
   captureRepositoryState,
   captureReviewSnapshot,
   type GitRunner,
   ReviewSnapshotDriftError,
-} from "./git-diff.ts";
+} from "./git/snapshot.ts";
+import { computeReviewDelta } from "./review/delta.ts";
 import {
   attachReviewRoute,
   createInProgressReview,
   discardInProgressReview,
   submitInProgressReview,
-} from "./in-progress-review.ts";
-import {
-  buildReviewKickoffPrompt,
-  GUIDED_REVIEW_TOOL_DESCRIPTION,
-  GUIDED_REVIEW_TOOL_NAME,
-  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
-} from "./prompts.ts";
-import { computeReviewDelta } from "./review-delta.ts";
-import { detectExactMoves } from "./review-moves.ts";
+} from "./review/in-progress.ts";
+import { detectExactMoves } from "./review/moves.ts";
 import {
   DIFFWALK_SERIES_ENTRY_TYPE,
   parseReviewSeriesEntry,
   serializeReviewSeriesEntry,
-} from "./review-persistence.ts";
-import { createReviewSeries } from "./review-series.ts";
+} from "./review/persistence.ts";
+import {
+  assessRouteQuality,
+  ReviewRouteAdvisoryNudge,
+} from "./review/route-advisory.ts";
+import { validateReviewRoute } from "./review/route-validation.ts";
+import { createReviewSeries } from "./review/series.ts";
 import {
   DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
   parseReviewThreadBatchEntry,
   serializeReviewThreadBatchEntry,
-} from "./review-thread-persistence.ts";
-import {
-  openReviewThreads,
-  type ReviewThreadUiResult,
-} from "./review-thread-ui.ts";
+} from "./review/thread-persistence.ts";
 import {
   attachReviewThreadResponses,
   createReviewThreadBatch,
@@ -55,21 +64,7 @@ import {
   ReviewResponseCandidateSchema,
   resolvedCommentLines,
   reviewThreadConversation,
-} from "./review-threads.ts";
-import { openGuidedReview } from "./review-ui.ts";
-import {
-  assessRouteQuality,
-  ReviewRouteAdvisoryNudge,
-} from "./route-advisory.ts";
-import {
-  DIFFWALK_RULES_SOURCE,
-  type DiffWalkRulesLoadResult,
-  type DiffWalkRulesScope,
-  type LoadedDiffWalkRules,
-  loadGlobalDiffWalkRules,
-  loadProjectDiffWalkRules,
-} from "./route-rules.ts";
-import { validateReviewRoute } from "./route-validation.ts";
+} from "./review/threads.ts";
 import {
   type GuidedReviewResult,
   type InProgressReview,
@@ -83,7 +78,12 @@ import {
   type ReviewThreadBatchId,
   type ReviewThreadTurnId,
   type SubmittedGuidedReviewResult,
-} from "./types.ts";
+} from "./review/types.ts";
+import { openGuidedReview } from "./review-ui/component.ts";
+import {
+  openReviewThreads,
+  type ReviewThreadUiResult,
+} from "./thread-ui/component.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
 const DISCARD_OPTION = "--discard";
