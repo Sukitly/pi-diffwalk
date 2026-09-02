@@ -2179,8 +2179,6 @@ function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
 
 /** Marks a question that stands on its own: above the diff or in details. */
 const CHECK_MARKER = "? ";
-/** Marks the diff line that opens a question block. */
-const CHECK_LINE_MARKER = "?";
 
 function renderCheckRows(
   checks: readonly ReviewCheck[],
@@ -2864,7 +2862,6 @@ function renderUnitDiffLines(
       {
         selected: isSelected,
         hasComment: comment !== undefined,
-        hasCheck: checks.length > 0,
         external: planned.role === "external",
       },
       theme,
@@ -3137,15 +3134,13 @@ function renderInlineDiffPair(
 interface DiffLineMarks {
   readonly selected?: boolean;
   readonly hasComment?: boolean;
-  readonly hasCheck?: boolean;
   readonly external?: boolean;
 }
 
-/** The marker column shows one state: selection, then comment, then check. */
+/** The marker column shows one state: selection, then comment. */
 function diffLineMarker(marks: DiffLineMarks): string {
   if (marks.selected) return ">";
   if (marks.hasComment) return "●";
-  if (marks.hasCheck) return CHECK_LINE_MARKER;
   if (marks.external) return "·";
   return " ";
 }
@@ -3290,7 +3285,7 @@ function buildCommentTargetPreview(
       return [
         ...renderDiffLine(
           line,
-          { selected: true, hasComment, hasCheck: checks.length > 0 },
+          { selected: true, hasComment },
           theme,
           width,
           inlineTextByFileIndex.get(fileIndex),

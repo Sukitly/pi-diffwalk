@@ -528,10 +528,7 @@ test("shows checks at their anchors and keeps the narrative in details", () => {
 
   const addedIndex = lines.findIndex((line) => line.includes("TAIL_END"));
   assert.ok(addedIndex > 0);
-  assert.match(
-    lines[addedIndex - 1] ?? "",
-    /^\? {11}5 \+const value = validate/,
-  );
+  assert.match(lines[addedIndex - 1] ?? "", /^ {12}5 \+const value = validate/);
   assert.equal(
     lines[addedIndex + 1],
     `${" ".repeat(14)}Does validation preserve compatibility?`,
