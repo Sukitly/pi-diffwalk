@@ -1654,6 +1654,60 @@ test("preserves interleaved route blocks and navigation across files", () => {
   assert.match(output, />\s+4\s+\+return/);
 });
 
+test("collapses a long mixed gap into one omission row with counts", () => {
+  const path = "src/long-gap.ts";
+  const lines = [" head", "+first edit"];
+  for (let index = 0; index < 6; index += 1) {
+    lines.push(` filler ${index}`, `+carried ${index}`);
+  }
+  lines.push(" tail context", "+second edit", " tail");
+  const snapshot = makeSnapshot("snapshot-long-gap", [{ path, lines }]);
+  const baseDelta = computeReviewDelta(snapshot);
+  const changeId = fileChangeId("modified", path);
+  const delta: ReviewDelta = {
+    ...baseDelta,
+    lines: baseDelta.lines.map((line) =>
+      line.fileChangeId === changeId && line.line > 2 && line.line < 15
+        ? {
+            type: "carried-forward",
+            fileChangeId: line.fileChangeId,
+            side: line.side,
+            line: line.line,
+            reviewedInRoundId: brand<ReviewRoundId>("round:previous"),
+          }
+        : line,
+    ),
+  };
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Both edits",
+        whyHere: "They belong together.",
+        context: "first -> second",
+        changeSummary: "Edits both ends.",
+        reviewFocus: [{ question: "Do the ends agree?" }],
+        spans: [span(path, { new: [2, 2] }), span(path, { new: [16, 16] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const fixture: UiFixture = {
+    snapshot,
+    delta,
+    routeCandidate,
+    route: validateReviewRoute(snapshot, delta, routeCandidate),
+  };
+  const output = renderText(createHarness(100, 40, fixture));
+
+  assert.equal(output.match(/not shown/g)?.length, 1);
+  assert.match(
+    output,
+    /\+first edit[\s\S]*⋯ 11 frozen diff lines not shown; 6 reviewed in an earlier round[\s\S]*\+second edit/,
+  );
+  assert.doesNotMatch(output, /carried 2|carried 3|filler 3/);
+});
+
 test("separates distant spans with one omission marker and keeps the file title pinned", () => {
   const harness = createHarness(80, 30, makeSplitSameFileFixture(30));
   const top = renderText(harness);

@@ -149,6 +149,13 @@ type ChangedLineDisplayOwnership =
 
 type DisplayOmissionReason =
   | { readonly type: "distant" }
+  | {
+      readonly type: "gap";
+      readonly carriedForward: number;
+      readonly skipped: number;
+      readonly otherUnit: number;
+      readonly shownLater: number;
+    }
   | { readonly type: "route-jump" }
   | { readonly type: "carried-forward" }
   | { readonly type: "skipped"; readonly reason: string }
@@ -2536,16 +2543,25 @@ function appendGapItems(
   renderedIndexes: Set<number>,
 ): void {
   const showContext = end - start + 1 <= INLINE_SPAN_MERGE_GAP;
+  if (!showContext) {
+    appendCollapsedGap(
+      items,
+      fileLines,
+      start,
+      end,
+      unit,
+      fileChangeId,
+      ownership,
+      renderedIndexes,
+    );
+    return;
+  }
   for (let index = start; index <= end; index += 1) {
     if (renderedIndexes.has(index)) continue;
     const line = fileLines[index];
     if (line === undefined) continue;
     if (line.type === "context") {
-      if (showContext) {
-        items.push({ type: "line", line, role: "context" });
-      } else {
-        appendDisplayOmission(items, 1, { type: "distant" });
-      }
+      items.push({ type: "line", line, role: "context" });
       renderedIndexes.add(index);
       continue;
     }
@@ -2566,6 +2582,67 @@ function appendGapItems(
       renderedIndexes.add(index);
     }
   }
+}
+
+/**
+ * A gap too long to show inline becomes one omission row. Nothing in it is
+ * displayed, so alternating runs of context and earlier-round lines would
+ * only add rows; the row instead counts what the gap holds by category.
+ */
+function appendCollapsedGap(
+  items: PlannedDiffItem[],
+  fileLines: readonly DiffLine[],
+  start: number,
+  end: number,
+  unit: ReviewUnit,
+  fileChangeId: FileChange["id"],
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+  renderedIndexes: Set<number>,
+): void {
+  let total = 0;
+  let carriedForward = 0;
+  let skipped = 0;
+  let otherUnit = 0;
+  let shownLater = 0;
+  for (let index = start; index <= end; index += 1) {
+    if (renderedIndexes.has(index)) continue;
+    const line = fileLines[index];
+    if (line === undefined) continue;
+    total += 1;
+    if (line.type === "context") {
+      renderedIndexes.add(index);
+      continue;
+    }
+    const lineOwnership = requireDisplayOwnership(
+      ownership,
+      fileChangeId,
+      line,
+    );
+    switch (lineOwnership.type) {
+      case "carried-forward":
+        carriedForward += 1;
+        renderedIndexes.add(index);
+        break;
+      case "skipped":
+        skipped += 1;
+        renderedIndexes.add(index);
+        break;
+      case "unit":
+        if (lineOwnership.reviewUnitId === unit.id) {
+          shownLater += 1;
+        } else {
+          otherUnit += 1;
+          renderedIndexes.add(index);
+        }
+        break;
+    }
+  }
+  if (total === 0) return;
+  items.push({
+    type: "omission",
+    count: total,
+    reason: { type: "gap", carriedForward, skipped, otherUnit, shownLater },
+  });
 }
 
 function appendSpanLine(
@@ -2957,6 +3034,21 @@ function omissionDetail(omission: PlannedDiffOmission): string {
   switch (omission.reason.type) {
     case "distant":
       return `${lines} not shown`;
+    case "gap": {
+      const { carriedForward, skipped, otherUnit, shownLater } =
+        omission.reason;
+      const parts = [
+        carriedForward > 0
+          ? `${carriedForward} reviewed in an earlier round`
+          : undefined,
+        skipped > 0 ? `${skipped} skipped` : undefined,
+        otherUnit > 0 ? `${otherUnit} routed to other units` : undefined,
+        shownLater > 0 ? `${shownLater} shown later in this unit` : undefined,
+      ].filter((part) => part !== undefined);
+      return parts.length === 0
+        ? `${lines} not shown`
+        : `${lines} not shown; ${parts.join(", ")}`;
+    }
     case "route-jump":
       return "routed region continues elsewhere in this file";
     case "carried-forward":
