@@ -1218,6 +1218,9 @@ export class GuidedReviewComponent implements Component, Focusable {
       matchesKey(data, "l") ||
       matchesKey(data, Key.tab)
     ) {
+      // The mode selector is rendered only once every unit is reviewed;
+      // toggling before that would change state the reviewer cannot see.
+      if (this.pendingUnits().length > 0) return;
       this.updateReview(
         setInProgressReviewSubmissionMode(
           this.review,

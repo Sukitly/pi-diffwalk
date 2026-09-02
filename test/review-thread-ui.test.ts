@@ -433,10 +433,7 @@ test("uses the embedded Editor for multiline Chinese follow-up drafts", () => {
 
   press(component, "c");
   assert.match(component.render(100).join("\n"), /Reviewer follow-up/);
-  assert.match(
-    component.render(100).join("\n"),
-    /Frozen snapshot snapshot-thread-ui/,
-  );
+  assert.doesNotMatch(component.render(100).join("\n"), /snapshot-thread-ui/);
   assert.ok(component.render(100).join("\n").includes(CURSOR_MARKER));
   press(component, "请", "解", "释", "\n", "失", "败", "路", "径", "\r");
 
@@ -445,6 +442,48 @@ test("uses the embedded Editor for multiline Chinese follow-up drafts", () => {
     component.render(100).join("\n"),
     /Draft follow-up[\s\S]*请解释[\s\S]*失败路径/,
   );
+});
+
+test("shows the anchored line and the conversation above the reply editor", () => {
+  const { answered } = fixture();
+  const { component } = createComponent(answered, 24);
+
+  press(component, "j", "c");
+  const lines = component.render(100).map((line) => line.trimEnd());
+  const output = lines.join("\n");
+
+  assert.match(output, /^src\/thread\.ts$/m);
+  assert.match(output, /^ {11}16 \+second changed$/m);
+  assert.match(output, /C2 · ○ Open · Turn 1/);
+  assert.match(output, /You[\s\S]*What guarantees the second line\?/);
+  assert.match(output, /Agent[\s\S]*contract test guarantees the second/);
+  assert.doesNotMatch(output, /first changed|Why is the first line needed/);
+  const editorIndex = lines.indexOf("─".repeat(100));
+  const responseIndex = lines.findIndex((line) =>
+    line.includes("contract test guarantees"),
+  );
+  assert.ok(responseIndex > 0 && editorIndex > responseIndex);
+  assert.ok(output.includes(CURSOR_MARKER));
+});
+
+test("keeps the latest turn when the reply editor cannot show them all", () => {
+  const { answered } = fixture();
+  const twoTurns = attachAnsweredFollowUp(answered, [
+    {
+      threadId: "C1" as ReviewCommentId,
+      reviewerBody: "Which input?",
+      agentBody: "The raw request body before parsing.",
+    },
+  ]);
+  const { component } = createComponent(twoTurns, 16);
+
+  press(component, "c");
+  const output = component.render(100).join("\n");
+
+  assert.match(output, /… 1 earlier turn/);
+  assert.doesNotMatch(output, /Turn 1/);
+  assert.match(output, /Turn 2[\s\S]*Which input\?[\s\S]*raw request body/);
+  assert.ok(output.includes(CURSOR_MARKER));
 });
 
 test("submits saved drafts as a new pending turn with a selectable mode", () => {
