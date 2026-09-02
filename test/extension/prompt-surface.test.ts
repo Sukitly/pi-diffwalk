@@ -54,7 +54,7 @@ import { makeRound, makeSnapshot, span } from "../support/domain-fixtures.ts";
  *
  * Regenerate the golden file with:
  *
- *   DIFFWALK_UPDATE_GOLDEN=1 node --test test/prompt-surface.test.ts
+ *   DIFFWALK_UPDATE_GOLDEN=1 node --test test/extension/prompt-surface.test.ts
  */
 
 const GOLDEN_PATH = path.join(import.meta.dirname, "prompt-surface.golden.txt");
@@ -307,6 +307,6 @@ test("pins the complete standing model-visible surface to the golden file", () =
   assert.equal(
     surface,
     golden,
-    "The model-visible prompt surface changed. Review the diff, then regenerate with DIFFWALK_UPDATE_GOLDEN=1 node --test test/prompt-surface.test.ts",
+    "The model-visible prompt surface changed. Review the diff, then regenerate with DIFFWALK_UPDATE_GOLDEN=1 node --test test/extension/prompt-surface.test.ts",
   );
 });
