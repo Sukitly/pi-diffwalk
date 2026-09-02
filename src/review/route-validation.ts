@@ -24,6 +24,7 @@ import type {
   ReviewRouteCandidate,
   ReviewRouteSkip,
   ReviewSnapshot,
+  ReviewSpanCandidate,
   ReviewUnit,
   ReviewUnitId,
 } from "./types.ts";
@@ -357,4 +358,46 @@ function createReviewUnitId(
     }),
   );
   return `review-unit:${hash.digest("hex")}` as ReviewUnitId;
+}
+
+/** Rebuilds the model-facing candidate shape from a validated route. */
+export function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
+  return {
+    snapshotId: route.snapshotId,
+    units: route.units.map((unit) => ({
+      title: unit.title,
+      whyHere: unit.whyHere,
+      context: unit.context,
+      changeSummary: unit.changeSummary,
+      reviewFocus: unit.reviewFocus.map((check) => ({
+        question: check.question,
+        ...(check.anchor === undefined
+          ? {}
+          : {
+              anchor: {
+                path: check.anchor.path,
+                side: check.anchor.side,
+                line: check.anchor.line,
+              },
+            }),
+      })),
+      spans: unit.spans.map((span) => spanCandidate(span)),
+    })),
+    skippedSpans: route.skippedSpans.map((skip) => ({
+      span: spanCandidate(skip.span),
+      reason: skip.reason,
+    })),
+  };
+}
+
+function spanCandidate(span: ResolvedSpan): ReviewSpanCandidate {
+  return {
+    path: span.path,
+    ...(span.oldStart === undefined
+      ? {}
+      : { oldStart: span.oldStart, oldEnd: span.oldEnd }),
+    ...(span.newStart === undefined
+      ? {}
+      : { newStart: span.newStart, newEnd: span.newEnd }),
+  } as ReviewSpanCandidate;
 }

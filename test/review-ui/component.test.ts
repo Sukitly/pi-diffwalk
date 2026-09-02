@@ -42,11 +42,9 @@ import type {
   ReviewUnitId,
   SubmittedGuidedReviewResult,
 } from "../../src/review/types.ts";
-import {
-  GuidedReviewComponent,
-  GuidedReviewUiUnavailableError,
-  openGuidedReview,
-} from "../../src/review-ui/component.ts";
+import { GuidedReviewComponent } from "../../src/review-ui/component.ts";
+import { GuidedReviewUiUnavailableError } from "../../src/review-ui/errors.ts";
+import { openGuidedReview } from "../../src/review-ui/index.ts";
 import {
   fileChangeId,
   makeSnapshot,

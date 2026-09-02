@@ -79,7 +79,7 @@ import {
   type ReviewThreadTurnId,
   type SubmittedGuidedReviewResult,
 } from "./review/types.ts";
-import { openGuidedReview } from "./review-ui/component.ts";
+import { openGuidedReview } from "./review-ui/index.ts";
 import {
   openReviewThreads,
   type ReviewThreadUiResult,
