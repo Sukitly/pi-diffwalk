@@ -2321,6 +2321,54 @@ test("ignores mode keys while the summary hides the mode selector", () => {
   assert.deepEqual(harness.submittedModes, []);
 });
 
+test("groups skipped regions by reason and file in the summary", () => {
+  const snapshot = makeSnapshot("snapshot-skips", [
+    { path: "src/a.ts", lines: [" head", "+one", " mid", "+two", " tail"] },
+    { path: "src/b.ts", lines: [" head", "-gone", "+three", " tail"] },
+    { path: "src/c.ts", lines: [" head", "+four", " tail"] },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Kept",
+        whyHere: "Only reviewed region.",
+        context: "c",
+        changeSummary: "Adds four.",
+        reviewFocus: [{ question: "Is four right?" }],
+        spans: [span("src/c.ts", { new: [2, 2] })],
+      },
+    ],
+    skippedSpans: [
+      { span: span("src/a.ts", { new: [2, 2] }), reason: "Generated." },
+      { span: span("src/a.ts", { new: [4, 4] }), reason: "Generated." },
+      { span: span("src/b.ts", { old: [2, 2] }), reason: "Generated." },
+      { span: span("src/b.ts", { new: [2, 2] }), reason: "Vendored copy." },
+    ],
+  };
+  const fixture: UiFixture = {
+    snapshot,
+    delta,
+    routeCandidate,
+    route: validateReviewRoute(snapshot, delta, routeCandidate),
+  };
+  const harness = createHarness(100, 40, fixture);
+  press(harness.component, "n");
+  const lines = harness.component.render(100).map((line) => line.trimEnd());
+  const start = lines.indexOf("Explicitly skipped regions");
+
+  assert.ok(start > 0);
+  assert.deepEqual(lines.slice(start + 1, start + 6), [
+    "Generated.",
+    "  src/a.ts 2, 4",
+    "  src/b.ts old 2",
+    "Vendored copy.",
+    "  src/b.ts 2",
+  ]);
+  assert.doesNotMatch(lines.join("\n"), /"src\/a\.ts"|new 2-2/);
+});
+
 test("shows the complete batch and selected submission mode", async () => {
   const harness = createHarness(100, 40);
   press(harness.component, "c", "C", "h", "e", "c", "k", "\r", "n", "n");

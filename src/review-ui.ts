@@ -50,6 +50,7 @@ import type {
   ReviewDelta,
   ReviewRoute,
   ReviewRouteCandidate,
+  ReviewRouteSkip,
   ReviewSnapshot,
   ReviewSpanCandidate,
   ReviewSubmissionMode,
@@ -3011,15 +3012,52 @@ function diffLineKey(
   return undefined;
 }
 
-function describeSpanRange(span: ResolvedSpan): string {
-  const parts: string[] = [];
-  if (span.oldStart !== undefined && span.oldEnd !== undefined) {
-    parts.push(`old ${span.oldStart}-${span.oldEnd}`);
+/**
+ * Skipped regions grouped by reason, then by file, so a reason that covers
+ * many regions reads once with a compact list instead of once per region.
+ */
+function renderSkippedRegionGroups(
+  skips: readonly ReviewRouteSkip[],
+  theme: ReviewUiTheme,
+  width: number,
+): string[] {
+  const byReason = new Map<string, Map<string, string[]>>();
+  for (const skip of skips) {
+    const files = byReason.get(skip.reason) ?? new Map<string, string[]>();
+    const ranges = files.get(skip.span.path) ?? [];
+    ranges.push(describeSkippedRange(skip.span));
+    files.set(skip.span.path, ranges);
+    byReason.set(skip.reason, files);
   }
+  const lines: string[] = [];
+  for (const [reason, files] of byReason) {
+    lines.push(...wrapStyled(theme.fg("text", safeText(reason)), width));
+    for (const [path, ranges] of files) {
+      lines.push(
+        ...wrapWithPrefix(
+          "  ",
+          `${theme.fg("muted", safeText(path))} ${theme.fg("dim", ranges.join(", "))}`,
+          width,
+        ),
+      );
+    }
+  }
+  return lines;
+}
+
+/** New-side range when the region has one; removed-only regions say so. */
+function describeSkippedRange(span: ResolvedSpan): string {
   if (span.newStart !== undefined && span.newEnd !== undefined) {
-    parts.push(`new ${span.newStart}-${span.newEnd}`);
+    return span.newStart === span.newEnd
+      ? String(span.newStart)
+      : `${span.newStart}-${span.newEnd}`;
   }
-  return parts.join("  ");
+  if (span.oldStart !== undefined && span.oldEnd !== undefined) {
+    return span.oldStart === span.oldEnd
+      ? `old ${span.oldStart}`
+      : `old ${span.oldStart}-${span.oldEnd}`;
+  }
+  return "";
 }
 
 function renderReadOnlyFile(
@@ -3735,17 +3773,7 @@ function renderSummaryLines(
   if (route.skippedSpans.length === 0) {
     lines.push(theme.fg("dim", "None."));
   } else {
-    for (const skip of route.skippedSpans) {
-      lines.push(
-        ...wrapStyled(
-          theme.fg(
-            "warning",
-            `${safeText(displayPath(skip.span.path))} ${safeText(describeSpanRange(skip.span))}: ${safeText(skip.reason)}`,
-          ),
-          width,
-        ),
-      );
-    }
+    lines.push(...renderSkippedRegionGroups(route.skippedSpans, theme, width));
   }
 
   const nonTextChanges = inventory.filter((entry) => entry.type !== "file");
