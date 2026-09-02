@@ -33,30 +33,26 @@ A Git revision cannot start with `-`, so an option never shadows a base. When th
 1. DiffWalk freezes a snapshot of the current Git changes. Every changed line receives a stable address: a file, a side, and a line number.
 2. The agent reads the change with its own tools and plans a review route: semantic units ordered by behavior, contracts, and data flow instead of file order. A unit may span several files, so an implementation and the test that proves it are read together.
 3. DiffWalk validates the route. Every changed line must be covered by exactly one review unit or explicitly skipped with a visible reason.
-4. The TUI walks you through the route one unit at a time. Each unit explains why it comes next, the contract or invariant to keep in mind, what changed, and what to check. You attach comments to exact diff lines.
+4. The TUI walks you through the route one unit at a time. The agent's review questions appear beneath the diff lines they are about; a question about the unit as a whole appears above the diff. The narrative (why the unit comes next, the contract to keep in mind, what changed) stays on the details page. You attach comments to exact diff lines, so answering a question is a comment on its line.
 5. Submission returns all comments to the agent as one batch, in one of two modes: **Discuss first** (the agent investigates without editing code) or **Apply change requests**.
 6. The agent answers every comment with a structured response. A follow-up view shows each conversation under its diff anchor. You can reply to continue a thread and resolve it when satisfied. Only the reviewer can resolve a thread.
 7. Running `/diffwalk` again against the same base carries forward already-reviewed lines and resolved comments, and routes only what still needs review. Completed rounds and comment threads persist in the pi session across restarts.
 
 ```text
 DiffWalk / Review                                  Unit 3/12
-
 Authentication request validation
 2/12 reviewed    1 comment · 1 skipped    [██        ]
 
-│ The handler now validates issuer and audience.
-
-Review checks
-  01  Is the trusted issuer read from configuration?
-  02  Do existing tokens remain compatible?
-      Press e for complete context.
+  ? Do existing sessions stay valid after this change?
 
 src/auth/handler.ts
      46    46   const request = await parse(raw)
      47    47   const token = request.headers.authorization
      48        - if (!token) return unauthorized()
+              ? Is the missing-token path still handled somewhere?
 >          48 + const claims = await validateToken(token)
            49 + if (claims.issuer !== config.issuer) return unauthorized()
+              ? Is the trusted issuer read from configuration rather than the token?
      49    50   return createSession(claims)
 
 test/auth/handler.test.ts
@@ -81,7 +77,7 @@ Walkthrough:
 | `l`, `Right` | Move to the next review unit |
 | `c` | Add or edit a comment on the selected line |
 | `d` | Delete the comment on the selected line |
-| `e` | Open the complete unit details |
+| `e` | Open the unit details: why it comes next, the context to keep in mind, the change summary, and every review question with its anchor |
 | `i` | Open the frozen snapshot inventory |
 | `s` | Open the comment summary and submission page |
 | `?` | Open or close the keyboard reference on read-only screens |

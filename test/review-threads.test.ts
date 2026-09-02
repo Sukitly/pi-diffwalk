@@ -38,7 +38,7 @@ function makeBatch() {
         whyHere: "Both comments belong to this behavior.",
         context: "first -> second",
         changeSummary: "Adds two values.",
-        reviewFocus: ["Are both values correct?"],
+        reviewFocus: [{ question: "Are both values correct?" }],
         spans: [span("src/a.ts", { new: [1, 5] })],
       },
     ],

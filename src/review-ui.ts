@@ -45,6 +45,7 @@ import type {
   GuidedReviewResult,
   InProgressReview,
   ResolvedSpan,
+  ReviewCheck,
   ReviewComment,
   ReviewDelta,
   ReviewRoute,
@@ -291,7 +292,18 @@ export function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
       whyHere: unit.whyHere,
       context: unit.context,
       changeSummary: unit.changeSummary,
-      reviewFocus: [...unit.reviewFocus],
+      reviewFocus: unit.reviewFocus.map((check) => ({
+        question: check.question,
+        ...(check.anchor === undefined
+          ? {}
+          : {
+              anchor: {
+                path: check.anchor.path,
+                side: check.anchor.side,
+                line: check.anchor.line,
+              },
+            }),
+      })),
       spans: unit.spans.map((span) => spanCandidate(span)),
     })),
     skippedSpans: route.skippedSpans.map((skip) => ({
@@ -543,20 +555,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     const baseHeader = this.renderHeader(width, rows);
     const footer = this.renderFooter(width, walkthroughFooterText(width));
     const unitView = this.currentUnit();
-    const summary =
-      unitView === undefined
-        ? []
-        : renderWalkthroughSummary(unitView.unit, this.theme, width);
-    const layout = resolveWalkthroughPreviewLayout(
-      summary.length,
-      Math.max(0, rows - baseHeader.length - footer.length),
-      width >= WIDE_HEADER_WIDTH,
-    );
-    const header =
-      layout.headerGap && baseHeader.length > 0
-        ? [baseHeader[0] ?? "", "", ...baseHeader.slice(1)]
-        : baseHeader;
-    const bodyHeight = layout.bodyHeight;
+    const header = baseHeader;
+    const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
 
     if (unitView === undefined) {
@@ -570,25 +570,20 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...header, ...empty, ...footer];
     }
 
-    const previewRows = summary.slice(0, layout.previewHeight);
-    const preview = previewRows.map((row) => row.text);
-    if (preview.length > 0 && preview.length < summary.length) {
-      preview[preview.length - 1] = renderWalkthroughTruncationHint(
-        previewRows.at(-1)?.truncationPrefix ?? "",
-        this.theme,
-        width,
-      );
-    }
-
+    const preview = renderWalkthroughPreview(
+      unitView.unit,
+      bodyHeight,
+      this.theme,
+      width,
+    );
     const feedback = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     );
-    const separator = preview.length > 0 ? [""] : [];
     const diffHeight = Math.max(
       0,
-      bodyHeight - preview.length - separator.length - feedback.length,
+      bodyHeight - preview.length - feedback.length,
     );
     const renderedDiff = renderUnitDiff(
       unitView,
@@ -622,7 +617,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     return [
       ...header,
       ...preview,
-      ...separator,
       ...feedback,
       ...pinnedHeader,
       ...diffRows,
@@ -1831,28 +1825,21 @@ export class GuidedReviewComponent implements Component, Focusable {
       rows - this.renderHeader(width, rows).length - 1,
     );
     const unit = this.currentUnit();
-    const summary =
+    const previewHeight =
       unit === undefined
-        ? []
-        : renderWalkthroughSummary(unit.unit, this.theme, width);
-    const layout = resolveWalkthroughPreviewLayout(
-      summary.length,
-      availableBodyHeight,
-      width >= WIDE_HEADER_WIDTH,
-    );
+        ? 0
+        : renderWalkthroughPreview(
+            unit.unit,
+            availableBodyHeight,
+            this.theme,
+            width,
+          ).length;
     const feedbackHeight = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     ).length;
-    const separatorHeight = layout.previewHeight > 0 ? 1 : 0;
-    return Math.max(
-      0,
-      layout.bodyHeight -
-        layout.previewHeight -
-        separatorHeight -
-        feedbackHeight,
-    );
+    return Math.max(0, availableBodyHeight - previewHeight - feedbackHeight);
   }
 
   private toggleHelp(): void {
@@ -2186,135 +2173,57 @@ function orderTargetsFromDisplayPlan(
   return ordered;
 }
 
-interface WalkthroughPreviewLayout {
-  readonly headerGap: boolean;
-  readonly bodyHeight: number;
-  readonly previewHeight: number;
-}
-
-interface WalkthroughSummaryRow {
-  readonly text: string;
-  readonly truncationPrefix: string;
-}
-
-function walkthroughPreviewHeight(
-  summaryLength: number,
-  bodyHeight: number,
-): number {
-  return bodyHeight >= 12
-    ? Math.min(summaryLength, 8, Math.max(6, Math.floor(bodyHeight * 0.25)))
-    : 0;
-}
-
-function resolveWalkthroughPreviewLayout(
-  summaryLength: number,
-  availableBodyHeight: number,
-  separateWideHeader: boolean,
-): WalkthroughPreviewLayout {
-  const headerGapRows = separateWideHeader ? 1 : 0;
-  const bodyHeight = Math.max(0, availableBodyHeight - headerGapRows);
-  const previewHeight = walkthroughPreviewHeight(summaryLength, bodyHeight);
-  if (previewHeight === 0) {
-    return {
-      headerGap: false,
-      bodyHeight: Math.max(0, availableBodyHeight),
-      previewHeight: 0,
-    };
-  }
-  return {
-    headerGap: separateWideHeader,
-    bodyHeight,
-    previewHeight,
-  };
-}
-
-const REVIEW_QUESTION_LEADING_INDENT = "  ";
-const REVIEW_QUESTION_GAP = "  ";
-
-function reviewQuestionPrefix(index: number): string {
-  return `${REVIEW_QUESTION_LEADING_INDENT}${String(index + 1).padStart(2, "0")}${REVIEW_QUESTION_GAP}`;
-}
-
-const REVIEW_QUESTION_TEXT_INDENT = " ".repeat(
-  visibleWidth(reviewQuestionPrefix(0)),
-);
-
-function renderReviewQuestionPrefix(
-  index: number,
-  theme: ReviewUiTheme,
-): string {
-  const prefix = reviewQuestionPrefix(index);
-  return `${REVIEW_QUESTION_LEADING_INDENT}${theme.fg(
-    "accent",
-    prefix.slice(REVIEW_QUESTION_LEADING_INDENT.length),
-  )}`;
-}
-
 function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
   return theme.fg("text", theme.bold(label));
 }
 
-function renderWalkthroughTruncationHint(
-  prefix: string,
+const CHECK_MARKER = "? ";
+
+function renderCheckRows(
+  checks: readonly ReviewCheck[],
+  indent: string,
+  contentWidth: number,
   theme: ReviewUiTheme,
   width: number,
-): string {
-  return fitLine(
-    `${prefix}${theme.fg("dim", "… press e for complete context and questions")}`,
-    width,
+): string[] {
+  return checks.flatMap((check) =>
+    wrapWithPrefix(
+      theme.fg("accent", CHECK_MARKER),
+      theme.fg("text", safeText(check.question)),
+      contentWidth,
+    ).map((line) => fitLine(`${indent}${line}`, width)),
   );
 }
 
-function renderWalkthroughSummary(
+const MINIMUM_BODY_ROWS_WITH_SEPARATOR = 6;
+const MINIMUM_DIFF_ROWS_BESIDE_UNIT_CHECKS = 8;
+
+/**
+ * The rows between the header and the diff. Anchored checks render beneath
+ * their lines inside the diff, so this block holds only the checks that
+ * concern the unit as a whole, plus one blank row separating the header from
+ * whatever follows. Short bodies keep the rows for the diff; the details page
+ * always lists every check.
+ */
+function renderWalkthroughPreview(
   unit: ReviewUnit,
+  bodyHeight: number,
   theme: ReviewUiTheme,
   width: number,
-): WalkthroughSummaryRow[] {
-  const summaryRail = theme.fg("borderMuted", "│ ");
-  const summaryWidth = Math.max(1, width - visibleWidth(summaryRail));
-  const summary = wrapStyled(
-    theme.fg("text", safeText(unit.changeSummary)),
-    summaryWidth,
-  ).map((line) => ({
-    text: fitLine(`${summaryRail}${line}`, width),
-    truncationPrefix: summaryRail,
-  }));
-  const lines: WalkthroughSummaryRow[] = [
-    { text: "", truncationPrefix: "" },
-    ...summary,
-    { text: "", truncationPrefix: summaryRail },
-    {
-      text: renderSectionHeading("Review checks", theme),
-      truncationPrefix: "",
-    },
-  ];
-  for (const [index, focus] of unit.reviewFocus.slice(0, 2).entries()) {
-    lines.push(
-      ...wrapWithPrefix(
-        renderReviewQuestionPrefix(index, theme),
-        theme.fg("text", safeText(focus)),
-        width,
-      ).map((text) => ({
-        text,
-        truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
-      })),
-    );
-  }
-  const hint =
-    unit.reviewFocus.length > 2
-      ? `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`
-      : "Press e for complete context.";
-  lines.push(
-    ...wrapWithPrefix(
-      REVIEW_QUESTION_TEXT_INDENT,
-      theme.fg("dim", hint),
-      width,
-    ).map((text) => ({
-      text,
-      truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
-    })),
+): readonly string[] {
+  if (bodyHeight < MINIMUM_BODY_ROWS_WITH_SEPARATOR) return [];
+  const unitChecks = unit.reviewFocus.filter(
+    (check) => check.anchor === undefined,
   );
-  return lines;
+  if (unitChecks.length === 0) return [""];
+  const rows = [
+    "",
+    ...renderCheckRows(unitChecks, "  ", Math.max(1, width - 2), theme, width),
+    "",
+  ];
+  return bodyHeight - rows.length >= MINIMUM_DIFF_ROWS_BESIDE_UNIT_CHECKS
+    ? rows
+    : [""];
 }
 
 interface HelpEntry {
@@ -2441,10 +2350,18 @@ function renderExplanationLines(
   addSectionText(lines, "Context to keep in mind", unit.context, theme, width);
   addSectionText(lines, "Change", unit.changeSummary, theme, width);
   lines.push("", renderSectionHeading("Review checks", theme));
-  for (const focus of unit.reviewFocus) {
+  for (const check of unit.reviewFocus) {
+    const location =
+      check.anchor === undefined
+        ? theme.fg("dim", " (whole unit)")
+        : theme.fg(
+            "dim",
+            ` (${safeText(check.anchor.path)} ${check.anchor.side} ${check.anchor.line})`,
+          );
     lines.push(
-      ...wrapStyled(
-        `${theme.fg("accent", "• ")}${theme.fg("text", safeText(focus))}`,
+      ...wrapWithPrefix(
+        theme.fg("accent", CHECK_MARKER),
+        `${theme.fg("text", safeText(check.question))}${location}`,
         width,
       ),
     );
@@ -2774,6 +2691,7 @@ function renderUnitDiff(
   const commentsByTarget = new Map(
     comments.map((comment) => [targetKey(comment), comment]),
   );
+  const checksByLine = anchoredChecksByLine(unit.unit);
 
   for (const [displayBlockIndex, block] of unit.displayBlocks.entries()) {
     if (rows.length > 0) rows.push({ text: "" });
@@ -2790,6 +2708,7 @@ function renderUnitDiff(
         displayBlockIndex,
         targetsByLine,
         commentsByTarget,
+        checksByLine,
         selectedTarget,
         theme,
         width,
@@ -2799,11 +2718,30 @@ function renderUnitDiff(
   return rows;
 }
 
+function anchoredChecksByLine(
+  unit: ReviewUnit,
+): ReadonlyMap<string, readonly ReviewCheck[]> {
+  const byLine = new Map<string, ReviewCheck[]>();
+  for (const check of unit.reviewFocus) {
+    if (check.anchor === undefined) continue;
+    const key = fileLineKey(
+      check.anchor.fileChangeId,
+      check.anchor.side,
+      check.anchor.line,
+    );
+    const list = byLine.get(key) ?? [];
+    list.push(check);
+    byLine.set(key, list);
+  }
+  return byLine;
+}
+
 function renderPlannedDiffItems(
   block: UnitDisplayBlock,
   displayBlockIndex: number,
   targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
   commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  checksByLine: ReadonlyMap<string, readonly ReviewCheck[]>,
   selectedTarget: ReviewCommentTarget | undefined,
   theme: ReviewUiTheme,
   width: number,
@@ -2820,6 +2758,7 @@ function renderPlannedDiffItems(
         block.change.id,
         targetsByLine,
         commentsByTarget,
+        checksByLine,
         selectedTarget,
         theme,
         width,
@@ -2861,6 +2800,7 @@ function renderUnitDiffLines(
   fileChangeId: FileChange["id"],
   targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
   commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  checksByLine: ReadonlyMap<string, readonly ReviewCheck[]>,
   selectedTarget: ReviewCommentTarget | undefined,
   theme: ReviewUiTheme,
   width: number,
@@ -2899,6 +2839,19 @@ function renderUnitDiffLines(
         targetKey: target === undefined ? undefined : targetKey(target),
       })),
     );
+    if (target !== undefined) {
+      const checks =
+        checksByLine.get(
+          fileLineKey(target.fileChangeId, target.side, target.line),
+        ) ?? [];
+      rows.push(
+        ...renderInlineChecks(checks, theme, width).map((text) => ({
+          text,
+          displayBlockIndex,
+          targetKey: targetKey(target),
+        })),
+      );
+    }
     if (comment !== undefined && target !== undefined) {
       rows.push(
         ...renderInlineDraftComment(comment, theme, width).map((text) => ({
@@ -2910,6 +2863,21 @@ function renderUnitDiffLines(
     }
   }
   return rows;
+}
+
+/** Review questions anchored to one diff line, shown directly beneath it. */
+function renderInlineChecks(
+  checks: readonly ReviewCheck[],
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  if (checks.length === 0) return [];
+  const margin = " ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH));
+  const contentWidth = Math.min(
+    widthAfterMargin(width, DIFF_GUTTER_WIDTH),
+    COMMENT_CARD_MAX_WIDTH,
+  );
+  return renderCheckRows(checks, margin, contentWidth, theme, width);
 }
 
 function renderOmittedDiffLines(
@@ -3244,15 +3212,24 @@ function buildCommentTargetPreview(
     const key = diffLineKey(target.fileChangeId, line);
     const hasComment = key !== undefined && commentedLines.has(key);
     if (selected) {
-      return renderDiffLine(
-        line,
-        true,
-        hasComment,
-        false,
-        theme,
-        width,
-        inlineTextByFileIndex.get(fileIndex),
-      );
+      return [
+        ...renderDiffLine(
+          line,
+          true,
+          hasComment,
+          false,
+          theme,
+          width,
+          inlineTextByFileIndex.get(fileIndex),
+        ),
+        ...renderInlineChecks(
+          anchoredChecksByLine(unit).get(
+            fileLineKey(target.fileChangeId, target.side, target.line),
+          ) ?? [],
+          theme,
+          width,
+        ),
+      ];
     }
     return [
       renderCompactDiffLine(

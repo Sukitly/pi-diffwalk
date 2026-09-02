@@ -291,8 +291,11 @@ function makeUiFixture(): UiFixture {
         changeSummary:
           "The request path now validates a value before execution.",
         reviewFocus: [
-          "Does validation preserve compatibility?",
-          "Does the failure path remain explicit?",
+          {
+            question: "Does validation preserve compatibility?",
+            anchor: { path: ENTRY_PATH, side: "new", line: 5 },
+          },
+          { question: "Does the failure path remain explicit?" },
         ],
         spans: [span(ENTRY_PATH, { old: [1, 8], new: [1, 8] })],
       },
@@ -301,7 +304,7 @@ function makeUiFixture(): UiFixture {
         whyHere: "Review the type consumed by the entry point next.",
         context: "entry -> Contract",
         changeSummary: "The public contract now exposes the validated value.",
-        reviewFocus: ["Is the type narrow enough?"],
+        reviewFocus: [{ question: "Is the type narrow enough?" }],
         spans: [span(CONTRACT_PATH, { new: [1, 3] })],
       },
     ],
@@ -368,7 +371,7 @@ function makeInlineDiffFixture(lines: readonly string[]): UiFixture {
         whyHere: "Review the replacement.",
         context: "old -> new",
         changeSummary: "The implementation changed.",
-        reviewFocus: ["Is the replacement correct?"],
+        reviewFocus: [{ question: "Is the replacement correct?" }],
         spans: [
           span(INLINE_PATH, {
             old: [1, change.content.oldLineCount],
@@ -513,56 +516,85 @@ function visitEveryUnit(component: GuidedReviewComponent): void {
   press(component, "n", "n");
 }
 
-test("keeps the walkthrough summary concise and full commentary separate", () => {
+test("shows checks at their anchors and keeps the narrative in details", () => {
   const harness = createHarness(100, 30);
-  const walkthrough = renderText(harness);
+  const lines = harness.component.render(100).map((line) => line.trimEnd());
+  const walkthrough = lines.join("\n");
 
-  assert.match(walkthrough, /Review checks/);
   assert.match(walkthrough, /src\/entry 文\\nfile\.ts/);
-  assert.doesNotMatch(walkthrough, /Git snapshot diff/);
   assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
-  assert.doesNotMatch(walkthrough, /Why this comes next/);
+  assert.doesNotMatch(walkthrough, /The request path|Why this comes next/);
+  assert.doesNotMatch(walkthrough, /Review checks/);
+
+  const addedIndex = lines.findIndex((line) => line.includes("TAIL_END"));
+  assert.ok(addedIndex > 0);
+  assert.equal(
+    lines[addedIndex + 1],
+    `${" ".repeat(14)}? Does validation preserve compatibility?`,
+  );
+  assert.equal(lines[3], "");
+  assert.equal(lines[4], "  ? Does the failure path remain explicit?");
+  assert.equal(lines[5], "");
+  assert.equal(lines[6], "src/entry 文\\nfile.ts");
 
   press(harness.component, "e");
   const explanation = renderText(harness);
   assert.match(explanation, /DiffWalk \/ Details/);
   assert.match(explanation, /Why this comes next/);
   assert.match(explanation, /Context to keep in mind/);
-  assert.match(explanation, /Review checks/);
-  assert.doesNotMatch(explanation, /src\/entry 文\\nfile\.ts/);
-});
-
-test("separates and aligns the wide walkthrough hierarchy", () => {
-  const harness = createHarness(100, 30);
-  const lines = harness.component.render(100).map((line) => line.trimEnd());
-  const summaryIndex = lines.findIndex((line) =>
-    line.startsWith("│ The request path"),
-  );
-
-  assert.equal(lines[1], "");
-  assert.ok(summaryIndex > 0);
-  assert.equal(lines[summaryIndex - 1], "");
-  assert.equal(lines[summaryIndex + 1], "");
-  assert.equal(lines[summaryIndex + 2], "Review checks");
+  assert.match(explanation, /Change\s+The request path now validates/);
   assert.match(
-    lines[summaryIndex + 3] ?? "",
-    /^ {2}01 {2}Does validation preserve compatibility\?/,
+    explanation,
+    /Review checks\s+\? Does validation preserve compatibility\? \(src\/entry 文[\s\S]*new 5\)\s+\? Does the failure path remain explicit\? \(whole unit\)/,
   );
-  assert.match(lines[summaryIndex + 4] ?? "", /^ {6}… press e/);
+  assert.doesNotMatch(explanation, /\n {6}1 {5}1 {2}context line 0/);
 });
 
-test("shows the wide walkthrough gap only with its summary preview", () => {
-  const harness = createHarness(100, 16);
+test("shows the anchored check while a comment on that line is edited", () => {
+  const harness = createHarness(100, 30);
+  press(harness.component, "j", "c");
+  const lines = harness.component.render(100).map((line) => line.trimEnd());
+  const anchorIndex = lines.findIndex((line) => line.includes("TAIL_END"));
+  const editorIndex = lines.indexOf("─".repeat(100));
+
+  assert.ok(anchorIndex > 0);
+  assert.equal(
+    lines[anchorIndex + 1],
+    `${" ".repeat(14)}? Does validation preserve compatibility?`,
+  );
+  assert.ok(editorIndex > anchorIndex + 1);
+  assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
+});
+
+test("wraps anchored checks under the diff gutter", () => {
+  const harness = createHarness(50, 30);
+  const lines = harness.component.render(50).map((line) => line.trimEnd());
+  const start = lines.findIndex((line) =>
+    line.startsWith(`${" ".repeat(14)}? Does validation`),
+  );
+
+  assert.ok(start > 0);
+  assert.match(lines[start] ?? "", /^ {14}\? Does validation preserve$/);
+  assert.match(lines[start + 1] ?? "", /^ {16}compatibility\?$/);
+});
+
+test("drops the unit-level checks before the diff runs out of rows", () => {
+  const harness = createHarness(100, 15);
 
   let lines = harness.component.render(100).map((line) => line.trimEnd());
-  assert.equal(lines[1], "Request entry point\\nsecondary heading");
-  assert.doesNotMatch(lines.join("\n"), /│ The request path|Review checks/);
+  assert.equal(lines[3], "");
+  assert.equal(lines[4], "  ? Does the failure path remain explicit?");
 
-  harness.terminal.rows = 17;
+  harness.terminal.rows = 14;
   lines = harness.component.render(100).map((line) => line.trimEnd());
-  assert.equal(lines[1], "");
-  assert.match(lines.join("\n"), /│ The request path/);
-  assert.match(lines.join("\n"), /Review checks/);
+  assert.equal(lines[3], "");
+  assert.equal(lines[4], "src/entry 文\\nfile.ts");
+  assert.match(lines.join("\n"), /\? Does validation preserve compatibility\?/);
+
+  harness.terminal.rows = 7;
+  lines = harness.component.render(100).map((line) => line.trimEnd());
+  assert.notEqual(lines[3], "");
+  assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
 });
 
 test("keeps walkthrough spacing out of the details header", () => {
@@ -574,27 +606,37 @@ test("keeps walkthrough spacing out of the details header", () => {
   assert.equal(lines[1], "Request entry point\\nsecondary heading");
 });
 
-test("aligns truncation hints with the summary block they replace", () => {
+test("keeps a long summary out of the walkthrough and complete in details", () => {
   const harness = createHarness(60, 30, makeLongSummaryFixture());
-  const lines = harness.component.render(60).map((line) => line.trimEnd());
-  const hint = lines.find((line) => line.includes("press e for complete"));
 
-  assert.match(hint ?? "", /^│ … press e/);
+  assert.doesNotMatch(renderText(harness), /boundary change/);
+
+  press(harness.component, "e");
+  const details = renderText(harness);
+  assert.match(details, /downstream behavior 1\./);
+  assert.match(details, /downstream behavior 8\./);
 });
 
-test("uses one section heading role in walkthrough and details", () => {
+test("uses one check marker role in walkthrough and details", () => {
   const harness = createHarness(100, 30, makeUiFixture(), {
     theme: hierarchyTheme,
   });
-  const heading = "\u001b[37m\u001b[1mReview checks\u001b[22m\u001b[39m";
-  const questionNumber = "  \u001b[35m01  \u001b[39m";
+  const marker = "\u001b[35m? \u001b[39m\u001b[37mDoes validation";
 
   const walkthrough = renderText(harness);
-  assert.ok(walkthrough.includes(heading));
-  assert.ok(walkthrough.includes(questionNumber));
+  assert.ok(walkthrough.includes(`${" ".repeat(14)}${marker}`));
+  assert.ok(
+    walkthrough.includes(
+      "  \u001b[35m? \u001b[39m\u001b[37mDoes the failure path",
+    ),
+  );
 
   press(harness.component, "e");
-  assert.ok(renderText(harness).includes(heading));
+  const details = renderText(harness);
+  assert.ok(details.includes(`\n${marker}`));
+  assert.ok(
+    details.includes("\u001b[37m\u001b[1mReview checks\u001b[22m\u001b[39m"),
+  );
 });
 
 test("shows complete responsive header information when height permits", () => {
@@ -934,7 +976,7 @@ test("pads a narrow span with unchanged context without making it reviewable", (
         whyHere: "The agent framed only the changed line.",
         context: "pad",
         changeSummary: "Adds one line.",
-        reviewFocus: ["Is the surrounding code still correct?"],
+        reviewFocus: [{ question: "Is the surrounding code still correct?" }],
         spans: [span("src/pad.ts", { new: [5, 5] })],
       },
     ],
@@ -982,7 +1024,7 @@ test("stops padding at a changed line owned by another unit", () => {
         whyHere: "Reviewed on its own.",
         context: "pad",
         changeSummary: "Adds the second line.",
-        reviewFocus: ["Is it correct?"],
+        reviewFocus: [{ question: "Is it correct?" }],
         spans: [span("src/pad.ts", { new: [4, 4] })],
       },
       {
@@ -990,7 +1032,7 @@ test("stops padding at a changed line owned by another unit", () => {
         whyHere: "Reviewed separately.",
         context: "pad",
         changeSummary: "Adds the first line.",
-        reviewFocus: ["Is it correct?"],
+        reviewFocus: [{ question: "Is it correct?" }],
         spans: [span("src/pad.ts", { new: [2, 2] })],
       },
     ],
@@ -1211,7 +1253,9 @@ function makeContextGapFixture(contextLines = 30): UiFixture {
         whyHere: "Both edits are read together with the code between them.",
         context: "gap",
         changeSummary: "Edits the region boundaries.",
-        reviewFocus: ["Is the region between the edits still consistent?"],
+        reviewFocus: [
+          { question: "Is the region between the edits still consistent?" },
+        ],
         spans: [span("src/gap.ts", { new: [1, contextLines + 2] })],
       },
     ],
@@ -1244,7 +1288,9 @@ function makeSplitSameFileFixture(contextLines: number): UiFixture {
         whyHere: "Both edits belong to one file-level behavior.",
         context: "first -> second",
         changeSummary: "Edits two regions of one file.",
-        reviewFocus: ["Can either edit disagree with the shared behavior?"],
+        reviewFocus: [
+          { question: "Can either edit disagree with the shared behavior?" },
+        ],
         spans: [
           span("src/gap.ts", { new: [1, 1] }),
           span("src/gap.ts", { new: [contextLines + 2, contextLines + 2] }),
@@ -1302,7 +1348,9 @@ function makeMixedSideOverlapFixture(): UiFixture {
         whyHere: "The replacement must be reviewed in frozen diff order.",
         context: "early -> replacement -> final",
         changeSummary: "Updates both sides of one replacement block.",
-        reviewFocus: ["Can the replacement retain the removed behavior?"],
+        reviewFocus: [
+          { question: "Can the replacement retain the removed behavior?" },
+        ],
         spans: [
           span(path, { old: [4, 4] }),
           span(path, { new: [2, 2] }),
@@ -1340,7 +1388,9 @@ function makeSkippedInsideSpanFixture(): UiFixture {
         whyHere: "The replacement is reviewed before its generated input.",
         context: "start -> generated input -> end",
         changeSummary: "Updates both selectable sides of the replacement.",
-        reviewFocus: ["Can the generated removal alter the replacement?"],
+        reviewFocus: [
+          { question: "Can the generated removal alter the replacement?" },
+        ],
         spans: [span(path, { new: [2, 4] })],
       },
     ],
@@ -1379,7 +1429,9 @@ function makeOtherUnitInsideSpanFixture(): UiFixture {
         whyHere: "Review the added behavior before the removed fallback.",
         context: "outer start -> fallback -> outer end",
         changeSummary: "Adds the replacement behavior.",
-        reviewFocus: ["Can the added behavior bypass the fallback contract?"],
+        reviewFocus: [
+          { question: "Can the added behavior bypass the fallback contract?" },
+        ],
         spans: [span(path, { new: [2, 4] })],
       },
       {
@@ -1387,7 +1439,9 @@ function makeOtherUnitInsideSpanFixture(): UiFixture {
         whyHere: "Review the removed fallback after its replacement.",
         context: "outer behavior -> removed fallback",
         changeSummary: "Removes the old fallback.",
-        reviewFocus: ["Can callers still depend on the removed fallback?"],
+        reviewFocus: [
+          { question: "Can callers still depend on the removed fallback?" },
+        ],
         spans: [span(path, { old: [3, 3] })],
       },
     ],
@@ -1415,7 +1469,9 @@ function makeInterleavedFileRouteFixture(): UiFixture {
         context: "caller -> callee -> return",
         changeSummary: "Updates all three stages of the call path.",
         reviewFocus: [
-          "Can the callee return a value the caller cannot handle?",
+          {
+            question: "Can the callee return a value the caller cannot handle?",
+          },
         ],
         spans: [
           span("src/b.ts", { new: [2, 2] }),
@@ -1663,7 +1719,7 @@ test("navigates the inventory with vim keys", () => {
   press(harness.component, "h");
   assert.match(renderText(harness), /Review inventory/);
   press(harness.component, "h");
-  assert.match(renderText(harness), /Review checks/);
+  assert.match(renderText(harness), /DiffWalk \/ Review/);
 });
 
 test("comment editor repeats the walkthrough highlighted file header", () => {
@@ -1919,7 +1975,7 @@ test("prefills an existing comment and discards an edit without changing it", ()
   press(harness.component, "!", "\u001b");
 
   assert.equal(harness.state.review.comments[0]?.body, "Original");
-  assert.match(renderText(harness), /Review checks/);
+  assert.match(renderText(harness), /DiffWalk \/ Review/);
 });
 
 test("keeps comment input errors local to the editor", () => {
@@ -1996,7 +2052,7 @@ function makeTallFixture(
         whyHere: "Scrolling exercises the pinned file header.",
         context: "tall",
         changeSummary: "Adds many lines.",
-        reviewFocus: ["Is every line correct?"],
+        reviewFocus: [{ question: "Is every line correct?" }],
         spans: files.map((file) => span(file.path, { new: [1, file.count] })),
       },
     ],
@@ -2027,7 +2083,7 @@ test("restores leading span padding when scrolling back to the first line", () =
         whyHere: "Scrolling away and back exercises the scroll margin.",
         context: "margin",
         changeSummary: "Adds many lines below unchanged padding.",
-        reviewFocus: ["Does the padding stay reachable?"],
+        reviewFocus: [{ question: "Does the padding stay reachable?" }],
         spans: [span("src/margin.ts", { new: [4, 28] })],
       },
     ],
@@ -2262,7 +2318,7 @@ test("pauses explicitly without discarding drafts", () => {
   assert.match(renderText(harness), /Pause to keep 1 draft comment/);
   press(harness.component, "\u001b");
   assert.equal(harness.cancellations.count, 0);
-  assert.match(renderText(harness), /Review checks/);
+  assert.match(renderText(harness), /DiffWalk \/ Review/);
 
   press(harness.component, "\u001b", "\r");
   assert.equal(harness.cancellations.count, 1);

@@ -123,7 +123,7 @@ function fixture(): {
         whyHere: "The comments belong together.",
         context: "first -> second",
         changeSummary: "Adds two lines.",
-        reviewFocus: ["Are both additions correct?"],
+        reviewFocus: [{ question: "Are both additions correct?" }],
         spans: [span("src/thread.ts", { new: [1, 20] })],
       },
     ],

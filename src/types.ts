@@ -307,6 +307,37 @@ const ReviewSpanCandidateSchema = Type.Object(
   },
 );
 
+const ReviewCheckAnchorCandidateSchema = Type.Object(
+  {
+    path: Type.String({
+      description: "Path of the changed file the question is about",
+    }),
+    side: Type.Union([Type.Literal("old"), Type.Literal("new")], {
+      description: "old for a removed line, new for an added line",
+    }),
+    line: Type.Integer({
+      minimum: 1,
+      description: "1-based line number on that side",
+    }),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "The changed line this question is about. It must be inside this unit's spans. Omit the anchor only for a question about the unit as a whole.",
+  },
+);
+
+const ReviewCheckCandidateSchema = Type.Object(
+  {
+    question: Type.String({
+      description:
+        "One question naming a specific way this change could be wrong",
+    }),
+    anchor: Type.Optional(ReviewCheckAnchorCandidateSchema),
+  },
+  { additionalProperties: false },
+);
+
 const ReviewUnitCandidateSchema = Type.Object(
   {
     title: Type.String({
@@ -324,9 +355,9 @@ const ReviewUnitCandidateSchema = Type.Object(
       description:
         "One or two direct sentences describing the behavior change without patch text",
     }),
-    reviewFocus: Type.Array(Type.String(), {
+    reviewFocus: Type.Array(ReviewCheckCandidateSchema, {
       description:
-        "One to three distinct questions naming specific ways this change could be wrong",
+        "One to three distinct questions naming specific ways this change could be wrong, each anchored to the changed line it concerns",
       minItems: 1,
       maxItems: 3,
     }),
@@ -372,6 +403,22 @@ export type ReviewRouteCandidate = Type.Static<
 
 export type ReviewSpanCandidate = Type.Static<typeof ReviewSpanCandidateSchema>;
 
+export type ReviewCheckCandidate = Type.Static<
+  typeof ReviewCheckCandidateSchema
+>;
+
+export interface ReviewCheckAnchor {
+  readonly fileChangeId: FileChangeId;
+  readonly path: string;
+  readonly side: ChangeSide;
+  readonly line: number;
+}
+
+export interface ReviewCheck {
+  readonly question: string;
+  readonly anchor?: ReviewCheckAnchor;
+}
+
 export interface ReviewRoute {
   readonly [brand]: "ValidatedReviewRoute";
   readonly snapshotId: SnapshotId;
@@ -385,7 +432,7 @@ export interface ReviewUnit {
   readonly whyHere: string;
   readonly context: string;
   readonly changeSummary: string;
-  readonly reviewFocus: readonly string[];
+  readonly reviewFocus: readonly ReviewCheck[];
   readonly spans: readonly ResolvedSpan[];
 }
 
