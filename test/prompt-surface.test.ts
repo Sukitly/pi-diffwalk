@@ -161,7 +161,7 @@ function advisoryNudge(): string {
     whyHere: "Fixture ordering.",
     context: "Fixture context.",
     changeSummary: "Fixture change.",
-    reviewFocus: ["Fixture question?"],
+    reviewFocus: [{ question: "Fixture question?" }],
     spans: [unitSpan],
   });
   const route = validateReviewRoute(snapshot, computeReviewDelta(snapshot), {

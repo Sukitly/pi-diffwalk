@@ -53,7 +53,7 @@ function makeReviewFixture(): ReviewFixture {
         whyHere: "The behavior starts here.",
         context: "entry -> contract",
         changeSummary: "Changes the entry behavior.",
-        reviewFocus: ["Is the entry behavior correct?"],
+        reviewFocus: [{ question: "Is the entry behavior correct?" }],
         spans: [span("src/entry.ts", { new: [2, 2] })],
       },
       {
@@ -61,7 +61,7 @@ function makeReviewFixture(): ReviewFixture {
         whyHere: "The entry depends on this contract.",
         context: "entry -> contract",
         changeSummary: "Changes the contract.",
-        reviewFocus: ["Is the contract compatible?"],
+        reviewFocus: [{ question: "Is the contract compatible?" }],
         spans: [span("src/contract.ts", { new: [2, 2] })],
       },
     ],

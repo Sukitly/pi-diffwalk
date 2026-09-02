@@ -454,7 +454,7 @@ function validRoute(snapshotId = "snapshot-index"): ReviewRouteCandidate {
         whyHere: "Behavior starts here.",
         context: "entry -> implementation",
         changeSummary: "Updates behavior.",
-        reviewFocus: ["Is the behavior correct?"],
+        reviewFocus: [{ question: "Is the behavior correct?" }],
         spans: [span("src/file.ts", { new: [2, 2] })],
       },
     ],
@@ -1433,7 +1433,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
         whyHere: "Old site first.",
         context: "from -> to",
         changeSummary: "Removes the block.",
-        reviewFocus: ["Is the removal safe?"],
+        reviewFocus: [{ question: "Is the removal safe?" }],
         spans: [span("src/from.ts", { old: [2, 4] })],
       },
       {
@@ -1441,7 +1441,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
         whyHere: "New site second.",
         context: "from -> to",
         changeSummary: "Adds the block.",
-        reviewFocus: ["Is the addition safe?"],
+        reviewFocus: [{ question: "Is the addition safe?" }],
         spans: [span("src/to.ts", { new: [2, 4] })],
       },
     ],
@@ -1472,7 +1472,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
     toolResultWithoutDetails(advisoryMessage),
     true,
   );
-  assert.match(renderedAdvisory, /^Review needs attention/);
+  assert.doesNotMatch(renderedAdvisory, /needs attention/);
   assert.match(renderedAdvisory, /advisory signals, not validation failures/);
   assert.doesNotMatch(
     renderedAdvisory,
@@ -1523,7 +1523,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
     toolResultWithoutDetails(driftMessage),
     true,
   );
-  assert.match(renderedDrift, /^Review needs attention/);
+  assert.doesNotMatch(renderedDrift, /needs attention/);
   assert.match(renderedDrift, /Run \/diffwalk again before opening DiffWalk/);
   assert.doesNotMatch(renderedDrift, /snapshotId|submissionMode|instruction/);
   assert.deepEqual(harness.openedSnapshots, []);
@@ -1642,7 +1642,7 @@ test("the latest persisted entry for a series wins on restore", async () => {
           whyHere: "Only new line this round.",
           context: "tail -> appended",
           changeSummary: "Appends a line.",
-          reviewFocus: ["Is the appended line correct?"],
+          reviewFocus: [{ question: "Is the appended line correct?" }],
           spans: [span("src/file.ts", { new: [4, 4] })],
         },
       ],

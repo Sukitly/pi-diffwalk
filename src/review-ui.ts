@@ -45,10 +45,12 @@ import type {
   GuidedReviewResult,
   InProgressReview,
   ResolvedSpan,
+  ReviewCheck,
   ReviewComment,
   ReviewDelta,
   ReviewRoute,
   ReviewRouteCandidate,
+  ReviewRouteSkip,
   ReviewSnapshot,
   ReviewSpanCandidate,
   ReviewSubmissionMode,
@@ -147,6 +149,13 @@ type ChangedLineDisplayOwnership =
 
 type DisplayOmissionReason =
   | { readonly type: "distant" }
+  | {
+      readonly type: "gap";
+      readonly carriedForward: number;
+      readonly skipped: number;
+      readonly otherUnit: number;
+      readonly shownLater: number;
+    }
   | { readonly type: "route-jump" }
   | { readonly type: "carried-forward" }
   | { readonly type: "skipped"; readonly reason: string }
@@ -291,7 +300,18 @@ export function routeAsCandidate(route: ReviewRoute): ReviewRouteCandidate {
       whyHere: unit.whyHere,
       context: unit.context,
       changeSummary: unit.changeSummary,
-      reviewFocus: [...unit.reviewFocus],
+      reviewFocus: unit.reviewFocus.map((check) => ({
+        question: check.question,
+        ...(check.anchor === undefined
+          ? {}
+          : {
+              anchor: {
+                path: check.anchor.path,
+                side: check.anchor.side,
+                line: check.anchor.line,
+              },
+            }),
+      })),
       spans: unit.spans.map((span) => spanCandidate(span)),
     })),
     skippedSpans: route.skippedSpans.map((skip) => ({
@@ -543,20 +563,8 @@ export class GuidedReviewComponent implements Component, Focusable {
     const baseHeader = this.renderHeader(width, rows);
     const footer = this.renderFooter(width, walkthroughFooterText(width));
     const unitView = this.currentUnit();
-    const summary =
-      unitView === undefined
-        ? []
-        : renderWalkthroughSummary(unitView.unit, this.theme, width);
-    const layout = resolveWalkthroughPreviewLayout(
-      summary.length,
-      Math.max(0, rows - baseHeader.length - footer.length),
-      width >= WIDE_HEADER_WIDTH,
-    );
-    const header =
-      layout.headerGap && baseHeader.length > 0
-        ? [baseHeader[0] ?? "", "", ...baseHeader.slice(1)]
-        : baseHeader;
-    const bodyHeight = layout.bodyHeight;
+    const header = baseHeader;
+    const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
 
     if (unitView === undefined) {
@@ -570,25 +578,20 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...header, ...empty, ...footer];
     }
 
-    const previewRows = summary.slice(0, layout.previewHeight);
-    const preview = previewRows.map((row) => row.text);
-    if (preview.length > 0 && preview.length < summary.length) {
-      preview[preview.length - 1] = renderWalkthroughTruncationHint(
-        previewRows.at(-1)?.truncationPrefix ?? "",
-        this.theme,
-        width,
-      );
-    }
-
+    const preview = renderWalkthroughPreview(
+      unitView.unit,
+      bodyHeight,
+      this.theme,
+      width,
+    );
     const feedback = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     );
-    const separator = preview.length > 0 ? [""] : [];
     const diffHeight = Math.max(
       0,
-      bodyHeight - preview.length - separator.length - feedback.length,
+      bodyHeight - preview.length - feedback.length,
     );
     const renderedDiff = renderUnitDiff(
       unitView,
@@ -622,7 +625,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     return [
       ...header,
       ...preview,
-      ...separator,
       ...feedback,
       ...pinnedHeader,
       ...diffRows,
@@ -1831,28 +1833,21 @@ export class GuidedReviewComponent implements Component, Focusable {
       rows - this.renderHeader(width, rows).length - 1,
     );
     const unit = this.currentUnit();
-    const summary =
+    const previewHeight =
       unit === undefined
-        ? []
-        : renderWalkthroughSummary(unit.unit, this.theme, width);
-    const layout = resolveWalkthroughPreviewLayout(
-      summary.length,
-      availableBodyHeight,
-      width >= WIDE_HEADER_WIDTH,
-    );
+        ? 0
+        : renderWalkthroughPreview(
+            unit.unit,
+            availableBodyHeight,
+            this.theme,
+            width,
+          ).length;
     const feedbackHeight = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     ).length;
-    const separatorHeight = layout.previewHeight > 0 ? 1 : 0;
-    return Math.max(
-      0,
-      layout.bodyHeight -
-        layout.previewHeight -
-        separatorHeight -
-        feedbackHeight,
-    );
+    return Math.max(0, availableBodyHeight - previewHeight - feedbackHeight);
   }
 
   private toggleHelp(): void {
@@ -2186,135 +2181,84 @@ function orderTargetsFromDisplayPlan(
   return ordered;
 }
 
-interface WalkthroughPreviewLayout {
-  readonly headerGap: boolean;
-  readonly bodyHeight: number;
-  readonly previewHeight: number;
-}
-
-interface WalkthroughSummaryRow {
-  readonly text: string;
-  readonly truncationPrefix: string;
-}
-
-function walkthroughPreviewHeight(
-  summaryLength: number,
-  bodyHeight: number,
-): number {
-  return bodyHeight >= 12
-    ? Math.min(summaryLength, 8, Math.max(6, Math.floor(bodyHeight * 0.25)))
-    : 0;
-}
-
-function resolveWalkthroughPreviewLayout(
-  summaryLength: number,
-  availableBodyHeight: number,
-  separateWideHeader: boolean,
-): WalkthroughPreviewLayout {
-  const headerGapRows = separateWideHeader ? 1 : 0;
-  const bodyHeight = Math.max(0, availableBodyHeight - headerGapRows);
-  const previewHeight = walkthroughPreviewHeight(summaryLength, bodyHeight);
-  if (previewHeight === 0) {
-    return {
-      headerGap: false,
-      bodyHeight: Math.max(0, availableBodyHeight),
-      previewHeight: 0,
-    };
-  }
-  return {
-    headerGap: separateWideHeader,
-    bodyHeight,
-    previewHeight,
-  };
-}
-
-const REVIEW_QUESTION_LEADING_INDENT = "  ";
-const REVIEW_QUESTION_GAP = "  ";
-
-function reviewQuestionPrefix(index: number): string {
-  return `${REVIEW_QUESTION_LEADING_INDENT}${String(index + 1).padStart(2, "0")}${REVIEW_QUESTION_GAP}`;
-}
-
-const REVIEW_QUESTION_TEXT_INDENT = " ".repeat(
-  visibleWidth(reviewQuestionPrefix(0)),
-);
-
-function renderReviewQuestionPrefix(
-  index: number,
-  theme: ReviewUiTheme,
-): string {
-  const prefix = reviewQuestionPrefix(index);
-  return `${REVIEW_QUESTION_LEADING_INDENT}${theme.fg(
-    "accent",
-    prefix.slice(REVIEW_QUESTION_LEADING_INDENT.length),
-  )}`;
-}
-
 function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
   return theme.fg("text", theme.bold(label));
 }
 
-function renderWalkthroughTruncationHint(
-  prefix: string,
+/** Marks a question that stands on its own: above the diff or in details. */
+const CHECK_MARKER = "? ";
+
+function renderCheckRows(
+  checks: readonly ReviewCheck[],
+  marker: string,
+  indent: string,
+  contentWidth: number,
   theme: ReviewUiTheme,
   width: number,
-): string {
-  return fitLine(
-    `${prefix}${theme.fg("dim", "… press e for complete context and questions")}`,
-    width,
+): string[] {
+  return checks.flatMap((check) =>
+    wrapWithPrefix(
+      theme.fg("accent", marker),
+      theme.fg("text", safeText(check.question)),
+      contentWidth,
+    ).map((line) => fitLine(`${indent}${line}`, width)),
   );
 }
 
-function renderWalkthroughSummary(
+const MINIMUM_BODY_ROWS_WITH_SEPARATOR = 6;
+const MINIMUM_DIFF_ROWS_BESIDE_PREVIEW = 8;
+const MAXIMUM_SUMMARY_ROWS = 3;
+
+/**
+ * The rows between the header and the diff: the change summary so the
+ * reviewer knows what this unit does, then the checks that concern the unit
+ * as a whole. Anchored checks render beneath their lines inside the diff.
+ * Short bodies drop the unit checks first, then the summary, so the diff
+ * keeps at least a few rows; the details page always holds everything.
+ */
+function renderWalkthroughPreview(
   unit: ReviewUnit,
+  bodyHeight: number,
   theme: ReviewUiTheme,
   width: number,
-): WalkthroughSummaryRow[] {
-  const summaryRail = theme.fg("borderMuted", "│ ");
-  const summaryWidth = Math.max(1, width - visibleWidth(summaryRail));
+): readonly string[] {
+  if (bodyHeight < MINIMUM_BODY_ROWS_WITH_SEPARATOR) return [];
   const summary = wrapStyled(
     theme.fg("text", safeText(unit.changeSummary)),
-    summaryWidth,
-  ).map((line) => ({
-    text: fitLine(`${summaryRail}${line}`, width),
-    truncationPrefix: summaryRail,
-  }));
-  const lines: WalkthroughSummaryRow[] = [
-    { text: "", truncationPrefix: "" },
-    ...summary,
-    { text: "", truncationPrefix: summaryRail },
-    {
-      text: renderSectionHeading("Review checks", theme),
-      truncationPrefix: "",
-    },
-  ];
-  for (const [index, focus] of unit.reviewFocus.slice(0, 2).entries()) {
-    lines.push(
-      ...wrapWithPrefix(
-        renderReviewQuestionPrefix(index, theme),
-        theme.fg("text", safeText(focus)),
-        width,
-      ).map((text) => ({
-        text,
-        truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
-      })),
-    );
-  }
-  const hint =
-    unit.reviewFocus.length > 2
-      ? `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`
-      : "Press e for complete context.";
-  lines.push(
-    ...wrapWithPrefix(
-      REVIEW_QUESTION_TEXT_INDENT,
-      theme.fg("dim", hint),
-      width,
-    ).map((text) => ({
-      text,
-      truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
-    })),
+    width,
   );
-  return lines;
+  if (summary.length > MAXIMUM_SUMMARY_ROWS) {
+    summary.length = MAXIMUM_SUMMARY_ROWS;
+    summary[MAXIMUM_SUMMARY_ROWS - 1] =
+      `${truncateToWidth(summary[MAXIMUM_SUMMARY_ROWS - 1] ?? "", Math.max(0, width - 1), "")}${theme.fg("dim", "…")}`;
+  }
+  const unitChecks = unit.reviewFocus.filter(
+    (check) => check.anchor === undefined,
+  );
+  const checks =
+    unitChecks.length === 0
+      ? []
+      : [
+          "",
+          ...renderCheckRows(
+            unitChecks,
+            CHECK_MARKER,
+            "  ",
+            Math.max(1, width - 2),
+            theme,
+            width,
+          ),
+        ];
+  const candidates = [
+    ["", ...summary, ...checks, ""],
+    ["", ...summary, ""],
+    [""],
+  ];
+  return (
+    candidates.find(
+      (rows) => bodyHeight - rows.length >= MINIMUM_DIFF_ROWS_BESIDE_PREVIEW,
+    ) ?? [""]
+  );
 }
 
 interface HelpEntry {
@@ -2441,10 +2385,18 @@ function renderExplanationLines(
   addSectionText(lines, "Context to keep in mind", unit.context, theme, width);
   addSectionText(lines, "Change", unit.changeSummary, theme, width);
   lines.push("", renderSectionHeading("Review checks", theme));
-  for (const focus of unit.reviewFocus) {
+  for (const check of unit.reviewFocus) {
+    const location =
+      check.anchor === undefined
+        ? theme.fg("dim", " (whole unit)")
+        : theme.fg(
+            "dim",
+            ` (${safeText(check.anchor.path)} ${check.anchor.side} ${check.anchor.line})`,
+          );
     lines.push(
-      ...wrapStyled(
-        `${theme.fg("accent", "• ")}${theme.fg("text", safeText(focus))}`,
+      ...wrapWithPrefix(
+        theme.fg("accent", CHECK_MARKER),
+        `${theme.fg("text", safeText(check.question))}${location}`,
         width,
       ),
     );
@@ -2591,16 +2543,25 @@ function appendGapItems(
   renderedIndexes: Set<number>,
 ): void {
   const showContext = end - start + 1 <= INLINE_SPAN_MERGE_GAP;
+  if (!showContext) {
+    appendCollapsedGap(
+      items,
+      fileLines,
+      start,
+      end,
+      unit,
+      fileChangeId,
+      ownership,
+      renderedIndexes,
+    );
+    return;
+  }
   for (let index = start; index <= end; index += 1) {
     if (renderedIndexes.has(index)) continue;
     const line = fileLines[index];
     if (line === undefined) continue;
     if (line.type === "context") {
-      if (showContext) {
-        items.push({ type: "line", line, role: "context" });
-      } else {
-        appendDisplayOmission(items, 1, { type: "distant" });
-      }
+      items.push({ type: "line", line, role: "context" });
       renderedIndexes.add(index);
       continue;
     }
@@ -2621,6 +2582,67 @@ function appendGapItems(
       renderedIndexes.add(index);
     }
   }
+}
+
+/**
+ * A gap too long to show inline becomes one omission row. Nothing in it is
+ * displayed, so alternating runs of context and earlier-round lines would
+ * only add rows; the row instead counts what the gap holds by category.
+ */
+function appendCollapsedGap(
+  items: PlannedDiffItem[],
+  fileLines: readonly DiffLine[],
+  start: number,
+  end: number,
+  unit: ReviewUnit,
+  fileChangeId: FileChange["id"],
+  ownership: ReadonlyMap<string, ChangedLineDisplayOwnership>,
+  renderedIndexes: Set<number>,
+): void {
+  let total = 0;
+  let carriedForward = 0;
+  let skipped = 0;
+  let otherUnit = 0;
+  let shownLater = 0;
+  for (let index = start; index <= end; index += 1) {
+    if (renderedIndexes.has(index)) continue;
+    const line = fileLines[index];
+    if (line === undefined) continue;
+    total += 1;
+    if (line.type === "context") {
+      renderedIndexes.add(index);
+      continue;
+    }
+    const lineOwnership = requireDisplayOwnership(
+      ownership,
+      fileChangeId,
+      line,
+    );
+    switch (lineOwnership.type) {
+      case "carried-forward":
+        carriedForward += 1;
+        renderedIndexes.add(index);
+        break;
+      case "skipped":
+        skipped += 1;
+        renderedIndexes.add(index);
+        break;
+      case "unit":
+        if (lineOwnership.reviewUnitId === unit.id) {
+          shownLater += 1;
+        } else {
+          otherUnit += 1;
+          renderedIndexes.add(index);
+        }
+        break;
+    }
+  }
+  if (total === 0) return;
+  items.push({
+    type: "omission",
+    count: total,
+    reason: { type: "gap", carriedForward, skipped, otherUnit, shownLater },
+  });
 }
 
 function appendSpanLine(
@@ -2774,6 +2796,7 @@ function renderUnitDiff(
   const commentsByTarget = new Map(
     comments.map((comment) => [targetKey(comment), comment]),
   );
+  const checksByLine = anchoredChecksByLine(unit.unit);
 
   for (const [displayBlockIndex, block] of unit.displayBlocks.entries()) {
     if (rows.length > 0) rows.push({ text: "" });
@@ -2790,6 +2813,7 @@ function renderUnitDiff(
         displayBlockIndex,
         targetsByLine,
         commentsByTarget,
+        checksByLine,
         selectedTarget,
         theme,
         width,
@@ -2799,11 +2823,30 @@ function renderUnitDiff(
   return rows;
 }
 
+function anchoredChecksByLine(
+  unit: ReviewUnit,
+): ReadonlyMap<string, readonly ReviewCheck[]> {
+  const byLine = new Map<string, ReviewCheck[]>();
+  for (const check of unit.reviewFocus) {
+    if (check.anchor === undefined) continue;
+    const key = fileLineKey(
+      check.anchor.fileChangeId,
+      check.anchor.side,
+      check.anchor.line,
+    );
+    const list = byLine.get(key) ?? [];
+    list.push(check);
+    byLine.set(key, list);
+  }
+  return byLine;
+}
+
 function renderPlannedDiffItems(
   block: UnitDisplayBlock,
   displayBlockIndex: number,
   targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
   commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  checksByLine: ReadonlyMap<string, readonly ReviewCheck[]>,
   selectedTarget: ReviewCommentTarget | undefined,
   theme: ReviewUiTheme,
   width: number,
@@ -2820,6 +2863,7 @@ function renderPlannedDiffItems(
         block.change.id,
         targetsByLine,
         commentsByTarget,
+        checksByLine,
         selectedTarget,
         theme,
         width,
@@ -2861,6 +2905,7 @@ function renderUnitDiffLines(
   fileChangeId: FileChange["id"],
   targetsByLine: ReadonlyMap<string, ReviewCommentTarget>,
   commentsByTarget: ReadonlyMap<string, ReviewComment>,
+  checksByLine: ReadonlyMap<string, readonly ReviewCheck[]>,
   selectedTarget: ReviewCommentTarget | undefined,
   theme: ReviewUiTheme,
   width: number,
@@ -2884,21 +2929,42 @@ function renderUnitDiffLines(
       target === undefined
         ? undefined
         : commentsByTarget.get(targetKey(target));
+    const checks =
+      target === undefined
+        ? []
+        : (checksByLine.get(
+            fileLineKey(target.fileChangeId, target.side, target.line),
+          ) ?? []);
+    const lineRows = renderDiffLine(
+      line,
+      {
+        selected: isSelected,
+        hasComment: comment !== undefined,
+        external: planned.role === "external",
+      },
+      theme,
+      width,
+      inlineTextByIndex.get(lineIndex),
+    );
     rows.push(
-      ...renderDiffLine(
-        line,
-        isSelected,
-        comment !== undefined,
-        planned.role === "external",
-        theme,
-        width,
-        inlineTextByIndex.get(lineIndex),
+      ...(checks.length > 0 && !isSelected
+        ? lineRows.map((text) => fillCheckBlockRow(text, theme, width))
+        : lineRows
       ).map((text) => ({
         text,
         displayBlockIndex,
         targetKey: target === undefined ? undefined : targetKey(target),
       })),
     );
+    if (target !== undefined) {
+      rows.push(
+        ...renderInlineChecks(checks, theme, width).map((text) => ({
+          text,
+          displayBlockIndex,
+          targetKey: targetKey(target),
+        })),
+      );
+    }
     if (comment !== undefined && target !== undefined) {
       rows.push(
         ...renderInlineDraftComment(comment, theme, width).map((text) => ({
@@ -2910,6 +2976,41 @@ function renderUnitDiffLines(
     }
   }
   return rows;
+}
+
+const CHECK_BLOCK_BG: Parameters<ReviewUiTheme["bg"]>[0] = "customMessageBg";
+
+/** Paints one full-width row of the block a line shares with its questions. */
+function fillCheckBlockRow(
+  text: string,
+  theme: ReviewUiTheme,
+  width: number,
+): string {
+  return theme.bg(CHECK_BLOCK_BG, fillLine(text, width));
+}
+
+/**
+ * Review questions anchored to one diff line. They continue the background
+ * block started by the line, indented to the diff gutter, so the line and its
+ * questions read as one card.
+ */
+function renderInlineChecks(
+  checks: readonly ReviewCheck[],
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  if (checks.length === 0) return [];
+  const margin = " ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH));
+  const wrapWidth = Math.min(width, margin.length + COMMENT_CARD_MAX_WIDTH);
+  return checks
+    .flatMap((check) =>
+      wrapWithPrefix(
+        margin,
+        theme.fg("text", safeText(check.question)),
+        wrapWidth,
+      ),
+    )
+    .map((row) => fillCheckBlockRow(row, theme, width));
 }
 
 function renderOmittedDiffLines(
@@ -2933,6 +3034,21 @@ function omissionDetail(omission: PlannedDiffOmission): string {
   switch (omission.reason.type) {
     case "distant":
       return `${lines} not shown`;
+    case "gap": {
+      const { carriedForward, skipped, otherUnit, shownLater } =
+        omission.reason;
+      const parts = [
+        carriedForward > 0
+          ? `${carriedForward} reviewed in an earlier round`
+          : undefined,
+        skipped > 0 ? `${skipped} skipped` : undefined,
+        otherUnit > 0 ? `${otherUnit} routed to other units` : undefined,
+        shownLater > 0 ? `${shownLater} shown later in this unit` : undefined,
+      ].filter((part) => part !== undefined);
+      return parts.length === 0
+        ? `${lines} not shown`
+        : `${lines} not shown; ${parts.join(", ")}`;
+    }
     case "route-jump":
       return "routed region continues elsewhere in this file";
     case "carried-forward":
@@ -2988,15 +3104,52 @@ function diffLineKey(
   return undefined;
 }
 
-function describeSpanRange(span: ResolvedSpan): string {
-  const parts: string[] = [];
-  if (span.oldStart !== undefined && span.oldEnd !== undefined) {
-    parts.push(`old ${span.oldStart}-${span.oldEnd}`);
+/**
+ * Skipped regions grouped by reason, then by file, so a reason that covers
+ * many regions reads once with a compact list instead of once per region.
+ */
+function renderSkippedRegionGroups(
+  skips: readonly ReviewRouteSkip[],
+  theme: ReviewUiTheme,
+  width: number,
+): string[] {
+  const byReason = new Map<string, Map<string, string[]>>();
+  for (const skip of skips) {
+    const files = byReason.get(skip.reason) ?? new Map<string, string[]>();
+    const ranges = files.get(skip.span.path) ?? [];
+    ranges.push(describeSkippedRange(skip.span));
+    files.set(skip.span.path, ranges);
+    byReason.set(skip.reason, files);
   }
+  const lines: string[] = [];
+  for (const [reason, files] of byReason) {
+    lines.push(...wrapStyled(theme.fg("text", safeText(reason)), width));
+    for (const [path, ranges] of files) {
+      lines.push(
+        ...wrapWithPrefix(
+          "  ",
+          `${theme.fg("muted", safeText(path))} ${theme.fg("dim", ranges.join(", "))}`,
+          width,
+        ),
+      );
+    }
+  }
+  return lines;
+}
+
+/** New-side range when the region has one; removed-only regions say so. */
+function describeSkippedRange(span: ResolvedSpan): string {
   if (span.newStart !== undefined && span.newEnd !== undefined) {
-    parts.push(`new ${span.newStart}-${span.newEnd}`);
+    return span.newStart === span.newEnd
+      ? String(span.newStart)
+      : `${span.newStart}-${span.newEnd}`;
   }
-  return parts.join("  ");
+  if (span.oldStart !== undefined && span.oldEnd !== undefined) {
+    return span.oldStart === span.oldEnd
+      ? `old ${span.oldStart}`
+      : `old ${span.oldStart}-${span.oldEnd}`;
+  }
+  return "";
 }
 
 function renderReadOnlyFile(
@@ -3016,9 +3169,7 @@ function renderReadOnlyFile(
       lines.push(
         ...renderDiffLine(
           line,
-          false,
-          false,
-          false,
+          {},
           theme,
           width,
           inlineTextByIndex.get(lineIndex),
@@ -3110,18 +3261,31 @@ function renderInlineDiffPair(
   return { removed, added };
 }
 
+interface DiffLineMarks {
+  readonly selected?: boolean;
+  readonly hasComment?: boolean;
+  readonly external?: boolean;
+}
+
+/** The marker column shows one state: selection, then comment. */
+function diffLineMarker(marks: DiffLineMarks): string {
+  if (marks.selected) return ">";
+  if (marks.hasComment) return "●";
+  if (marks.external) return "·";
+  return " ";
+}
+
 function renderDiffLine(
   line: DiffLine,
-  selected: boolean,
-  hasComment: boolean,
-  external: boolean,
+  marks: DiffLineMarks,
   theme: ReviewUiTheme,
   width: number,
   inlineText?: string,
 ): readonly string[] {
+  const selected = marks.selected === true;
   const oldLine = line.oldLine === undefined ? "" : String(line.oldLine);
   const newLine = line.newLine === undefined ? "" : String(line.newLine);
-  const marker = selected ? ">" : hasComment ? "●" : external ? "·" : " ";
+  const marker = diffLineMarker(marks);
   const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
   const raw = theme.fg(
     diffColor(line),
@@ -3244,15 +3408,20 @@ function buildCommentTargetPreview(
     const key = diffLineKey(target.fileChangeId, line);
     const hasComment = key !== undefined && commentedLines.has(key);
     if (selected) {
-      return renderDiffLine(
-        line,
-        true,
-        hasComment,
-        false,
-        theme,
-        width,
-        inlineTextByFileIndex.get(fileIndex),
-      );
+      const checks =
+        anchoredChecksByLine(unit).get(
+          fileLineKey(target.fileChangeId, target.side, target.line),
+        ) ?? [];
+      return [
+        ...renderDiffLine(
+          line,
+          { selected: true, hasComment },
+          theme,
+          width,
+          inlineTextByFileIndex.get(fileIndex),
+        ),
+        ...renderInlineChecks(checks, theme, width),
+      ];
     }
     return [
       renderCompactDiffLine(
@@ -3696,17 +3865,7 @@ function renderSummaryLines(
   if (route.skippedSpans.length === 0) {
     lines.push(theme.fg("dim", "None."));
   } else {
-    for (const skip of route.skippedSpans) {
-      lines.push(
-        ...wrapStyled(
-          theme.fg(
-            "warning",
-            `${safeText(displayPath(skip.span.path))} ${safeText(describeSpanRange(skip.span))}: ${safeText(skip.reason)}`,
-          ),
-          width,
-        ),
-      );
-    }
+    lines.push(...renderSkippedRegionGroups(route.skippedSpans, theme, width));
   }
 
   const nonTextChanges = inventory.filter((entry) => entry.type !== "file");

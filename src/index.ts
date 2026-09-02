@@ -896,14 +896,7 @@ export function registerDiffWalk(
         const content = result.content.find((item) => item.type === "text");
         const message =
           content?.type === "text" ? content.text : "Unknown review error.";
-        return new Text(
-          [
-            theme.fg("error", "Review needs attention"),
-            theme.fg("muted", message),
-          ].join("\n"),
-          0,
-          0,
-        );
+        return new Text(theme.fg("error", message), 0, 0);
       }
       if (result.details === undefined) {
         return new Text("Review finished.", 0, 0);

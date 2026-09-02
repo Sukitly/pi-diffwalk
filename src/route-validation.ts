@@ -9,11 +9,16 @@ import {
   computeSpanCoverage,
   describeChangedLines,
   describeSpan,
+  findChangeByPath,
+  listFileChangedLines,
   resolveSpan,
+  spanCoversLine,
 } from "./review-span.ts";
 import type {
   ChangedLineRequirement,
   ResolvedSpan,
+  ReviewCheck,
+  ReviewCheckCandidate,
   ReviewDelta,
   ReviewRoute,
   ReviewRouteCandidate,
@@ -27,6 +32,7 @@ export type ReviewRouteValidationIssueCode =
   | "snapshot-mismatch"
   | "empty-field"
   | "review-focus-limit"
+  | "invalid-check-anchor"
   | "empty-unit"
   | "invalid-span"
   | "carried-forward-reference"
@@ -99,7 +105,7 @@ export function validateReviewRoute(
     }
     for (const [focusIndex, focus] of unit.reviewFocus.entries()) {
       validateNonBlank(
-        focus,
+        focus.question,
         `Review unit ${unitNumber} reviewFocus item ${focusIndex + 1}`,
         issues,
       );
@@ -124,12 +130,22 @@ export function validateReviewRoute(
     });
     unitSpans.push(spans);
 
+    const reviewFocus = unit.reviewFocus.map((check, checkIndex) =>
+      resolveCheck(
+        snapshot,
+        check,
+        spans,
+        `Review unit ${unitNumber} check ${checkIndex + 1}`,
+        issues,
+      ),
+    );
+
     return {
       title: unit.title,
       whyHere: unit.whyHere,
       context: unit.context,
       changeSummary: unit.changeSummary,
-      reviewFocus: [...unit.reviewFocus],
+      reviewFocus,
       spans,
     };
   });
@@ -245,6 +261,50 @@ export function validateReviewRoute(
     ),
     skippedSpans,
   } as unknown as ReviewRoute;
+}
+
+/**
+ * A check anchor must be a changed line that this unit's spans cover, so the
+ * question renders beneath a line the reviewer sees in this unit. Anchors on
+ * context lines are rejected like comment anchors are.
+ */
+function resolveCheck(
+  snapshot: ReviewSnapshot,
+  check: ReviewCheckCandidate,
+  spans: readonly ResolvedSpan[],
+  location: string,
+  issues: ReviewRouteValidationIssue[],
+): ReviewCheck {
+  const question = check.question;
+  if (check.anchor === undefined) return { question };
+  const { path, side, line } = check.anchor;
+  const where = `${JSON.stringify(path)} ${side} ${line}`;
+  const change = findChangeByPath(snapshot, path);
+  if (change === undefined) {
+    issues.push({
+      code: "invalid-check-anchor",
+      message: `${location} anchors ${where}, which is not a changed file in this snapshot.`,
+    });
+    return { question };
+  }
+  const changed = listFileChangedLines(change).some(
+    (candidate) => candidate.side === side && candidate.line === line,
+  );
+  const covered = spans.some(
+    (span) =>
+      span.fileChangeId === change.id && spanCoversLine(span, side, line),
+  );
+  if (!changed || !covered) {
+    issues.push({
+      code: "invalid-check-anchor",
+      message: `${location} anchors ${where}, which is not a changed line inside this unit's spans.`,
+    });
+    return { question };
+  }
+  return {
+    question,
+    anchor: { fileChangeId: change.id, path, side, line },
+  };
 }
 
 function requirementOf(

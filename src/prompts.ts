@@ -247,7 +247,7 @@ export function buildReviewKickoffPrompt(
     "- `whyHere`: one sentence explaining the dependency or reading order.",
     "- `context`: one to three sentences with only the required call path, contract, or invariant.",
     "- `changeSummary`: one or two direct behavior sentences; no patch text.",
-    "- `reviewFocus`: one to three distinct failure questions; do not restate the summary.",
+    "- `reviewFocus`: one to three distinct failure questions; do not restate the summary. Set `anchor` (path, side, line inside this unit's spans) to the changed line each question is about; the walkthrough shows the question beneath that line. Omit `anchor` only for a question about the whole unit.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
     ...(rules === undefined
       ? []

@@ -24,7 +24,7 @@ function unit(
     whyHere: "Fixture ordering.",
     context: "Fixture context.",
     changeSummary: "Fixture change.",
-    reviewFocus: ["Fixture question?"],
+    reviewFocus: [{ question: "Fixture question?" }],
     spans: [...spans],
   };
 }

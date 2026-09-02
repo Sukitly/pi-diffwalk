@@ -194,9 +194,10 @@ test("keeps the kickoff prompt proportional to the number of changed regions", (
 
   assert.equal(delta.lines.length, 400);
   // One contiguous run of 400 lines collapses to a single range, so the prompt
-  // must not grow with the amount of changed source text.
+  // must not grow with the amount of changed source text. The bound tracks the
+  // fixed instruction text plus one small inventory.
   assert.ok(
-    prompt.length < 4000,
+    prompt.length < 4400,
     `Expected a compact prompt, got ${prompt.length} characters.`,
   );
   assert.equal(prompt.includes("added line 200"), false);

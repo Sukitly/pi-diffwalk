@@ -41,7 +41,7 @@ function unit(
     whyHere: "Behavior starts here.",
     context: "entry -> validate",
     changeSummary: "Validates the legacy result.",
-    reviewFocus: ["Is the legacy path still reachable?"],
+    reviewFocus: [{ question: "Is the legacy path still reachable?" }],
     spans: [...spans],
     ...overrides,
   } as ReviewRouteCandidate["units"][number];
@@ -69,7 +69,7 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
         whyHere: "Start here.",
         context: "entry -> validate",
         changeSummary: "Adds validation.",
-        reviewFocus: ["Is it correct?"],
+        reviewFocus: [{ question: "Is it correct?" }],
         spans: [{ path: "src/entry.ts", newStart: 2, newEnd: 3 }],
       },
     ],
@@ -106,7 +106,9 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
       units: [
         {
           ...valid.units[0],
-          reviewFocus: ["One?", "Two?", "Three?", "Four?"],
+          reviewFocus: ["One?", "Two?", "Three?", "Four?"].map((question) => ({
+            question,
+          })),
         },
       ],
     }),
@@ -129,12 +131,94 @@ test("rejects more than three review focus questions", () => {
               span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
               span("src/contract.ts", { new: [2, 2] }),
             ],
-            { reviewFocus: ["One?", "Two?", "Three?", "Four?"] },
+            {
+              reviewFocus: ["One?", "Two?", "Three?", "Four?"].map(
+                (question) => ({ question }),
+              ),
+            },
           ),
         ]),
       ),
     (error: unknown) => codesOf(error).includes("review-focus-limit"),
   );
+});
+
+test("resolves check anchors to changed lines inside the unit", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+
+  const validated = validateReviewRoute(
+    snapshot,
+    delta,
+    route(snapshot, [
+      unit(
+        [
+          span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+          span("src/contract.ts", { new: [2, 2] }),
+        ],
+        {
+          reviewFocus: [
+            {
+              question: "Does validate accept every legacy result?",
+              anchor: { path: "src/entry.ts", side: "new", line: 2 },
+            },
+            {
+              question: "Was the removed call the only caller?",
+              anchor: { path: "src/entry.ts", side: "old", line: 2 },
+            },
+            { question: "Is the whole change backward compatible?" },
+          ],
+        },
+      ),
+    ]),
+  );
+
+  const checks = validated.units[0]?.reviewFocus ?? [];
+  assert.equal(checks.length, 3);
+  assert.equal(checks[0]?.anchor?.side, "new");
+  assert.equal(checks[0]?.anchor?.line, 2);
+  assert.equal(checks[0]?.anchor?.path, "src/entry.ts");
+  assert.equal(checks[0]?.anchor?.fileChangeId, snapshot.changes[0]?.id);
+  assert.equal(checks[1]?.anchor?.side, "old");
+  assert.equal(checks[2]?.anchor, undefined);
+});
+
+test("rejects check anchors outside the unit, on context lines, or in unknown files", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+  const anchored = (anchor: {
+    path: string;
+    side: "old" | "new";
+    line: number;
+  }): ReviewRouteCandidate["units"][number]["reviewFocus"] => [
+    { question: "Is it correct?", anchor },
+  ];
+
+  for (const anchor of [
+    { path: "src/contract.ts", side: "new" as const, line: 2 },
+    { path: "src/entry.ts", side: "new" as const, line: 1 },
+    { path: "src/entry.ts", side: "new" as const, line: 3 },
+    { path: "src/entry.ts", side: "old" as const, line: 3 },
+    { path: "src/missing.ts", side: "new" as const, line: 1 },
+  ]) {
+    assert.throws(
+      () =>
+        validateReviewRoute(
+          snapshot,
+          delta,
+          route(snapshot, [
+            unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })], {
+              reviewFocus: anchored(anchor),
+            }),
+            unit([span("src/contract.ts", { new: [2, 2] })], {
+              title: "Public contract",
+            }),
+          ]),
+        ),
+      (error: unknown) => codesOf(error).includes("invalid-check-anchor"),
+      `expected ${JSON.stringify(anchor)} to be rejected`,
+    );
+  }
 });
 
 test("accepts a route whose units cover every changed line once", () => {
@@ -341,7 +425,7 @@ test("rejects blank metadata and reports every issue at once", () => {
           unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })], {
             title: "  ",
             whyHere: "",
-            reviewFocus: ["  "],
+            reviewFocus: [{ question: "  " }],
           }),
         ]),
       ),
