@@ -4,7 +4,6 @@ import {
   type Component,
   CURSOR_MARKER,
   Editor,
-  type EditorTheme,
   type Focusable,
   Key,
   type KeybindingsManager,
@@ -12,7 +11,6 @@ import {
   type TUI,
   truncateToWidth,
   visibleWidth,
-  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { diffWords } from "diff";
 import { ReviewSnapshotDriftError } from "../git/snapshot.ts";
@@ -58,16 +56,41 @@ import type {
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import {
+  DIFF_GUTTER_WIDTH,
+  diffColor,
+  diffLineText,
+  renderDiffLine,
+} from "../ui/diff-line.ts";
+import {
+  clamp,
+  clampedMargin,
+  clampOffset,
   countNoun,
+  fillLine,
+  fillScreenHeight,
   fitColumns,
   fitLine,
   MEDIUM_HEADER_WIDTH,
   type PrioritizedLineGroup,
   packStatusParts,
   progressBarSegments,
+  renderBackgroundBlock,
   selectHeaderGroups,
   WIDE_HEADER_WIDTH,
+  widthAfterMargin,
 } from "../ui/layout.ts";
+import {
+  displayBareChangePath,
+  displayChangePath,
+  displayPath,
+} from "../ui/paths.ts";
+import {
+  oneTerminalLine,
+  safeText,
+  wrapStyled,
+  wrapWithPrefix,
+} from "../ui/text.ts";
+import { createEditorTheme, type UiTheme } from "../ui/theme.ts";
 
 export interface GuidedReviewUiInput {
   readonly review: InProgressReview;
@@ -94,7 +117,7 @@ export class GuidedReviewUiInvariantError extends Error {
   }
 }
 
-type ReviewUiTheme = Pick<Theme, "fg" | "bg" | "bold" | "inverse">;
+type ReviewUiTheme = UiTheme & Pick<Theme, "inverse">;
 type ReviewUiKeybindings = Pick<KeybindingsManager, "matches">;
 
 type ReviewScreen =
@@ -3261,44 +3284,6 @@ function renderInlineDiffPair(
   return { removed, added };
 }
 
-interface DiffLineMarks {
-  readonly selected?: boolean;
-  readonly hasComment?: boolean;
-  readonly external?: boolean;
-}
-
-/** The marker column shows one state: selection, then comment. */
-function diffLineMarker(marks: DiffLineMarks): string {
-  if (marks.selected) return ">";
-  if (marks.hasComment) return "●";
-  if (marks.external) return "·";
-  return " ";
-}
-
-function renderDiffLine(
-  line: DiffLine,
-  marks: DiffLineMarks,
-  theme: ReviewUiTheme,
-  width: number,
-  inlineText?: string,
-): readonly string[] {
-  const selected = marks.selected === true;
-  const oldLine = line.oldLine === undefined ? "" : String(line.oldLine);
-  const newLine = line.newLine === undefined ? "" : String(line.newLine);
-  const marker = diffLineMarker(marks);
-  const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
-  const raw = theme.fg(
-    diffColor(line),
-    inlineText ?? safeText(diffLineText(line)),
-  );
-  const lines = wrapWithPrefix(prefix, raw, width);
-  if (!selected) return lines;
-  return lines.map((rendered) =>
-    theme.bg("selectedBg", truncateToWidth(rendered, width, "", true)),
-  );
-}
-
-const DIFF_GUTTER_WIDTH = 14;
 const COMMENT_CARD_MAX_WIDTH = 120;
 
 function renderInlineDraftComment(
@@ -3903,19 +3888,6 @@ function modeLine(
     : theme.fg("dim", fitted);
 }
 
-function createEditorTheme(theme: ReviewUiTheme): EditorTheme {
-  return {
-    borderColor: (text) => theme.fg("accent", text),
-    selectList: {
-      selectedPrefix: (text) => theme.fg("accent", text),
-      selectedText: (text) => theme.fg("accent", text),
-      description: (text) => theme.fg("muted", text),
-      scrollInfo: (text) => theme.fg("dim", text),
-      noMatch: (text) => theme.fg("warning", text),
-    },
-  };
-}
-
 /** Unchanged lines rendered around a span so a narrow region is never shown bare. */
 const SPAN_DISPLAY_CONTEXT_RADIUS = 3;
 
@@ -4195,22 +4167,6 @@ function sliceViewport(
   return rows.slice(offset, offset + height);
 }
 
-function wrapWithPrefix(prefix: string, text: string, width: number): string[] {
-  const prefixWidth = visibleWidth(prefix);
-  if (prefixWidth >= width) return wrapStyled(`${prefix}${text}`, width);
-  const wrapped = wrapStyled(text, width - prefixWidth);
-  const continuation = " ".repeat(prefixWidth);
-  return wrapped.map(
-    (line, index) => `${index === 0 ? prefix : continuation}${line}`,
-  );
-}
-
-function wrapStyled(text: string, width: number): string[] {
-  return wrapTextWithAnsi(text, Math.max(1, width)).map((line) =>
-    fitLine(line, width),
-  );
-}
-
 function renderProgressBar(
   reviewed: number,
   total: number,
@@ -4276,107 +4232,6 @@ function walkthroughFooterText(width: number): string {
   );
 }
 
-function fillLine(line: string, width: number): string {
-  const fitted = fitLine(line, width);
-  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
-}
-
-function renderBackgroundBlock(
-  lines: readonly string[],
-  background: Parameters<ReviewUiTheme["bg"]>[0],
-  theme: ReviewUiTheme,
-  width: number,
-  leftMargin: number,
-): readonly string[] {
-  const margin = clampedMargin(width, leftMargin);
-  const backgroundWidth = widthAfterMargin(width, leftMargin);
-  const prefix = " ".repeat(margin);
-  return lines.map(
-    (line) =>
-      `${prefix}${theme.bg(background, fillLine(line, backgroundWidth))}`,
-  );
-}
-
-function clampedMargin(width: number, margin: number): number {
-  return Math.min(Math.max(0, margin), Math.max(0, width - 1));
-}
-
-function widthAfterMargin(width: number, margin: number): number {
-  return Math.max(1, width - clampedMargin(width, margin));
-}
-
-function fillScreenHeight(
-  lines: readonly string[],
-  rows: number,
-): readonly string[] {
-  if (lines.length >= rows) return lines.slice(0, rows);
-  const footer = lines.at(-1) ?? "";
-  return [
-    ...lines.slice(0, -1),
-    ...Array.from({ length: rows - lines.length }, () => ""),
-    footer,
-  ];
-}
-
-function oneTerminalLine(value: string): string {
-  return value.replaceAll("\r", "\\r").replaceAll("\n", "\\n");
-}
-
-function safeText(value: string): string {
-  let result = "";
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (character === "\n") result += "\n";
-    else if (character === "\t") result += "    ";
-    else if (character === "\r") result += "\\r";
-    else if (code < 32 || code === 127) {
-      result += `\\x${code.toString(16).padStart(2, "0")}`;
-    } else if (
-      (code >= 0x80 && code <= 0x9f) ||
-      code === 0x061c ||
-      code === 0x200e ||
-      code === 0x200f ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
-    ) {
-      result += `\\u{${code.toString(16)}}`;
-    } else result += character;
-  }
-  return result;
-}
-
-function displayPath(path: string): string {
-  return safeText(JSON.stringify(path));
-}
-
-function displayChangePath(change: FileChange): string {
-  if (
-    change.oldPath !== undefined &&
-    change.newPath !== undefined &&
-    change.oldPath !== change.newPath
-  ) {
-    return `${displayPath(change.oldPath)} -> ${displayPath(change.newPath)}`;
-  }
-  const path = change.newPath ?? change.oldPath;
-  return path === undefined ? "<unknown path>" : displayPath(path);
-}
-
-function displayBareChangePath(change: FileChange): string {
-  if (
-    change.oldPath !== undefined &&
-    change.newPath !== undefined &&
-    change.oldPath !== change.newPath
-  ) {
-    return `${displayBarePath(change.oldPath)} -> ${displayBarePath(change.newPath)}`;
-  }
-  const path = change.newPath ?? change.oldPath;
-  return path === undefined ? "<unknown path>" : displayBarePath(path);
-}
-
-function displayBarePath(path: string): string {
-  return safeText(JSON.stringify(path).slice(1, -1));
-}
-
 function nonTextChangeDetail(change: FileChange): string {
   if (change.content.type === "text") {
     throw new GuidedReviewUiInvariantError(
@@ -4404,24 +4259,6 @@ function displayCommentPath(comment: ReviewComment): string {
 
 function renderCommentAnchor(comment: ReviewComment): string {
   return `(old ${comment.oldLine ?? "-"}, new ${comment.newLine ?? "-"})`;
-}
-
-function diffColor(line: DiffLine): Parameters<ReviewUiTheme["fg"]>[0] {
-  switch (line.type) {
-    case "added":
-      return "toolDiffAdded";
-    case "removed":
-      return "toolDiffRemoved";
-    case "context":
-      return "toolDiffContext";
-  }
-}
-
-/** Restores the unified diff prefix that the frozen model stores separately. */
-function diffLineText(line: DiffLine): string {
-  const prefix =
-    line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
-  return `${prefix}${line.text}`;
 }
 
 function anchorFromTarget(target: ReviewCommentTarget): ReviewCommentAnchor {
@@ -4459,18 +4296,6 @@ function digitKey(data: string): number | undefined {
     if (matchesKey(data, key)) return value;
   }
   return undefined;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.max(minimum, Math.min(value, maximum));
-}
-
-function clampOffset(
-  offset: number,
-  contentLength: number,
-  viewportHeight: number,
-): number {
-  return clamp(offset, 0, Math.max(0, contentLength - viewportHeight));
 }
 
 function errorMessage(error: unknown): string {

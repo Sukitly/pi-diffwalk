@@ -1,15 +1,12 @@
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   Editor,
-  type EditorTheme,
   type Focusable,
   Key,
   matchesKey,
   type TUI,
   truncateToWidth,
-  visibleWidth,
-  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { REVIEW_COMMENT_CONTEXT_RADIUS } from "../review/comments.ts";
 import {
@@ -22,7 +19,6 @@ import {
   setReviewThreadResolved,
 } from "../review/threads.ts";
 import type {
-  DiffLine,
   FileChange,
   ReviewCommentId,
   ReviewCommentThread,
@@ -31,16 +27,32 @@ import type {
   ReviewThreadBatch,
   ReviewThreadTurnId,
 } from "../review/types.ts";
+import { DIFF_GUTTER_WIDTH, renderDiffLine } from "../ui/diff-line.ts";
 import {
+  clamp,
+  clampedMargin,
+  clampOffset,
   countNoun,
+  fillLine,
+  fillScreenHeight,
   fitColumns,
   fitLine,
   MEDIUM_HEADER_WIDTH,
   type PrioritizedLineGroup,
   packStatusParts,
+  renderBackgroundBlock,
   selectHeaderGroups,
   WIDE_HEADER_WIDTH,
+  widthAfterMargin,
 } from "../ui/layout.ts";
+import { displayBareChangePath } from "../ui/paths.ts";
+import {
+  oneTerminalLine,
+  safeText,
+  wrapStyled,
+  wrapWithPrefix,
+} from "../ui/text.ts";
+import { createEditorTheme, type UiTheme } from "../ui/theme.ts";
 
 export interface ReviewThreadUiInput {
   readonly snapshot: ReviewSnapshot;
@@ -59,7 +71,7 @@ export type ReviewThreadUiResult =
       readonly turnId: ReviewThreadTurnId;
     };
 
-type ThreadUiTheme = Pick<Theme, "fg" | "bg" | "bold">;
+type ThreadUiTheme = UiTheme;
 type ThreadScreen = "threads" | "reply-editor" | "submission";
 
 interface ThreadRegion {
@@ -818,7 +830,7 @@ function renderThreadRows(
     if (rows.length > 0) rows.push({ text: "" });
     rows.push(
       ...wrapStyled(
-        theme.fg("accent", theme.bold(displayChangePath(region.change))),
+        theme.fg("accent", theme.bold(displayBareChangePath(region.change))),
         width,
       ).map((text) => ({ text })),
     );
@@ -843,7 +855,7 @@ function renderThreadRows(
       const line = region.change.content.lines[index];
       if (line === undefined) continue;
       rows.push(
-        ...renderDiffLine(line, theme, width).map((text) => ({ text })),
+        ...renderDiffLine(line, {}, theme, width).map((text) => ({ text })),
       );
       for (const thread of threadsByAnchor.get(index) ?? []) {
         rows.push(
@@ -861,7 +873,6 @@ function renderThreadRows(
   return rows;
 }
 
-const DIFF_GUTTER_WIDTH = 14;
 const THREAD_CARD_MAX_WIDTH = 120;
 
 function renderThread(
@@ -1011,10 +1022,10 @@ function renderReplyContext(
   }
   const anchor = [
     ...wrapStyled(
-      theme.fg("accent", theme.bold(displayChangePath(region.change))),
+      theme.fg("accent", theme.bold(displayBareChangePath(region.change))),
       width,
     ),
-    ...renderDiffLine(anchorLine, theme, width),
+    ...renderDiffLine(anchorLine, {}, theme, width),
   ].slice(0, height);
   const blocks = renderThreadTurnBlocks(thread, batch, false, theme, width).map(
     (block) => block.map((row) => row.text),
@@ -1051,23 +1062,6 @@ function renderReplyContext(
     );
   }
   return [...anchor, ...rows];
-}
-
-function renderDiffLine(
-  line: DiffLine,
-  theme: ThreadUiTheme,
-  width: number,
-): readonly string[] {
-  const oldLine = line.oldLine === undefined ? "" : String(line.oldLine);
-  const newLine = line.newLine === undefined ? "" : String(line.newLine);
-  const prefix = `  ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
-  const marker =
-    line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
-  return wrapWithPrefix(
-    prefix,
-    theme.fg(diffColor(line), `${marker}${safeText(line.text)}`),
-    width,
-  );
 }
 
 interface ThreadHeadlineOptions {
@@ -1120,19 +1114,6 @@ function renderMode(
     : theme.fg("dim", fitted);
 }
 
-function createEditorTheme(theme: ThreadUiTheme): EditorTheme {
-  return {
-    borderColor: (text) => theme.fg("accent", text),
-    selectList: {
-      selectedPrefix: (text) => theme.fg("accent", text),
-      selectedText: (text) => theme.fg("accent", text),
-      description: (text) => theme.fg("muted", text),
-      scrollInfo: (text) => theme.fg("dim", text),
-      noMatch: (text) => theme.fg("warning", text),
-    },
-  };
-}
-
 function ensureThreadVisible(
   rows: readonly RenderedThreadRow[],
   commentId: ReviewCommentId | undefined,
@@ -1157,33 +1138,6 @@ function ensureThreadVisible(
   return clampOffset(next, rows.length, viewportHeight);
 }
 
-function displayChangePath(change: FileChange): string {
-  if (
-    change.oldPath !== undefined &&
-    change.newPath !== undefined &&
-    change.oldPath !== change.newPath
-  ) {
-    return `${displayBarePath(change.oldPath)} -> ${displayBarePath(change.newPath)}`;
-  }
-  const path = change.newPath ?? change.oldPath;
-  return path === undefined ? "<unknown path>" : displayBarePath(path);
-}
-
-function displayBarePath(path: string): string {
-  return safeText(JSON.stringify(path).slice(1, -1));
-}
-
-function diffColor(line: DiffLine): Parameters<ThreadUiTheme["fg"]>[0] {
-  switch (line.type) {
-    case "added":
-      return "toolDiffAdded";
-    case "removed":
-      return "toolDiffRemoved";
-    case "context":
-      return "toolDiffContext";
-  }
-}
-
 function editorViewport(
   lines: readonly string[],
   height: number,
@@ -1194,22 +1148,6 @@ function editorViewport(
   if (content.length === 0) return lines.slice(0, height);
   if (height === 1) return content.slice(-1);
   return [...content.slice(-(height - 1)), lines.at(-1) ?? ""];
-}
-
-function wrapWithPrefix(prefix: string, text: string, width: number): string[] {
-  const prefixWidth = visibleWidth(prefix);
-  if (prefixWidth >= width) return wrapStyled(`${prefix}${text}`, width);
-  const wrapped = wrapStyled(text, width - prefixWidth);
-  const continuation = " ".repeat(prefixWidth);
-  return wrapped.map(
-    (line, index) => `${index === 0 ? prefix : continuation}${line}`,
-  );
-}
-
-function wrapStyled(text: string, width: number): string[] {
-  return wrapTextWithAnsi(text, Math.max(1, width)).map((line) =>
-    fitLine(line, width),
-  );
 }
 
 function renderScreenHeader(
@@ -1239,85 +1177,4 @@ function renderScreenHeader(
     rows,
     2,
   );
-}
-
-function fillLine(line: string, width: number): string {
-  const fitted = fitLine(line, width);
-  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
-}
-
-function renderBackgroundBlock(
-  lines: readonly string[],
-  background: Parameters<ThreadUiTheme["bg"]>[0],
-  theme: ThreadUiTheme,
-  width: number,
-  leftMargin: number,
-): readonly string[] {
-  const margin = clampedMargin(width, leftMargin);
-  const backgroundWidth = widthAfterMargin(width, leftMargin);
-  const prefix = " ".repeat(margin);
-  return lines.map(
-    (line) =>
-      `${prefix}${theme.bg(background, fillLine(line, backgroundWidth))}`,
-  );
-}
-
-function clampedMargin(width: number, margin: number): number {
-  return Math.min(Math.max(0, margin), Math.max(0, width - 1));
-}
-
-function widthAfterMargin(width: number, margin: number): number {
-  return Math.max(1, width - clampedMargin(width, margin));
-}
-
-function fillScreenHeight(
-  lines: readonly string[],
-  rows: number,
-): readonly string[] {
-  if (lines.length >= rows) return lines.slice(0, rows);
-  const footer = lines.at(-1) ?? "";
-  return [
-    ...lines.slice(0, -1),
-    ...Array.from({ length: rows - lines.length }, () => ""),
-    footer,
-  ];
-}
-
-function oneTerminalLine(value: string): string {
-  return value.replaceAll("\r", "\\r").replaceAll("\n", "\\n");
-}
-
-function safeText(value: string): string {
-  let result = "";
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (character === "\n") result += "\n";
-    else if (character === "\t") result += "    ";
-    else if (character === "\r") result += "\\r";
-    else if (code < 32 || code === 127) {
-      result += `\\x${code.toString(16).padStart(2, "0")}`;
-    } else if (
-      (code >= 0x80 && code <= 0x9f) ||
-      code === 0x061c ||
-      code === 0x200e ||
-      code === 0x200f ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
-    ) {
-      result += `\\u{${code.toString(16)}}`;
-    } else result += character;
-  }
-  return result;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
-}
-
-function clampOffset(
-  offset: number,
-  content: number,
-  viewport: number,
-): number {
-  return clamp(offset, 0, Math.max(0, content - Math.max(0, viewport)));
 }

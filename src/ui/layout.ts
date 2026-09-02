@@ -1,4 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { ThemeBackground, UiTheme } from "./theme.ts";
 
 export const WIDE_HEADER_WIDTH = 88;
 export const MEDIUM_HEADER_WIDTH = 48;
@@ -18,6 +19,12 @@ export interface ProgressBarSegments {
 
 export function fitLine(line: string, width: number): string {
   return truncateToWidth(line, Math.max(1, width), "");
+}
+
+/** Pads a fitted line with spaces so a background color covers the full width. */
+export function fillLine(line: string, width: number): string {
+  const fitted = fitLine(line, width);
+  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
 }
 
 export function fitColumns(left: string, right: string, width: number): string {
@@ -115,4 +122,58 @@ export function progressBarSegments(
 
 export function countNoun(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+export function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(value, maximum));
+}
+
+export function clampOffset(
+  offset: number,
+  contentLength: number,
+  viewportHeight: number,
+): number {
+  return clamp(
+    offset,
+    0,
+    Math.max(0, contentLength - Math.max(0, viewportHeight)),
+  );
+}
+
+export function clampedMargin(width: number, margin: number): number {
+  return Math.min(Math.max(0, margin), Math.max(0, width - 1));
+}
+
+export function widthAfterMargin(width: number, margin: number): number {
+  return Math.max(1, width - clampedMargin(width, margin));
+}
+
+/** Pads a screen to the terminal height while keeping the last line as the footer. */
+export function fillScreenHeight(
+  lines: readonly string[],
+  rows: number,
+): readonly string[] {
+  if (lines.length >= rows) return lines.slice(0, rows);
+  const footer = lines.at(-1) ?? "";
+  return [
+    ...lines.slice(0, -1),
+    ...Array.from({ length: rows - lines.length }, () => ""),
+    footer,
+  ];
+}
+
+export function renderBackgroundBlock(
+  lines: readonly string[],
+  background: ThemeBackground,
+  theme: UiTheme,
+  width: number,
+  leftMargin: number,
+): readonly string[] {
+  const margin = clampedMargin(width, leftMargin);
+  const backgroundWidth = widthAfterMargin(width, leftMargin);
+  const prefix = " ".repeat(margin);
+  return lines.map(
+    (line) =>
+      `${prefix}${theme.bg(background, fillLine(line, backgroundWidth))}`,
+  );
 }
