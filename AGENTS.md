@@ -25,6 +25,20 @@ DiffWalk is a pi extension that lets an agent guide a human through a code revie
 
 Evaluate every product and implementation decision against that purpose. Do not turn DiffWalk into an autonomous approval bot or a generic diff viewer.
 
+## Module Layout
+
+| Directory | Contents |
+|---|---|
+| `src/git/` | Git invocation and revision resolution (`runner.ts`), pure patch parsing (`patch.ts`), frozen file reconstruction (`content.ts`), snapshot capture and drift checks (`snapshot.ts`) |
+| `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation and advisory |
+| `src/extension/` | pi integration: `DiffWalkSession` state, the `/diffwalk` command, the two tools, model-facing prompts and results, TUI message renderers, rules loading |
+| `src/ui/` | Rendering helpers shared by both UIs: theme, text escaping and wrapping, layout, path display, diff lines |
+| `src/review-ui/` | Guided walkthrough: `component.ts` holds the screen state machine; view model, diff view, viewport, and per-screen rendering are separate modules |
+| `src/thread-ui/` | Comment thread component and its rendering |
+| `test/` | Mirrors `src/`. Shared domain fixtures live in `test/support/`; `test/review-ui/harness.ts` and `test/extension/harness.ts` hold the fake terminal and fake pi used by their directories |
+
+Keep new code in the directory that owns the concern. Domain logic in `src/review/` must not import from `src/ui/`, `src/review-ui/`, `src/thread-ui/`, or `src/extension/`.
+
 ## Setup and Commands
 
 ```bash
