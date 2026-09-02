@@ -51,7 +51,7 @@ import type {
   ReviewThreadBatch,
   SnapshotId,
 } from "../../src/review/types.ts";
-import type { ReviewThreadUiResult } from "../../src/thread-ui/component.ts";
+import type { ReviewThreadUiResult } from "../../src/thread-ui/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 
 type GuidedToolDefinition = ToolDefinition<

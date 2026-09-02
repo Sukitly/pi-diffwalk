@@ -1,4 +1,3 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   Editor,
@@ -6,9 +5,7 @@ import {
   Key,
   matchesKey,
   type TUI,
-  truncateToWidth,
 } from "@earendil-works/pi-tui";
-import { REVIEW_COMMENT_CONTEXT_RADIUS } from "../review/comments.ts";
 import {
   appendReviewThreadTurn,
   clearReviewThreadDraft,
@@ -19,18 +16,14 @@ import {
   setReviewThreadResolved,
 } from "../review/threads.ts";
 import type {
-  FileChange,
   ReviewCommentId,
   ReviewCommentThread,
   ReviewSnapshot,
   ReviewSubmissionMode,
   ReviewThreadBatch,
-  ReviewThreadTurnId,
 } from "../review/types.ts";
-import { DIFF_GUTTER_WIDTH, renderDiffLine } from "../ui/diff-line.ts";
 import {
   clamp,
-  clampedMargin,
   clampOffset,
   countNoun,
   fillLine,
@@ -40,94 +33,39 @@ import {
   MEDIUM_HEADER_WIDTH,
   type PrioritizedLineGroup,
   packStatusParts,
-  renderBackgroundBlock,
   selectHeaderGroups,
   WIDE_HEADER_WIDTH,
-  widthAfterMargin,
 } from "../ui/layout.ts";
-import { displayBareChangePath } from "../ui/paths.ts";
 import {
   oneTerminalLine,
   safeText,
   wrapStyled,
   wrapWithPrefix,
 } from "../ui/text.ts";
-import { createEditorTheme, type UiTheme } from "../ui/theme.ts";
-
-export interface ReviewThreadUiInput {
-  readonly snapshot: ReviewSnapshot;
-  readonly batch: ReviewThreadBatch;
-  readonly onBatchChange: (batch: ReviewThreadBatch) => void;
-}
-
-export type ReviewThreadUiResult =
-  | {
-      readonly status: "closed";
-      readonly batch: ReviewThreadBatch;
-    }
-  | {
-      readonly status: "follow-up-submitted";
-      readonly batch: ReviewThreadBatch;
-      readonly turnId: ReviewThreadTurnId;
-    };
-
-type ThreadUiTheme = UiTheme;
-type ThreadScreen = "threads" | "reply-editor" | "submission";
-
-interface ThreadRegion {
-  readonly change: FileChange;
-  start: number;
-  end: number;
-  readonly threads: ReviewCommentThread[];
-}
-
-interface RenderedThreadRow {
-  readonly text: string;
-  readonly commentId?: ReviewCommentId;
-}
+import { createEditorTheme } from "../ui/theme.ts";
+import { assertBatchMatchesSnapshot } from "./index.ts";
+import { buildThreadRegions, ensureThreadVisible } from "./regions.ts";
+import {
+  editorViewport,
+  renderMode,
+  renderReplyContext,
+  renderScreenHeader,
+  renderThreadHeadline,
+  renderThreadRows,
+} from "./render.ts";
+import {
+  ReviewThreadUiError,
+  type ReviewThreadUiInput,
+  type ReviewThreadUiResult,
+  type ThreadRegion,
+  type ThreadScreen,
+  type ThreadUiTheme,
+} from "./types.ts";
 
 interface ReviewThreadComponentOptions extends ReviewThreadUiInput {
   readonly tui: TUI;
   readonly theme: ThreadUiTheme;
   readonly onClose: (result: ReviewThreadUiResult) => void;
-}
-
-export class ReviewThreadUiError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ReviewThreadUiError";
-  }
-}
-
-export async function openReviewThreads(
-  ctx: Pick<ExtensionContext, "mode" | "ui">,
-  input: ReviewThreadUiInput,
-): Promise<ReviewThreadUiResult> {
-  if (ctx.mode !== "tui") {
-    throw new ReviewThreadUiError(
-      `DiffWalk comment threads require interactive TUI mode; current mode is ${ctx.mode}.`,
-    );
-  }
-  assertBatchMatchesSnapshot(input.batch, input.snapshot);
-
-  return ctx.ui.custom<ReviewThreadUiResult>(
-    (tui, theme, _keybindings, done) =>
-      new ReviewThreadComponent({
-        ...input,
-        tui,
-        theme,
-        onClose: done,
-      }),
-    {
-      overlay: true,
-      overlayOptions: {
-        width: "100%",
-        maxHeight: "100%",
-        anchor: "top-left",
-        margin: 0,
-      },
-    },
-  );
 }
 
 export class ReviewThreadComponent implements Component, Focusable {
@@ -743,438 +681,4 @@ export class ReviewThreadComponent implements Component, Focusable {
     this.clearCache();
     this.tui.requestRender();
   }
-}
-
-function assertBatchMatchesSnapshot(
-  batch: ReviewThreadBatch,
-  snapshot: ReviewSnapshot,
-): void {
-  if (batch.snapshotId !== snapshot.id) {
-    throw new ReviewThreadUiError(
-      `Thread batch ${batch.id} references snapshot ${batch.snapshotId}, not ${snapshot.id}.`,
-    );
-  }
-  if (batch.threads.length === 0 || batch.turns.length === 0) {
-    throw new ReviewThreadUiError(`Thread batch ${batch.id} is empty.`);
-  }
-}
-
-function buildThreadRegions(
-  snapshot: ReviewSnapshot,
-  batch: ReviewThreadBatch,
-): readonly ThreadRegion[] {
-  const changes = new Map(
-    snapshot.changes.map((change) => [change.id, change]),
-  );
-  const regions: ThreadRegion[] = [];
-
-  for (const thread of batch.threads) {
-    const change = changes.get(thread.anchor.fileChangeId);
-    if (change === undefined) {
-      throw new ReviewThreadUiError(
-        `Thread ${thread.id} references missing file change ${thread.anchor.fileChangeId}.`,
-      );
-    }
-    if (change.content.type !== "text") {
-      throw new ReviewThreadUiError(
-        `Thread ${thread.id} references non-text file change ${change.id}.`,
-      );
-    }
-    const anchorIndex = change.content.lines.findIndex((line) =>
-      thread.anchor.side === "new"
-        ? line.newLine === thread.anchor.line && line.type === "added"
-        : line.oldLine === thread.anchor.line && line.type === "removed",
-    );
-    if (anchorIndex < 0) {
-      throw new ReviewThreadUiError(
-        `Thread ${thread.id} anchor is missing from frozen snapshot ${snapshot.id}.`,
-      );
-    }
-    const start = Math.max(0, anchorIndex - REVIEW_COMMENT_CONTEXT_RADIUS);
-    const end = Math.min(
-      change.content.lines.length - 1,
-      anchorIndex + REVIEW_COMMENT_CONTEXT_RADIUS,
-    );
-    const previous = regions.at(-1);
-    if (
-      previous !== undefined &&
-      previous.change.id === change.id &&
-      start <= previous.end + 1
-    ) {
-      previous.end = Math.max(previous.end, end);
-      previous.threads.push(thread);
-    } else {
-      regions.push({ change, start, end, threads: [thread] });
-    }
-  }
-  return regions;
-}
-
-function renderThreadRows(
-  regions: readonly ThreadRegion[],
-  batch: ReviewThreadBatch,
-  selectedId: ReviewCommentId | undefined,
-  hiddenResolvedThreadIds: ReadonlySet<ReviewCommentId>,
-  theme: ThreadUiTheme,
-  width: number,
-): readonly RenderedThreadRow[] {
-  const currentThreads = new Map(
-    batch.threads.map((thread) => [thread.id, thread]),
-  );
-  const rows: RenderedThreadRow[] = [];
-  for (const region of regions) {
-    const visibleRegionThreads = region.threads.filter(
-      (thread) => !hiddenResolvedThreadIds.has(thread.id),
-    );
-    if (visibleRegionThreads.length === 0) continue;
-    if (rows.length > 0) rows.push({ text: "" });
-    rows.push(
-      ...wrapStyled(
-        theme.fg("accent", theme.bold(displayBareChangePath(region.change))),
-        width,
-      ).map((text) => ({ text })),
-    );
-    if (region.change.content.type !== "text") {
-      throw new ReviewThreadUiError(
-        `Thread region references non-text file change ${region.change.id}.`,
-      );
-    }
-    const threadsByAnchor = new Map<number, ReviewCommentThread[]>();
-    for (const original of visibleRegionThreads) {
-      const thread = currentThreads.get(original.id) ?? original;
-      const anchorIndex = region.change.content.lines.findIndex((line) =>
-        thread.anchor.side === "new"
-          ? line.newLine === thread.anchor.line && line.type === "added"
-          : line.oldLine === thread.anchor.line && line.type === "removed",
-      );
-      const list = threadsByAnchor.get(anchorIndex) ?? [];
-      list.push(thread);
-      threadsByAnchor.set(anchorIndex, list);
-    }
-    for (let index = region.start; index <= region.end; index += 1) {
-      const line = region.change.content.lines[index];
-      if (line === undefined) continue;
-      rows.push(
-        ...renderDiffLine(line, {}, theme, width).map((text) => ({ text })),
-      );
-      for (const thread of threadsByAnchor.get(index) ?? []) {
-        rows.push(
-          ...renderThread(
-            thread,
-            batch,
-            thread.id === selectedId,
-            theme,
-            width,
-          ),
-        );
-      }
-    }
-  }
-  return rows;
-}
-
-const THREAD_CARD_MAX_WIDTH = 120;
-
-function renderThread(
-  thread: ReviewCommentThread,
-  batch: ReviewThreadBatch,
-  selected: boolean,
-  theme: ThreadUiTheme,
-  width: number,
-): readonly RenderedThreadRow[] {
-  return [
-    ...renderThreadTurnBlocks(thread, batch, selected, theme, width).flat(),
-    ...renderThreadDraftBlock(thread, theme, width),
-  ];
-}
-
-/** One block per answered or pending turn, each ending in a blank row. */
-function renderThreadTurnBlocks(
-  thread: ReviewCommentThread,
-  batch: ReviewThreadBatch,
-  selected: boolean,
-  theme: ThreadUiTheme,
-  width: number,
-): readonly (readonly RenderedThreadRow[])[] {
-  const blocks: RenderedThreadRow[][] = [];
-  const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
-  const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
-  let first = true;
-
-  for (const turn of batch.turns) {
-    const item = turn.items.find(
-      (candidate) => candidate.threadId === thread.id,
-    );
-    if (item === undefined) continue;
-    const selectionMarker = selected && first ? "▌" : " ";
-    const turnLabel = `Turn ${turn.sequence}`;
-    const reviewerMetadata = renderThreadHeadline(
-      {
-        marker: selectionMarker,
-        id: thread.id,
-        ...(first ? { resolved: thread.resolved } : {}),
-        turnLabel,
-      },
-      theme,
-    );
-    const reviewerRows = [
-      ...wrapStyled(reviewerMetadata, contentWidth),
-      theme.fg("muted", theme.bold("  You")),
-      ...wrapWithPrefix(
-        "  ",
-        theme.fg("text", safeText(item.reviewerBody)),
-        contentWidth,
-      ),
-    ];
-    const response = item.agentResponse?.body ?? "Awaiting Agent response.";
-    const agentRows = [
-      theme.fg("muted", theme.bold("  Agent")),
-      ...wrapWithPrefix(
-        "  ",
-        theme.fg(
-          item.agentResponse === undefined ? "warning" : "text",
-          safeText(response),
-        ),
-        contentWidth,
-      ),
-    ];
-    blocks.push([
-      ...renderBackgroundBlock(
-        reviewerRows,
-        "userMessageBg",
-        theme,
-        width,
-        DIFF_GUTTER_WIDTH,
-      ).map((text) => ({ text, commentId: thread.id })),
-      ...renderBackgroundBlock(
-        agentRows,
-        "customMessageBg",
-        theme,
-        width,
-        DIFF_GUTTER_WIDTH,
-      ).map((text) => ({ text, commentId: thread.id })),
-      { text: "", commentId: thread.id },
-    ]);
-    first = false;
-  }
-  return blocks;
-}
-
-function renderThreadDraftBlock(
-  thread: ReviewCommentThread,
-  theme: ThreadUiTheme,
-  width: number,
-): readonly RenderedThreadRow[] {
-  if (thread.draftReply === undefined) return [];
-  const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
-  const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
-  const draftRows = [
-    ...wrapStyled(
-      theme.fg("accent", theme.bold("  Draft follow-up")),
-      contentWidth,
-    ),
-    ...wrapWithPrefix(
-      "  ",
-      theme.fg("text", safeText(thread.draftReply)),
-      contentWidth,
-    ),
-  ];
-  return [
-    ...renderBackgroundBlock(
-      draftRows,
-      "userMessageBg",
-      theme,
-      width,
-      DIFF_GUTTER_WIDTH,
-    ).map((text) => ({ text, commentId: thread.id })),
-    { text: "", commentId: thread.id },
-  ];
-}
-
-/**
- * Rows shown above the reply editor: the anchored diff line and the
- * conversation being answered. Earlier turns are dropped before the latest
- * turn is cut, so the reply is always written against the newest response.
- */
-function renderReplyContext(
-  region: ThreadRegion,
-  thread: ReviewCommentThread,
-  batch: ReviewThreadBatch,
-  height: number,
-  theme: ThreadUiTheme,
-  width: number,
-): readonly string[] {
-  if (height <= 0) return [];
-  if (region.change.content.type !== "text") {
-    throw new ReviewThreadUiError(
-      `Thread ${thread.id} references non-text file change ${region.change.id}.`,
-    );
-  }
-  const anchorLine = region.change.content.lines.find((line) =>
-    thread.anchor.side === "new"
-      ? line.newLine === thread.anchor.line && line.type === "added"
-      : line.oldLine === thread.anchor.line && line.type === "removed",
-  );
-  if (anchorLine === undefined) {
-    throw new ReviewThreadUiError(
-      `Thread ${thread.id} anchor is missing from its frozen file change.`,
-    );
-  }
-  const anchor = [
-    ...wrapStyled(
-      theme.fg("accent", theme.bold(displayBareChangePath(region.change))),
-      width,
-    ),
-    ...renderDiffLine(anchorLine, {}, theme, width),
-  ].slice(0, height);
-  const blocks = renderThreadTurnBlocks(thread, batch, false, theme, width).map(
-    (block) => block.map((row) => row.text),
-  );
-  let remaining = height - anchor.length;
-  const kept: string[][] = [];
-  for (const block of [...blocks].reverse()) {
-    if (block.length > remaining) break;
-    kept.unshift(block);
-    remaining -= block.length;
-  }
-  if (kept.length === 0) {
-    const latest = blocks.at(-1) ?? [];
-    const visible = latest.slice(0, remaining);
-    if (visible.length > 0 && visible.length < latest.length) {
-      visible[visible.length - 1] = fitLine(
-        `${" ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH))}${theme.fg("dim", "…")}`,
-        width,
-      );
-    }
-    return [...anchor, ...visible];
-  }
-  const dropped = blocks.length - kept.length;
-  const rows = kept.flat();
-  if (dropped > 0 && remaining >= 1) {
-    rows.unshift(
-      fitLine(
-        `${" ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH))}${theme.fg(
-          "dim",
-          `… ${countNoun(dropped, "earlier turn")}`,
-        )}`,
-        width,
-      ),
-    );
-  }
-  return [...anchor, ...rows];
-}
-
-interface ThreadHeadlineOptions {
-  readonly marker?: string;
-  readonly id: ReviewCommentId;
-  readonly resolved?: boolean;
-  readonly turnLabel?: string;
-}
-
-function renderThreadHeadline(
-  options: ThreadHeadlineOptions,
-  theme: ThreadUiTheme,
-): string {
-  const marker =
-    options.marker === undefined
-      ? ""
-      : `${theme.fg("accent", theme.bold(options.marker))} `;
-  const segments = [
-    `${marker}${theme.fg("text", theme.bold(options.id))}`,
-    ...(options.resolved === undefined
-      ? []
-      : [renderThreadStatus(options.resolved, theme)]),
-    ...(options.turnLabel === undefined
-      ? []
-      : [theme.fg("accent", theme.bold(options.turnLabel))]),
-  ];
-  return segments.join(theme.fg("dim", " · "));
-}
-
-function renderThreadStatus(resolved: boolean, theme: ThreadUiTheme): string {
-  return theme.fg(
-    resolved ? "success" : "accent",
-    theme.bold(resolved ? "✓ Resolved" : "○ Open"),
-  );
-}
-
-function renderMode(
-  value: ReviewSubmissionMode,
-  title: string,
-  description: string,
-  selectedMode: ReviewSubmissionMode,
-  theme: ThreadUiTheme,
-  width: number,
-): string {
-  const selected = value === selectedMode;
-  const text = `${selected ? ">" : " "} ${title}: ${description}`;
-  const fitted = truncateToWidth(safeText(text), width, "", true);
-  return selected
-    ? theme.bg("selectedBg", theme.fg("text", fitted))
-    : theme.fg("dim", fitted);
-}
-
-function ensureThreadVisible(
-  rows: readonly RenderedThreadRow[],
-  commentId: ReviewCommentId | undefined,
-  offset: number,
-  viewportHeight: number,
-): number {
-  if (commentId === undefined || viewportHeight <= 0) return 0;
-  const first = rows.findIndex((row) => row.commentId === commentId);
-  let last = -1;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (rows[index]?.commentId === commentId) {
-      last = index;
-      break;
-    }
-  }
-  if (first < 0) return clampOffset(offset, rows.length, viewportHeight);
-  let next = clampOffset(offset, rows.length, viewportHeight);
-  if (last - first + 1 > viewportHeight) {
-    if (first >= next + viewportHeight || last < next) next = first;
-  } else if (first < next) next = first;
-  else if (last >= next + viewportHeight) next = last - viewportHeight + 1;
-  return clampOffset(next, rows.length, viewportHeight);
-}
-
-function editorViewport(
-  lines: readonly string[],
-  height: number,
-): readonly string[] {
-  if (height <= 0) return [];
-  if (lines.length <= height) return lines;
-  const content = lines.slice(0, -1);
-  if (content.length === 0) return lines.slice(0, height);
-  if (height === 1) return content.slice(-1);
-  return [...content.slice(-(height - 1)), lines.at(-1) ?? ""];
-}
-
-function renderScreenHeader(
-  screen: string,
-  title: string,
-  right: string | undefined,
-  theme: ThreadUiTheme,
-  width: number,
-  rows: number,
-): readonly string[] {
-  const brand = theme.fg("accent", theme.bold(`DiffWalk / ${screen}`));
-  return selectHeaderGroups(
-    [
-      {
-        lines: [
-          right === undefined
-            ? fitLine(brand, width)
-            : fitColumns(brand, theme.fg("muted", right), width),
-        ],
-        priority: 90,
-      },
-      {
-        lines: [fitLine(theme.fg("text", theme.bold(title)), width)],
-        priority: 80,
-      },
-    ],
-    rows,
-    2,
-  );
 }

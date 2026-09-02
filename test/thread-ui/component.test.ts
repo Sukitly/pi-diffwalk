@@ -23,11 +23,11 @@ import type {
   ReviewThreadBatch,
   ReviewThreadTurnId,
 } from "../../src/review/types.ts";
+import { ReviewThreadComponent } from "../../src/thread-ui/component.ts";
 import {
-  ReviewThreadComponent,
   ReviewThreadUiError,
   type ReviewThreadUiResult,
-} from "../../src/thread-ui/component.ts";
+} from "../../src/thread-ui/types.ts";
 import {
   fileChangeId,
   makeSnapshot,

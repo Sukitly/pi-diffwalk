@@ -80,10 +80,8 @@ import {
   type SubmittedGuidedReviewResult,
 } from "./review/types.ts";
 import { openGuidedReview } from "./review-ui/index.ts";
-import {
-  openReviewThreads,
-  type ReviewThreadUiResult,
-} from "./thread-ui/component.ts";
+import { openReviewThreads } from "./thread-ui/index.ts";
+import type { ReviewThreadUiResult } from "./thread-ui/types.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
 const DISCARD_OPTION = "--discard";
