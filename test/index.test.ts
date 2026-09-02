@@ -1472,7 +1472,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
     toolResultWithoutDetails(advisoryMessage),
     true,
   );
-  assert.match(renderedAdvisory, /^Review needs attention/);
+  assert.doesNotMatch(renderedAdvisory, /needs attention/);
   assert.match(renderedAdvisory, /advisory signals, not validation failures/);
   assert.doesNotMatch(
     renderedAdvisory,
@@ -1523,7 +1523,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
     toolResultWithoutDetails(driftMessage),
     true,
   );
-  assert.match(renderedDrift, /^Review needs attention/);
+  assert.doesNotMatch(renderedDrift, /needs attention/);
   assert.match(renderedDrift, /Run \/diffwalk again before opening DiffWalk/);
   assert.doesNotMatch(renderedDrift, /snapshotId|submissionMode|instruction/);
   assert.deepEqual(harness.openedSnapshots, []);
