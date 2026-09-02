@@ -2177,6 +2177,24 @@ test("continues the first pending section before submission", async () => {
   assert.equal(harness.completedResults.length, 1);
 });
 
+test("ignores mode keys while the summary hides the mode selector", () => {
+  const harness = createHarness(100, 40);
+  press(harness.component, "s");
+
+  const output = renderText(harness);
+  assert.match(output, /Review incomplete/);
+  assert.doesNotMatch(output, /Discuss first|Apply change requests/);
+
+  press(harness.component, "\t", "\u001b[C", "l");
+  assert.equal(harness.state.review.submissionMode, "discuss-first");
+
+  press(harness.component, "\r", "n", "n");
+  assert.match(renderText(harness), /> Discuss first/);
+  press(harness.component, "\t");
+  assert.match(renderText(harness), /> Apply change requests/);
+  assert.deepEqual(harness.submittedModes, []);
+});
+
 test("shows the complete batch and selected submission mode", async () => {
   const harness = createHarness(100, 40);
   press(harness.component, "c", "C", "h", "e", "c", "k", "\r", "n", "n");
