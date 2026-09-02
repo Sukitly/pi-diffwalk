@@ -282,36 +282,53 @@ export class ReviewThreadComponent implements Component, Focusable {
       ),
     ];
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
-    const metadata = [
-      ...wrapStyled(
-        this.theme.fg("muted", `Frozen snapshot ${this.batch.snapshotId}`),
-        width,
-      ),
-      ...(thread === undefined
-        ? []
-        : wrapStyled(
-            this.theme.fg(
-              "muted",
-              `${displayBarePath(thread.anchor.filePath)} ${thread.anchor.side} line ${thread.anchor.line}`,
-            ),
-            width,
-          )),
-      ...(this.replyInputError === undefined
+    const editorLines = this.editor.render(width);
+    const minimumEditorHeight = Math.min(
+      Math.max(1, editorLines.length),
+      Math.max(1, bodyHeight - 2),
+      3,
+    );
+    const errorLines =
+      this.replyInputError === undefined
         ? []
         : wrapStyled(
             this.theme.fg("warning", safeText(this.replyInputError)),
             width,
-          )),
-    ];
-    const editorLines = this.editor.render(width);
-    const metadataHeight = Math.max(
-      0,
-      bodyHeight - Math.min(1, editorLines.length),
+          );
+    const errorHeight = Math.min(
+      errorLines.length,
+      Math.max(0, bodyHeight - minimumEditorHeight),
     );
-    const body = metadata.slice(0, metadataHeight);
-    const remaining = Math.max(0, bodyHeight - body.length);
-    body.push(...editorViewport(editorLines, remaining));
-    return [...header, ...body.slice(0, bodyHeight), ...footer];
+    const region =
+      thread === undefined
+        ? undefined
+        : this.regions.find((candidate) =>
+            candidate.threads.some((entry) => entry.id === thread.id),
+          );
+    const context =
+      thread === undefined || region === undefined
+        ? []
+        : renderReplyContext(
+            region,
+            thread,
+            this.batch,
+            Math.max(0, bodyHeight - minimumEditorHeight - errorHeight - 1),
+            this.theme,
+            width,
+          );
+    const separator = context.length > 0 && context.at(-1) !== "" ? [""] : [];
+    const editorHeight = Math.max(
+      0,
+      bodyHeight - context.length - separator.length - errorHeight,
+    );
+    return [
+      ...header,
+      ...context,
+      ...separator,
+      ...errorLines.slice(0, errorHeight),
+      ...editorViewport(editorLines, editorHeight),
+      ...footer,
+    ];
   }
 
   private renderSubmission(width: number, rows: number): readonly string[] {
@@ -854,7 +871,21 @@ function renderThread(
   theme: ThreadUiTheme,
   width: number,
 ): readonly RenderedThreadRow[] {
-  const rows: RenderedThreadRow[] = [];
+  return [
+    ...renderThreadTurnBlocks(thread, batch, selected, theme, width).flat(),
+    ...renderThreadDraftBlock(thread, theme, width),
+  ];
+}
+
+/** One block per answered or pending turn, each ending in a blank row. */
+function renderThreadTurnBlocks(
+  thread: ReviewCommentThread,
+  batch: ReviewThreadBatch,
+  selected: boolean,
+  theme: ThreadUiTheme,
+  width: number,
+): readonly (readonly RenderedThreadRow[])[] {
+  const blocks: RenderedThreadRow[][] = [];
   const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
   const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
   let first = true;
@@ -896,7 +927,7 @@ function renderThread(
         contentWidth,
       ),
     ];
-    rows.push(
+    blocks.push([
       ...renderBackgroundBlock(
         reviewerRows,
         "userMessageBg",
@@ -912,34 +943,114 @@ function renderThread(
         DIFF_GUTTER_WIDTH,
       ).map((text) => ({ text, commentId: thread.id })),
       { text: "", commentId: thread.id },
-    );
+    ]);
     first = false;
   }
+  return blocks;
+}
 
-  if (thread.draftReply !== undefined) {
-    const draftRows = [
-      ...wrapStyled(
-        theme.fg("accent", theme.bold("  Draft follow-up")),
-        contentWidth,
-      ),
-      ...wrapWithPrefix(
-        "  ",
-        theme.fg("text", safeText(thread.draftReply)),
-        contentWidth,
-      ),
-    ];
-    rows.push(
-      ...renderBackgroundBlock(
-        draftRows,
-        "userMessageBg",
-        theme,
-        width,
-        DIFF_GUTTER_WIDTH,
-      ).map((text) => ({ text, commentId: thread.id })),
-      { text: "", commentId: thread.id },
+function renderThreadDraftBlock(
+  thread: ReviewCommentThread,
+  theme: ThreadUiTheme,
+  width: number,
+): readonly RenderedThreadRow[] {
+  if (thread.draftReply === undefined) return [];
+  const cardWidth = widthAfterMargin(width, DIFF_GUTTER_WIDTH);
+  const contentWidth = Math.min(cardWidth, THREAD_CARD_MAX_WIDTH);
+  const draftRows = [
+    ...wrapStyled(
+      theme.fg("accent", theme.bold("  Draft follow-up")),
+      contentWidth,
+    ),
+    ...wrapWithPrefix(
+      "  ",
+      theme.fg("text", safeText(thread.draftReply)),
+      contentWidth,
+    ),
+  ];
+  return [
+    ...renderBackgroundBlock(
+      draftRows,
+      "userMessageBg",
+      theme,
+      width,
+      DIFF_GUTTER_WIDTH,
+    ).map((text) => ({ text, commentId: thread.id })),
+    { text: "", commentId: thread.id },
+  ];
+}
+
+/**
+ * Rows shown above the reply editor: the anchored diff line and the
+ * conversation being answered. Earlier turns are dropped before the latest
+ * turn is cut, so the reply is always written against the newest response.
+ */
+function renderReplyContext(
+  region: ThreadRegion,
+  thread: ReviewCommentThread,
+  batch: ReviewThreadBatch,
+  height: number,
+  theme: ThreadUiTheme,
+  width: number,
+): readonly string[] {
+  if (height <= 0) return [];
+  if (region.change.content.type !== "text") {
+    throw new ReviewThreadUiError(
+      `Thread ${thread.id} references non-text file change ${region.change.id}.`,
     );
   }
-  return rows;
+  const anchorLine = region.change.content.lines.find((line) =>
+    thread.anchor.side === "new"
+      ? line.newLine === thread.anchor.line && line.type === "added"
+      : line.oldLine === thread.anchor.line && line.type === "removed",
+  );
+  if (anchorLine === undefined) {
+    throw new ReviewThreadUiError(
+      `Thread ${thread.id} anchor is missing from its frozen file change.`,
+    );
+  }
+  const anchor = [
+    ...wrapStyled(
+      theme.fg("accent", theme.bold(displayChangePath(region.change))),
+      width,
+    ),
+    ...renderDiffLine(anchorLine, theme, width),
+  ].slice(0, height);
+  const blocks = renderThreadTurnBlocks(thread, batch, false, theme, width).map(
+    (block) => block.map((row) => row.text),
+  );
+  let remaining = height - anchor.length;
+  const kept: string[][] = [];
+  for (const block of [...blocks].reverse()) {
+    if (block.length > remaining) break;
+    kept.unshift(block);
+    remaining -= block.length;
+  }
+  if (kept.length === 0) {
+    const latest = blocks.at(-1) ?? [];
+    const visible = latest.slice(0, remaining);
+    if (visible.length > 0 && visible.length < latest.length) {
+      visible[visible.length - 1] = fitLine(
+        `${" ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH))}${theme.fg("dim", "…")}`,
+        width,
+      );
+    }
+    return [...anchor, ...visible];
+  }
+  const dropped = blocks.length - kept.length;
+  const rows = kept.flat();
+  if (dropped > 0 && remaining >= 1) {
+    rows.unshift(
+      fitLine(
+        `${" ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH))}${theme.fg(
+          "dim",
+          `… ${countNoun(dropped, "earlier turn")}`,
+        )}`,
+        width,
+      ),
+    );
+  }
+  return [...anchor, ...rows];
 }
 
 function renderDiffLine(
