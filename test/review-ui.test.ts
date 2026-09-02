@@ -523,19 +523,28 @@ test("shows checks at their anchors and keeps the narrative in details", () => {
 
   assert.match(walkthrough, /src\/entry 文\\nfile\.ts/);
   assert.match(walkthrough, />\s+5\s+-const value = request\.value/);
-  assert.doesNotMatch(walkthrough, /The request path|Why this comes next/);
+  assert.doesNotMatch(walkthrough, /request -> validate|Why this comes next/);
   assert.doesNotMatch(walkthrough, /Review checks/);
 
   const addedIndex = lines.findIndex((line) => line.includes("TAIL_END"));
   assert.ok(addedIndex > 0);
+  assert.match(
+    lines[addedIndex - 1] ?? "",
+    /^\? {11}5 \+const value = validate/,
+  );
   assert.equal(
     lines[addedIndex + 1],
-    `${" ".repeat(14)}? Does validation preserve compatibility?`,
+    `${" ".repeat(14)}↳ Does validation preserve compatibility?`,
   );
   assert.equal(lines[3], "");
-  assert.equal(lines[4], "  ? Does the failure path remain explicit?");
+  assert.equal(
+    lines[4],
+    "The request path now validates a value before execution.",
+  );
   assert.equal(lines[5], "");
-  assert.equal(lines[6], "src/entry 文\\nfile.ts");
+  assert.equal(lines[6], "  ? Does the failure path remain explicit?");
+  assert.equal(lines[7], "");
+  assert.equal(lines[8], "src/entry 文\\nfile.ts");
 
   press(harness.component, "e");
   const explanation = renderText(harness);
@@ -558,9 +567,13 @@ test("shows the anchored check while a comment on that line is edited", () => {
   const editorIndex = lines.indexOf("─".repeat(100));
 
   assert.ok(anchorIndex > 0);
+  assert.match(
+    lines[anchorIndex - 1] ?? "",
+    /^> {11}5 \+const value = validate/,
+  );
   assert.equal(
     lines[anchorIndex + 1],
-    `${" ".repeat(14)}? Does validation preserve compatibility?`,
+    `${" ".repeat(14)}↳ Does validation preserve compatibility?`,
   );
   assert.ok(editorIndex > anchorIndex + 1);
   assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
@@ -570,31 +583,54 @@ test("wraps anchored checks under the diff gutter", () => {
   const harness = createHarness(50, 30);
   const lines = harness.component.render(50).map((line) => line.trimEnd());
   const start = lines.findIndex((line) =>
-    line.startsWith(`${" ".repeat(14)}? Does validation`),
+    line.startsWith(`${" ".repeat(14)}↳ Does validation`),
   );
 
   assert.ok(start > 0);
-  assert.match(lines[start] ?? "", /^ {14}\? Does validation preserve$/);
+  assert.match(lines[start] ?? "", /^ {14}↳ Does validation preserve$/);
   assert.match(lines[start + 1] ?? "", /^ {16}compatibility\?$/);
 });
 
-test("drops the unit-level checks before the diff runs out of rows", () => {
-  const harness = createHarness(100, 15);
+test("drops the unit checks, then the summary, before the diff runs short", () => {
+  const harness = createHarness(100, 17);
+  const summary = "The request path now validates a value before execution.";
 
   let lines = harness.component.render(100).map((line) => line.trimEnd());
-  assert.equal(lines[3], "");
-  assert.equal(lines[4], "  ? Does the failure path remain explicit?");
+  assert.equal(lines[4], summary);
+  assert.equal(lines[6], "  ? Does the failure path remain explicit?");
+
+  harness.terminal.rows = 16;
+  lines = harness.component.render(100).map((line) => line.trimEnd());
+  assert.equal(lines[4], summary);
+  assert.equal(lines[5], "");
+  assert.equal(lines[6], "src/entry 文\\nfile.ts");
+  assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
+  assert.match(lines.join("\n"), /↳ Does validation preserve compatibility\?/);
 
   harness.terminal.rows = 14;
   lines = harness.component.render(100).map((line) => line.trimEnd());
   assert.equal(lines[3], "");
   assert.equal(lines[4], "src/entry 文\\nfile.ts");
-  assert.match(lines.join("\n"), /\? Does validation preserve compatibility\?/);
 
   harness.terminal.rows = 7;
   lines = harness.component.render(100).map((line) => line.trimEnd());
   assert.notEqual(lines[3], "");
-  assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
+  assert.doesNotMatch(
+    lines.join("\n"),
+    /Does the failure path|validates a value/,
+  );
+});
+
+test("cuts a long summary to three rows above the diff", () => {
+  const harness = createHarness(60, 30, makeLongSummaryFixture());
+  const lines = harness.component.render(60).map((line) => line.trimEnd());
+  const summaryRows = lines.filter((line) =>
+    line.includes("downstream behavior"),
+  );
+
+  assert.equal(summaryRows.length, 3);
+  assert.match(summaryRows[2] ?? "", /…$/);
+  assert.equal(lines[7], "");
 });
 
 test("keeps walkthrough spacing out of the details header", () => {
@@ -606,10 +642,10 @@ test("keeps walkthrough spacing out of the details header", () => {
   assert.equal(lines[1], "Request entry point\\nsecondary heading");
 });
 
-test("keeps a long summary out of the walkthrough and complete in details", () => {
+test("keeps the complete long summary in details", () => {
   const harness = createHarness(60, 30, makeLongSummaryFixture());
 
-  assert.doesNotMatch(renderText(harness), /boundary change/);
+  assert.doesNotMatch(renderText(harness), /downstream behavior 8\./);
 
   press(harness.component, "e");
   const details = renderText(harness);
@@ -622,9 +658,10 @@ test("uses one check marker role in walkthrough and details", () => {
     theme: hierarchyTheme,
   });
   const marker = "\u001b[35m? \u001b[39m\u001b[37mDoes validation";
+  const cardMarker = "\u001b[35m↳ \u001b[39m\u001b[37mDoes validation";
 
   const walkthrough = renderText(harness);
-  assert.ok(walkthrough.includes(`${" ".repeat(14)}${marker}`));
+  assert.ok(walkthrough.includes(`${" ".repeat(14)}${cardMarker}`));
   assert.ok(
     walkthrough.includes(
       "  \u001b[35m? \u001b[39m\u001b[37mDoes the failure path",

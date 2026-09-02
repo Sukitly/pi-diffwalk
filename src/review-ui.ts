@@ -2177,10 +2177,16 @@ function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
   return theme.fg("text", theme.bold(label));
 }
 
+/** Marks a question that stands on its own: above the diff or in details. */
 const CHECK_MARKER = "? ";
+/** Marks the diff line a question hangs from. */
+const CHECK_LINE_MARKER = "?";
+/** Leads a question rendered beneath the line it hangs from. */
+const CHECK_CARD_MARKER = "↳ ";
 
 function renderCheckRows(
   checks: readonly ReviewCheck[],
+  marker: string,
   indent: string,
   contentWidth: number,
   theme: ReviewUiTheme,
@@ -2188,7 +2194,7 @@ function renderCheckRows(
 ): string[] {
   return checks.flatMap((check) =>
     wrapWithPrefix(
-      theme.fg("accent", CHECK_MARKER),
+      theme.fg("accent", marker),
       theme.fg("text", safeText(check.question)),
       contentWidth,
     ).map((line) => fitLine(`${indent}${line}`, width)),
@@ -2196,14 +2202,15 @@ function renderCheckRows(
 }
 
 const MINIMUM_BODY_ROWS_WITH_SEPARATOR = 6;
-const MINIMUM_DIFF_ROWS_BESIDE_UNIT_CHECKS = 8;
+const MINIMUM_DIFF_ROWS_BESIDE_PREVIEW = 8;
+const MAXIMUM_SUMMARY_ROWS = 3;
 
 /**
- * The rows between the header and the diff. Anchored checks render beneath
- * their lines inside the diff, so this block holds only the checks that
- * concern the unit as a whole, plus one blank row separating the header from
- * whatever follows. Short bodies keep the rows for the diff; the details page
- * always lists every check.
+ * The rows between the header and the diff: the change summary so the
+ * reviewer knows what this unit does, then the checks that concern the unit
+ * as a whole. Anchored checks render beneath their lines inside the diff.
+ * Short bodies drop the unit checks first, then the summary, so the diff
+ * keeps at least a few rows; the details page always holds everything.
  */
 function renderWalkthroughPreview(
   unit: ReviewUnit,
@@ -2212,18 +2219,42 @@ function renderWalkthroughPreview(
   width: number,
 ): readonly string[] {
   if (bodyHeight < MINIMUM_BODY_ROWS_WITH_SEPARATOR) return [];
+  const summary = wrapStyled(
+    theme.fg("text", safeText(unit.changeSummary)),
+    width,
+  );
+  if (summary.length > MAXIMUM_SUMMARY_ROWS) {
+    summary.length = MAXIMUM_SUMMARY_ROWS;
+    summary[MAXIMUM_SUMMARY_ROWS - 1] =
+      `${truncateToWidth(summary[MAXIMUM_SUMMARY_ROWS - 1] ?? "", Math.max(0, width - 1), "")}${theme.fg("dim", "…")}`;
+  }
   const unitChecks = unit.reviewFocus.filter(
     (check) => check.anchor === undefined,
   );
-  if (unitChecks.length === 0) return [""];
-  const rows = [
-    "",
-    ...renderCheckRows(unitChecks, "  ", Math.max(1, width - 2), theme, width),
-    "",
+  const checks =
+    unitChecks.length === 0
+      ? []
+      : [
+          "",
+          ...renderCheckRows(
+            unitChecks,
+            CHECK_MARKER,
+            "  ",
+            Math.max(1, width - 2),
+            theme,
+            width,
+          ),
+        ];
+  const candidates = [
+    ["", ...summary, ...checks, ""],
+    ["", ...summary, ""],
+    [""],
   ];
-  return bodyHeight - rows.length >= MINIMUM_DIFF_ROWS_BESIDE_UNIT_CHECKS
-    ? rows
-    : [""];
+  return (
+    candidates.find(
+      (rows) => bodyHeight - rows.length >= MINIMUM_DIFF_ROWS_BESIDE_PREVIEW,
+    ) ?? [""]
+  );
 }
 
 interface HelpEntry {
@@ -2824,12 +2855,21 @@ function renderUnitDiffLines(
       target === undefined
         ? undefined
         : commentsByTarget.get(targetKey(target));
+    const checks =
+      target === undefined
+        ? []
+        : (checksByLine.get(
+            fileLineKey(target.fileChangeId, target.side, target.line),
+          ) ?? []);
     rows.push(
       ...renderDiffLine(
         line,
-        isSelected,
-        comment !== undefined,
-        planned.role === "external",
+        {
+          selected: isSelected,
+          hasComment: comment !== undefined,
+          hasCheck: checks.length > 0,
+          external: planned.role === "external",
+        },
         theme,
         width,
         inlineTextByIndex.get(lineIndex),
@@ -2840,10 +2880,6 @@ function renderUnitDiffLines(
       })),
     );
     if (target !== undefined) {
-      const checks =
-        checksByLine.get(
-          fileLineKey(target.fileChangeId, target.side, target.line),
-        ) ?? [];
       rows.push(
         ...renderInlineChecks(checks, theme, width).map((text) => ({
           text,
@@ -2877,7 +2913,14 @@ function renderInlineChecks(
     widthAfterMargin(width, DIFF_GUTTER_WIDTH),
     COMMENT_CARD_MAX_WIDTH,
   );
-  return renderCheckRows(checks, margin, contentWidth, theme, width);
+  return renderCheckRows(
+    checks,
+    CHECK_CARD_MARKER,
+    margin,
+    contentWidth,
+    theme,
+    width,
+  );
 }
 
 function renderOmittedDiffLines(
@@ -2984,9 +3027,7 @@ function renderReadOnlyFile(
       lines.push(
         ...renderDiffLine(
           line,
-          false,
-          false,
-          false,
+          {},
           theme,
           width,
           inlineTextByIndex.get(lineIndex),
@@ -3078,18 +3119,33 @@ function renderInlineDiffPair(
   return { removed, added };
 }
 
+interface DiffLineMarks {
+  readonly selected?: boolean;
+  readonly hasComment?: boolean;
+  readonly hasCheck?: boolean;
+  readonly external?: boolean;
+}
+
+/** The marker column shows one state: selection, then comment, then check. */
+function diffLineMarker(marks: DiffLineMarks): string {
+  if (marks.selected) return ">";
+  if (marks.hasComment) return "●";
+  if (marks.hasCheck) return CHECK_LINE_MARKER;
+  if (marks.external) return "·";
+  return " ";
+}
+
 function renderDiffLine(
   line: DiffLine,
-  selected: boolean,
-  hasComment: boolean,
-  external: boolean,
+  marks: DiffLineMarks,
   theme: ReviewUiTheme,
   width: number,
   inlineText?: string,
 ): readonly string[] {
+  const selected = marks.selected === true;
   const oldLine = line.oldLine === undefined ? "" : String(line.oldLine);
   const newLine = line.newLine === undefined ? "" : String(line.newLine);
-  const marker = selected ? ">" : hasComment ? "●" : external ? "·" : " ";
+  const marker = diffLineMarker(marks);
   const prefix = `${marker} ${oldLine.padStart(5)} ${newLine.padStart(5)} `;
   const raw = theme.fg(
     diffColor(line),
@@ -3212,23 +3268,19 @@ function buildCommentTargetPreview(
     const key = diffLineKey(target.fileChangeId, line);
     const hasComment = key !== undefined && commentedLines.has(key);
     if (selected) {
+      const checks =
+        anchoredChecksByLine(unit).get(
+          fileLineKey(target.fileChangeId, target.side, target.line),
+        ) ?? [];
       return [
         ...renderDiffLine(
           line,
-          true,
-          hasComment,
-          false,
+          { selected: true, hasComment, hasCheck: checks.length > 0 },
           theme,
           width,
           inlineTextByFileIndex.get(fileIndex),
         ),
-        ...renderInlineChecks(
-          anchoredChecksByLine(unit).get(
-            fileLineKey(target.fileChangeId, target.side, target.line),
-          ) ?? [],
-          theme,
-          width,
-        ),
+        ...renderInlineChecks(checks, theme, width),
       ];
     }
     return [
