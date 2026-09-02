@@ -543,14 +543,12 @@ export class GuidedReviewComponent implements Component, Focusable {
     const baseHeader = this.renderHeader(width, rows);
     const footer = this.renderFooter(width, walkthroughFooterText(width));
     const unitView = this.currentUnit();
-    const summary =
-      unitView === undefined
-        ? []
-        : renderWalkthroughSummary(unitView.unit, this.theme, width);
-    const layout = resolveWalkthroughPreviewLayout(
-      summary.length,
+    const layout = resolveWalkthroughGuidanceLayout(
+      unitView?.unit,
       Math.max(0, rows - baseHeader.length - footer.length),
       width >= WIDE_HEADER_WIDTH,
+      this.theme,
+      width,
     );
     const header =
       layout.headerGap && baseHeader.length > 0
@@ -570,25 +568,16 @@ export class GuidedReviewComponent implements Component, Focusable {
       return [...header, ...empty, ...footer];
     }
 
-    const previewRows = summary.slice(0, layout.previewHeight);
-    const preview = previewRows.map((row) => row.text);
-    if (preview.length > 0 && preview.length < summary.length) {
-      preview[preview.length - 1] = renderWalkthroughTruncationHint(
-        previewRows.at(-1)?.truncationPrefix ?? "",
-        this.theme,
-        width,
-      );
-    }
-
+    const guidance = layout.guidance;
     const feedback = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     );
-    const separator = preview.length > 0 ? [""] : [];
+    const separator = guidance.length > 0 ? [""] : [];
     const diffHeight = Math.max(
       0,
-      bodyHeight - preview.length - separator.length - feedback.length,
+      bodyHeight - guidance.length - separator.length - feedback.length,
     );
     const renderedDiff = renderUnitDiff(
       unitView,
@@ -621,7 +610,7 @@ export class GuidedReviewComponent implements Component, Focusable {
 
     return [
       ...header,
-      ...preview,
+      ...guidance,
       ...separator,
       ...feedback,
       ...pinnedHeader,
@@ -1827,26 +1816,23 @@ export class GuidedReviewComponent implements Component, Focusable {
       0,
       rows - this.renderHeader(width, rows).length - 1,
     );
-    const unit = this.currentUnit();
-    const summary =
-      unit === undefined
-        ? []
-        : renderWalkthroughSummary(unit.unit, this.theme, width);
-    const layout = resolveWalkthroughPreviewLayout(
-      summary.length,
+    const layout = resolveWalkthroughGuidanceLayout(
+      this.currentUnit()?.unit,
       availableBodyHeight,
       width >= WIDE_HEADER_WIDTH,
+      this.theme,
+      width,
     );
     const feedbackHeight = renderTransientFeedback(
       this.transientFeedback,
       this.theme,
       width,
     ).length;
-    const separatorHeight = layout.previewHeight > 0 ? 1 : 0;
+    const separatorHeight = layout.guidance.length > 0 ? 1 : 0;
     return Math.max(
       0,
       layout.bodyHeight -
-        layout.previewHeight -
+        layout.guidance.length -
         separatorHeight -
         feedbackHeight,
     );
@@ -2183,46 +2169,44 @@ function orderTargetsFromDisplayPlan(
   return ordered;
 }
 
-interface WalkthroughPreviewLayout {
+interface WalkthroughGuidanceLayout {
   readonly headerGap: boolean;
   readonly bodyHeight: number;
-  readonly previewHeight: number;
+  readonly guidance: readonly string[];
 }
 
-interface WalkthroughSummaryRow {
-  readonly text: string;
-  readonly truncationPrefix: string;
+/**
+ * Rows the unit guidance may occupy above the diff. Short bodies keep every
+ * row for the diff; taller bodies give the guidance up to 40 percent so the
+ * change summary, context, and every review question fit when the terminal
+ * allows.
+ */
+function walkthroughGuidanceBudget(bodyHeight: number): number {
+  return bodyHeight >= 12 ? Math.max(6, Math.round(bodyHeight * 0.4)) : 0;
 }
 
-function walkthroughPreviewHeight(
-  summaryLength: number,
-  bodyHeight: number,
-): number {
-  return bodyHeight >= 12
-    ? Math.min(summaryLength, 8, Math.max(6, Math.floor(bodyHeight * 0.25)))
-    : 0;
-}
-
-function resolveWalkthroughPreviewLayout(
-  summaryLength: number,
+function resolveWalkthroughGuidanceLayout(
+  unit: ReviewUnit | undefined,
   availableBodyHeight: number,
   separateWideHeader: boolean,
-): WalkthroughPreviewLayout {
+  theme: ReviewUiTheme,
+  width: number,
+): WalkthroughGuidanceLayout {
   const headerGapRows = separateWideHeader ? 1 : 0;
   const bodyHeight = Math.max(0, availableBodyHeight - headerGapRows);
-  const previewHeight = walkthroughPreviewHeight(summaryLength, bodyHeight);
-  if (previewHeight === 0) {
+  const budget = unit === undefined ? 0 : walkthroughGuidanceBudget(bodyHeight);
+  const guidance =
+    unit === undefined || budget === 0
+      ? []
+      : renderWalkthroughGuidance(unit, theme, width, budget);
+  if (guidance.length === 0) {
     return {
       headerGap: false,
       bodyHeight: Math.max(0, availableBodyHeight),
-      previewHeight: 0,
+      guidance: [],
     };
   }
-  return {
-    headerGap: separateWideHeader,
-    bodyHeight,
-    previewHeight,
-  };
+  return { headerGap: separateWideHeader, bodyHeight, guidance };
 }
 
 const REVIEW_QUESTION_LEADING_INDENT = "  ";
@@ -2251,67 +2235,158 @@ function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
   return theme.fg("text", theme.bold(label));
 }
 
-function renderWalkthroughTruncationHint(
-  prefix: string,
-  theme: ReviewUiTheme,
-  width: number,
-): string {
-  return fitLine(
-    `${prefix}${theme.fg("dim", "… press e for complete context and questions")}`,
-    width,
-  );
+const GUIDANCE_CONTEXT_HINT = "… e for context";
+const GUIDANCE_DETAILS_HINT = "… e for details";
+
+interface WalkthroughGuidanceParts {
+  readonly summary: readonly string[];
+  readonly context: readonly string[];
+  readonly separator: boolean;
+  readonly hint?: string;
+  readonly checks: readonly string[];
 }
 
-function renderWalkthroughSummary(
+function renderReviewChecksHeading(
+  hint: string | undefined,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  const heading = renderSectionHeading("Review checks", theme);
+  if (hint === undefined) return [fitLine(heading, width)];
+  const styledHint = theme.fg("dim", hint);
+  if (visibleWidth(heading) + 2 + visibleWidth(styledHint) <= width) {
+    return [fitColumns(heading, styledHint, width)];
+  }
+  return [
+    fitLine(heading, width),
+    fitLine(`${REVIEW_QUESTION_TEXT_INDENT}${styledHint}`, width),
+  ];
+}
+
+function composeWalkthroughGuidance(
+  parts: WalkthroughGuidanceParts,
+  theme: ReviewUiTheme,
+  width: number,
+): string[] {
+  return [
+    "",
+    ...parts.summary,
+    ...parts.context,
+    ...(parts.separator ? [""] : []),
+    ...renderReviewChecksHeading(parts.hint, theme, width),
+    ...parts.checks,
+  ];
+}
+
+/**
+ * Renders the unit guidance within a row budget. When the full guidance does
+ * not fit, the context paragraph goes first, then the separator, then the
+ * change summary is truncated, and only then are review questions cut. The
+ * heading names what the details screen still holds.
+ */
+function renderWalkthroughGuidance(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
   width: number,
-): WalkthroughSummaryRow[] {
-  const summaryRail = theme.fg("borderMuted", "│ ");
-  const summaryWidth = Math.max(1, width - visibleWidth(summaryRail));
-  const summary = wrapStyled(
-    theme.fg("text", safeText(unit.changeSummary)),
-    summaryWidth,
-  ).map((line) => ({
-    text: fitLine(`${summaryRail}${line}`, width),
-    truncationPrefix: summaryRail,
-  }));
-  const lines: WalkthroughSummaryRow[] = [
-    { text: "", truncationPrefix: "" },
-    ...summary,
-    { text: "", truncationPrefix: summaryRail },
-    {
-      text: renderSectionHeading("Review checks", theme),
-      truncationPrefix: "",
-    },
-  ];
-  for (const [index, focus] of unit.reviewFocus.slice(0, 2).entries()) {
-    lines.push(
-      ...wrapWithPrefix(
-        renderReviewQuestionPrefix(index, theme),
-        theme.fg("text", safeText(focus)),
-        width,
-      ).map((text) => ({
-        text,
-        truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
-      })),
-    );
-  }
-  const hint =
-    unit.reviewFocus.length > 2
-      ? `… ${unit.reviewFocus.length - 2} more question${unit.reviewFocus.length === 3 ? "" : "s"}; press e for details`
-      : "Press e for complete context.";
-  lines.push(
-    ...wrapWithPrefix(
-      REVIEW_QUESTION_TEXT_INDENT,
-      theme.fg("dim", hint),
-      width,
-    ).map((text) => ({
-      text,
-      truncationPrefix: REVIEW_QUESTION_TEXT_INDENT,
-    })),
+  budget: number,
+): string[] {
+  const rail = theme.fg("borderMuted", "│ ");
+  const railWidth = Math.max(1, width - visibleWidth(rail));
+  const railed = (lines: readonly string[]): string[] =>
+    lines.map((line) => fitLine(`${rail}${line}`, width));
+  const summary = railed(
+    wrapStyled(theme.fg("text", safeText(unit.changeSummary)), railWidth),
   );
-  return lines;
+  const context = railed([
+    "",
+    ...wrapStyled(
+      `${theme.fg("accent", "Keep in mind")}  ${theme.fg(
+        "text",
+        safeText(unit.context),
+      )}`,
+      railWidth,
+    ),
+  ]);
+  const checks = unit.reviewFocus.flatMap((focus, index) =>
+    wrapWithPrefix(
+      renderReviewQuestionPrefix(index, theme),
+      theme.fg("text", safeText(focus)),
+      width,
+    ),
+  );
+
+  const full = composeWalkthroughGuidance(
+    { summary, context, separator: true, checks },
+    theme,
+    width,
+  );
+  if (full.length <= budget) return full;
+
+  const withoutContext = composeWalkthroughGuidance(
+    {
+      summary,
+      context: [],
+      separator: true,
+      hint: GUIDANCE_CONTEXT_HINT,
+      checks,
+    },
+    theme,
+    width,
+  );
+  if (withoutContext.length <= budget) return withoutContext;
+
+  const compact = composeWalkthroughGuidance(
+    {
+      summary,
+      context: [],
+      separator: false,
+      hint: GUIDANCE_CONTEXT_HINT,
+      checks,
+    },
+    theme,
+    width,
+  );
+  if (compact.length <= budget) return compact;
+
+  const heading = renderReviewChecksHeading(
+    GUIDANCE_DETAILS_HINT,
+    theme,
+    width,
+  );
+  const summaryRows = budget - 1 - heading.length - checks.length;
+  if (summaryRows >= 1) {
+    return [
+      "",
+      ...truncateGuidanceRows(summary, summaryRows, theme, width),
+      ...heading,
+      ...checks,
+    ];
+  }
+  const checkRows = Math.max(0, budget - 1 - heading.length);
+  return [
+    "",
+    ...heading,
+    ...truncateGuidanceRows(checks, checkRows, theme, width),
+  ];
+}
+
+/** Cuts prose rows and marks the cut directly after the last visible word. */
+function truncateGuidanceRows(
+  rows: readonly string[],
+  height: number,
+  theme: ReviewUiTheme,
+  width: number,
+): readonly string[] {
+  if (height <= 0 || rows.length === 0) return [];
+  if (rows.length <= height) return [...rows];
+  const visible = rows.slice(0, height);
+  const last = visible.at(-1) ?? "";
+  const marker = theme.fg("dim", "…");
+  visible[visible.length - 1] =
+    visibleWidth(last) < width
+      ? `${last}${marker}`
+      : `${truncateToWidth(last, Math.max(0, width - 1), "", true)}${marker}`;
+  return visible;
 }
 
 interface HelpEntry {

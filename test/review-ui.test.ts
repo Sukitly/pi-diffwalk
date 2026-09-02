@@ -332,6 +332,27 @@ function makeLongExplanationFixture(): UiFixture {
   };
 }
 
+function makeGuidanceFixture(): UiFixture {
+  const fixture = makeUiFixture();
+  const routeCandidate = structuredClone(fixture.routeCandidate);
+  const firstUnit = routeCandidate.units[0];
+  assert.ok(firstUnit);
+  firstUnit.changeSummary =
+    "The handler validates the issuer before creating a session.";
+  firstUnit.context =
+    "Tokens arrive already parsed. The issuer must match the configured value, and the audience must include this service.";
+  firstUnit.reviewFocus = [
+    "Is the trusted issuer read from configuration rather than the token?",
+    "Do existing sessions stay valid after the audience check?",
+    "Is the failure path still explicit for a missing token?",
+  ];
+  return {
+    ...fixture,
+    routeCandidate,
+    route: validateReviewRoute(fixture.snapshot, fixture.delta, routeCandidate),
+  };
+}
+
 function makeLongSummaryFixture(): UiFixture {
   const fixture = makeUiFixture();
   const routeCandidate = structuredClone(fixture.routeCandidate);
@@ -542,13 +563,77 @@ test("separates and aligns the wide walkthrough hierarchy", () => {
   assert.equal(lines[1], "");
   assert.ok(summaryIndex > 0);
   assert.equal(lines[summaryIndex - 1], "");
-  assert.equal(lines[summaryIndex + 1], "");
-  assert.equal(lines[summaryIndex + 2], "Review checks");
+  assert.equal(lines[summaryIndex + 1], "│");
   assert.match(
-    lines[summaryIndex + 3] ?? "",
+    lines[summaryIndex + 2] ?? "",
+    /^│ Keep in mind {2}request -> validate -> execute -> response$/,
+  );
+  assert.equal(lines[summaryIndex + 3], "");
+  assert.equal(lines[summaryIndex + 4], "Review checks");
+  assert.match(
+    lines[summaryIndex + 5] ?? "",
     /^ {2}01 {2}Does validation preserve compatibility\?/,
   );
-  assert.match(lines[summaryIndex + 4] ?? "", /^ {6}… press e/);
+  assert.match(
+    lines[summaryIndex + 6] ?? "",
+    /^ {2}02 {2}Does the failure path remain explicit\?/,
+  );
+  assert.equal(lines[summaryIndex + 7], "");
+});
+
+test("shows every guidance field when the terminal is tall enough", () => {
+  const harness = createHarness(120, 40, makeGuidanceFixture());
+  const output = renderText(harness);
+
+  assert.match(
+    output,
+    /│ The handler validates the issuer before creating a session\./,
+  );
+  assert.match(output, /│ Keep in mind {2}Tokens arrive already parsed\./);
+  assert.match(output, /^ {2}01 {2}Is the trusted issuer read/m);
+  assert.match(output, /^ {2}02 {2}Do existing sessions stay valid/m);
+  assert.match(output, /^ {2}03 {2}Is the failure path still explicit/m);
+  assert.doesNotMatch(output, /… e for/);
+  assert.match(output, /src\/entry 文\\nfile\.ts/);
+});
+
+test("drops the context first and names it in the checks heading", () => {
+  const harness = createHarness(80, 24, makeGuidanceFixture());
+  const lines = harness.component.render(80).map((line) => line.trimEnd());
+  const output = lines.join("\n");
+
+  assert.match(
+    output,
+    /│ The handler validates the issuer before creating a session\./,
+  );
+  assert.doesNotMatch(output, /Keep in mind/);
+  assert.match(output, /^Review checks {2,}… e for context$/m);
+  assert.match(output, /^ {2}01 {2}Is the trusted issuer read/m);
+  assert.match(output, /^ {2}02 {2}Do existing sessions stay valid/m);
+  assert.match(output, /^ {2}03 {2}Is the failure path still explicit/m);
+  const headingIndex = lines.findIndex((line) =>
+    line.startsWith("Review checks"),
+  );
+  assert.equal(lines[headingIndex - 1], "");
+});
+
+test("keeps review checks ahead of the summary when the budget is tight", () => {
+  const harness = createHarness(50, 20, makeGuidanceFixture());
+  const lines = harness.component.render(50).map((line) => line.trimEnd());
+  const output = lines.join("\n");
+
+  assert.doesNotMatch(output, /The handler validates/);
+  assert.doesNotMatch(output, /Keep in mind/);
+  assert.match(output, /^Review checks {2,}… e for details$/m);
+  assert.match(output, /^ {2}01 {2}Is the trusted issuer read/m);
+  assert.match(output, /^ {2}02 {2}Do existing sessions stay valid/m);
+  assert.doesNotMatch(output, /03/);
+  const headingIndex = lines.findIndex((line) =>
+    line.startsWith("Review checks"),
+  );
+  const blockEnd = lines.indexOf("", headingIndex);
+  assert.match(lines[blockEnd - 1] ?? "", /^ {6}\S.*\S…$/);
+  assert.match(output, /src\/entry 文\\nfile\.ts/);
 });
 
 test("shows the wide walkthrough gap only with its summary preview", () => {
@@ -574,12 +659,24 @@ test("keeps walkthrough spacing out of the details header", () => {
   assert.equal(lines[1], "Request entry point\\nsecondary heading");
 });
 
-test("aligns truncation hints with the summary block they replace", () => {
+test("truncates a long summary after the review checks are placed", () => {
   const harness = createHarness(60, 30, makeLongSummaryFixture());
   const lines = harness.component.render(60).map((line) => line.trimEnd());
-  const hint = lines.find((line) => line.includes("press e for complete"));
+  const output = lines.join("\n");
+  const summaryRows = lines.filter((line) => line.startsWith("│ The boundary"));
+  const headingIndex = lines.findIndex((line) =>
+    line.startsWith("Review checks"),
+  );
 
-  assert.match(hint ?? "", /^│ … press e/);
+  assert.ok(summaryRows.length >= 1 && summaryRows.length < 8);
+  assert.match(lines[headingIndex - 1] ?? "", /^│ .*\S…$/);
+  assert.match(
+    lines[headingIndex] ?? "",
+    /^Review checks {2,}… e for details$/,
+  );
+  assert.match(output, /^ {2}01 {2}Does validation preserve compatibility\?/m);
+  assert.match(output, /^ {2}02 {2}Does the failure path remain explicit\?/m);
+  assert.doesNotMatch(output, /Keep in mind/);
 });
 
 test("uses one section heading role in walkthrough and details", () => {
