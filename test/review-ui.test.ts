@@ -534,7 +534,7 @@ test("shows checks at their anchors and keeps the narrative in details", () => {
   );
   assert.equal(
     lines[addedIndex + 1],
-    `${" ".repeat(14)}↳ Does validation preserve compatibility?`,
+    `${" ".repeat(14)}Does validation preserve compatibility?`,
   );
   assert.equal(lines[3], "");
   assert.equal(
@@ -573,22 +573,56 @@ test("shows the anchored check while a comment on that line is edited", () => {
   );
   assert.equal(
     lines[anchorIndex + 1],
-    `${" ".repeat(14)}↳ Does validation preserve compatibility?`,
+    `${" ".repeat(14)}Does validation preserve compatibility?`,
   );
   assert.ok(editorIndex > anchorIndex + 1);
   assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
+});
+
+test("paints an anchored line and its question as one block", () => {
+  const blockTheme = {
+    ...plainTheme,
+    bg: (color: Parameters<Theme["bg"]>[0], text: string) =>
+      color === "customMessageBg"
+        ? `[block]${text}[/block]`
+        : color === "selectedBg"
+          ? `[selected]${text}[/selected]`
+          : text,
+  };
+  const harness = createHarness(100, 30, makeUiFixture(), {
+    theme: blockTheme,
+  });
+  // Rows are cut to the terminal width, so only the opening marker survives.
+  const inBlock = (line: string | undefined): boolean =>
+    (line ?? "").startsWith("[block]");
+
+  let lines = harness.component.render(100);
+  const anchorIndex = lines.findIndex((line) => line.includes("TAIL_END"));
+  assert.ok(anchorIndex > 0);
+  assert.equal(inBlock(lines[anchorIndex - 1]), true);
+  assert.equal(inBlock(lines[anchorIndex]), true);
+  assert.equal(inBlock(lines[anchorIndex + 1]), true);
+  assert.match(lines[anchorIndex + 1] ?? "", /Does validation preserve/);
+  assert.equal(inBlock(lines[anchorIndex + 2]), false);
+  assert.equal(inBlock(lines[anchorIndex - 2]), false);
+
+  press(harness.component, "j");
+  lines = harness.component.render(100);
+  assert.match(lines[anchorIndex - 1] ?? "", /^\[selected\]>/);
+  assert.equal(inBlock(lines[anchorIndex - 1]), false);
+  assert.equal(inBlock(lines[anchorIndex + 1]), true);
 });
 
 test("wraps anchored checks under the diff gutter", () => {
   const harness = createHarness(50, 30);
   const lines = harness.component.render(50).map((line) => line.trimEnd());
   const start = lines.findIndex((line) =>
-    line.startsWith(`${" ".repeat(14)}↳ Does validation`),
+    line.startsWith(`${" ".repeat(14)}Does validation`),
   );
 
   assert.ok(start > 0);
-  assert.match(lines[start] ?? "", /^ {14}↳ Does validation preserve$/);
-  assert.match(lines[start + 1] ?? "", /^ {16}compatibility\?$/);
+  assert.match(lines[start] ?? "", /^ {14}Does validation preserve$/);
+  assert.match(lines[start + 1] ?? "", /^ {14}compatibility\?$/);
 });
 
 test("drops the unit checks, then the summary, before the diff runs short", () => {
@@ -605,7 +639,10 @@ test("drops the unit checks, then the summary, before the diff runs short", () =
   assert.equal(lines[5], "");
   assert.equal(lines[6], "src/entry 文\\nfile.ts");
   assert.doesNotMatch(lines.join("\n"), /Does the failure path/);
-  assert.match(lines.join("\n"), /↳ Does validation preserve compatibility\?/);
+  assert.match(
+    lines.join("\n"),
+    /^ {14}Does validation preserve compatibility\?$/m,
+  );
 
   harness.terminal.rows = 14;
   lines = harness.component.render(100).map((line) => line.trimEnd());
@@ -658,10 +695,9 @@ test("uses one check marker role in walkthrough and details", () => {
     theme: hierarchyTheme,
   });
   const marker = "\u001b[35m? \u001b[39m\u001b[37mDoes validation";
-  const cardMarker = "\u001b[35m↳ \u001b[39m\u001b[37mDoes validation";
 
   const walkthrough = renderText(harness);
-  assert.ok(walkthrough.includes(`${" ".repeat(14)}${cardMarker}`));
+  assert.ok(walkthrough.includes(`${" ".repeat(14)}\u001b[37mDoes validation`));
   assert.ok(
     walkthrough.includes(
       "  \u001b[35m? \u001b[39m\u001b[37mDoes the failure path",

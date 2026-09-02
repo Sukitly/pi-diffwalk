@@ -2179,10 +2179,8 @@ function renderSectionHeading(label: string, theme: ReviewUiTheme): string {
 
 /** Marks a question that stands on its own: above the diff or in details. */
 const CHECK_MARKER = "? ";
-/** Marks the diff line a question hangs from. */
+/** Marks the diff line that opens a question block. */
 const CHECK_LINE_MARKER = "?";
-/** Leads a question rendered beneath the line it hangs from. */
-const CHECK_CARD_MARKER = "↳ ";
 
 function renderCheckRows(
   checks: readonly ReviewCheck[],
@@ -2861,18 +2859,22 @@ function renderUnitDiffLines(
         : (checksByLine.get(
             fileLineKey(target.fileChangeId, target.side, target.line),
           ) ?? []);
+    const lineRows = renderDiffLine(
+      line,
+      {
+        selected: isSelected,
+        hasComment: comment !== undefined,
+        hasCheck: checks.length > 0,
+        external: planned.role === "external",
+      },
+      theme,
+      width,
+      inlineTextByIndex.get(lineIndex),
+    );
     rows.push(
-      ...renderDiffLine(
-        line,
-        {
-          selected: isSelected,
-          hasComment: comment !== undefined,
-          hasCheck: checks.length > 0,
-          external: planned.role === "external",
-        },
-        theme,
-        width,
-        inlineTextByIndex.get(lineIndex),
+      ...(checks.length > 0 && !isSelected
+        ? lineRows.map((text) => fillCheckBlockRow(text, theme, width))
+        : lineRows
       ).map((text) => ({
         text,
         displayBlockIndex,
@@ -2901,7 +2903,22 @@ function renderUnitDiffLines(
   return rows;
 }
 
-/** Review questions anchored to one diff line, shown directly beneath it. */
+const CHECK_BLOCK_BG: Parameters<ReviewUiTheme["bg"]>[0] = "customMessageBg";
+
+/** Paints one full-width row of the block a line shares with its questions. */
+function fillCheckBlockRow(
+  text: string,
+  theme: ReviewUiTheme,
+  width: number,
+): string {
+  return theme.bg(CHECK_BLOCK_BG, fillLine(text, width));
+}
+
+/**
+ * Review questions anchored to one diff line. They continue the background
+ * block started by the line, indented to the diff gutter, so the line and its
+ * questions read as one card.
+ */
 function renderInlineChecks(
   checks: readonly ReviewCheck[],
   theme: ReviewUiTheme,
@@ -2909,18 +2926,16 @@ function renderInlineChecks(
 ): readonly string[] {
   if (checks.length === 0) return [];
   const margin = " ".repeat(clampedMargin(width, DIFF_GUTTER_WIDTH));
-  const contentWidth = Math.min(
-    widthAfterMargin(width, DIFF_GUTTER_WIDTH),
-    COMMENT_CARD_MAX_WIDTH,
-  );
-  return renderCheckRows(
-    checks,
-    CHECK_CARD_MARKER,
-    margin,
-    contentWidth,
-    theme,
-    width,
-  );
+  const wrapWidth = Math.min(width, margin.length + COMMENT_CARD_MAX_WIDTH);
+  return checks
+    .flatMap((check) =>
+      wrapWithPrefix(
+        margin,
+        theme.fg("text", safeText(check.question)),
+        wrapWidth,
+      ),
+    )
+    .map((row) => fillCheckBlockRow(row, theme, width));
 }
 
 function renderOmittedDiffLines(
