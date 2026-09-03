@@ -3,6 +3,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { ReviewSnapshotDriftError } from "../git/errors.ts";
 import {
   assertReviewSnapshotUnchanged,
   captureRepositoryState,
@@ -10,15 +11,22 @@ import {
 } from "../git/snapshot.ts";
 import { computeReviewDelta } from "../review/delta.ts";
 import {
+  attachReviewRoute,
   createInProgressReview,
   discardInProgressReview,
   submitInProgressReview,
 } from "../review/in-progress.ts";
+import { detectExactMoves } from "../review/moves.ts";
 import {
   DIFFWALK_SERIES_ENTRY_TYPE,
   parseReviewSeriesEntry,
   serializeReviewSeriesEntry,
 } from "../review/persistence.ts";
+import {
+  assessRouteQuality,
+  ReviewRouteAdvisoryNudge,
+} from "../review/route-advisory.ts";
+import { validateReviewRoute } from "../review/route-validation.ts";
 import { createReviewSeries } from "../review/series.ts";
 import {
   DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
@@ -26,8 +34,11 @@ import {
   serializeReviewThreadBatchEntry,
 } from "../review/thread-persistence.ts";
 import {
+  attachReviewThreadResponses,
   createReviewThreadBatch,
   isReviewThreadBatchAnswered,
+  pendingReviewThreadTurn,
+  type ReviewResponseCandidate,
   requireThreadTurn,
   resolvedCommentLines,
 } from "../review/threads.ts";
@@ -35,18 +46,24 @@ import type {
   GuidedReviewResult,
   InProgressReview,
   ReviewDelta,
+  ReviewRouteCandidate,
   ReviewSeries,
   ReviewSeriesId,
   ReviewSnapshot,
   ReviewThreadBatch,
   ReviewThreadBatchId,
+  ReviewThreadTurnId,
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import { openGuidedReview } from "../review-ui/index.ts";
 import { openReviewThreads } from "../thread-ui/index.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
 import { createPiGitRunner } from "./git-runner.ts";
-import { formatReviewThreadFollowUp } from "./model-payloads.ts";
+import {
+  formatGuidedReviewResult,
+  formatReviewThreadFollowUp,
+  shouldSendReviewToAgent,
+} from "./model-payloads.ts";
 import { buildReviewKickoffPrompt } from "./prompts.ts";
 import {
   DIFFWALK_RULES_SOURCE,
@@ -58,9 +75,16 @@ import {
 } from "./rules.ts";
 import {
   buildKickoffMessageDetails,
+  buildSubmittedReviewMessageDetails,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
+  DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
   DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
+  reviewOutcomeNotification,
 } from "./tui-messages.ts";
+
+export const DEFAULT_REVIEW_TARGET = "HEAD";
+export const DISCARD_OPTION = "--discard";
+export const THREADS_OPTION = "--threads";
 
 export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
@@ -89,7 +113,7 @@ export type CommandContext = Pick<
 
 export type ReviewUiContext = Pick<ExtensionContext, "mode" | "ui">;
 
-export interface PendingReview {
+interface PendingReview {
   review: InProgressReview;
   series: ReviewSeries;
   inProgress: boolean;
@@ -100,9 +124,11 @@ export interface PendingReview {
 }
 
 /**
- * Mutable extension state for one pi session: the pending review, completed
- * series restored from session entries, and comment thread batches.
- * Commands and tools mutate it only through these methods.
+ * Application service for one pi session. It owns the pending review, the
+ * completed series restored from session entries, and the comment thread
+ * batches, and every workflow that reads or changes them is a method here:
+ * the /diffwalk command and the two tools only parse input and format
+ * output. The pending review never leaves this class as a mutable object.
  */
 export class DiffWalkSession {
   private readonly pi: ExtensionAPI;
@@ -144,25 +170,55 @@ export class DiffWalkSession {
     }
   }
 
-  get pending(): PendingReview | undefined {
-    return this.pendingReview;
+  /** The turn awaiting agent responses in a known batch, for filling a missing turnId. */
+  pendingThreadTurnId(batchId: string): ReviewThreadTurnId | undefined {
+    const batch = this.threadBatchesById.get(batchId as ReviewThreadBatchId);
+    return batch === undefined ? undefined : pendingReviewThreadTurn(batch)?.id;
   }
 
-  clearPending(): void {
-    this.pendingReview = undefined;
+  /** Reopens the most recent comment threads and reports a follow-up to the agent. */
+  async openLatestThreads(
+    ctx: CommandContext & ReviewUiContext,
+  ): Promise<void> {
+    const batch =
+      this.latestThreadBatchId === undefined
+        ? undefined
+        : this.threadBatchesById.get(this.latestThreadBatchId);
+    if (batch === undefined) {
+      ctx.ui.notify("No DiffWalk comment threads are available.", "info");
+      return;
+    }
+    const result = await this.openThreadBatch(ctx, batch);
+    this.sendThreadFollowUp(result);
   }
 
-  threadBatch(id: ReviewThreadBatchId): ReviewThreadBatch | undefined {
-    return this.threadBatchesById.get(id);
+  /**
+   * The submit_diffwalk_responses tool workflow: record the agent's answers
+   * on the pending turn, persist them, and reopen the threads for the
+   * reviewer.
+   */
+  async respondToThreads(
+    ctx: ReviewUiContext,
+    candidate: ReviewResponseCandidate,
+    signal: AbortSignal | undefined,
+  ): Promise<ReviewThreadUiResult> {
+    signal?.throwIfAborted();
+    const batch = this.threadBatchesById.get(
+      candidate.batchId as ReviewThreadBatchId,
+    );
+    if (batch === undefined) {
+      throw new Error(
+        `No pending DiffWalk thread batch matches ${candidate.batchId}. Use the batchId from the pending reviewer turn.`,
+      );
+    }
+    this.assertThreadBatchCanChange(batch);
+    const answered = attachReviewThreadResponses(batch, candidate);
+    this.persistThreadBatch(answered);
+    signal?.throwIfAborted();
+    return this.openThreadBatch(ctx, answered);
   }
 
-  latestThreadBatch(): ReviewThreadBatch | undefined {
-    return this.latestThreadBatchId === undefined
-      ? undefined
-      : this.threadBatchesById.get(this.latestThreadBatchId);
-  }
-
-  persistThreadBatch(batch: ReviewThreadBatch): void {
+  private persistThreadBatch(batch: ReviewThreadBatch): void {
     this.threadBatchesById.set(batch.id, batch);
     this.latestThreadBatchId = batch.id;
     this.pi.appendEntry(
@@ -171,7 +227,7 @@ export class DiffWalkSession {
     );
   }
 
-  assertThreadBatchCanChange(batch: ReviewThreadBatch): void {
+  private assertThreadBatchCanChange(batch: ReviewThreadBatch): void {
     const pending = this.pendingReview;
     if (pending?.review.delta.baselineRoundId === batch.roundId) {
       throw new Error(
@@ -180,7 +236,7 @@ export class DiffWalkSession {
     }
   }
 
-  async openThreadBatch(
+  private async openThreadBatch(
     ctx: ReviewUiContext,
     batch: ReviewThreadBatch,
   ): Promise<ReviewThreadUiResult> {
@@ -195,7 +251,7 @@ export class DiffWalkSession {
     return result;
   }
 
-  sendThreadFollowUp(result: ReviewThreadUiResult): void {
+  private sendThreadFollowUp(result: ReviewThreadUiResult): void {
     if (result.status !== "follow-up-submitted") return;
     const turn = requireThreadTurn(result.batch, result.turnId);
     this.pi.sendMessage(
@@ -212,7 +268,7 @@ export class DiffWalkSession {
     );
   }
 
-  sendKickoffPrompt(pending: PendingReview): void {
+  private sendKickoffPrompt(pending: PendingReview): void {
     const { delta, snapshot } = pending.review;
     this.pi.sendMessage(
       {
@@ -225,7 +281,7 @@ export class DiffWalkSession {
     );
   }
 
-  async verifySnapshot(
+  private async verifySnapshot(
     snapshot: ReviewSnapshot,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<void> {
@@ -237,7 +293,10 @@ export class DiffWalkSession {
     signal.throwIfAborted();
   }
 
-  async startNewReview(ctx: CommandContext, targetRef: string): Promise<void> {
+  private async startReview(
+    ctx: CommandContext,
+    targetRef: string,
+  ): Promise<void> {
     const snapshot = await this.dependencies.captureReviewSnapshot(
       createPiGitRunner(this.pi),
       ctx.cwd,
@@ -305,7 +364,7 @@ export class DiffWalkSession {
     this.sendKickoffPrompt(pending);
   }
 
-  async runPendingReview(
+  private async runPendingReview(
     ctx: ReviewUiContext,
     pending: PendingReview,
   ): Promise<GuidedReviewResult> {
@@ -328,6 +387,93 @@ export class DiffWalkSession {
     }
   }
 
+  /**
+   * The /diffwalk [base] workflow: resume a paused walkthrough, re-send the
+   * kickoff for a review still waiting on a route, or capture a new snapshot.
+   */
+  async reviewCommand(
+    ctx: CommandContext & ReviewUiContext,
+    requestedTarget: string | undefined,
+  ): Promise<void> {
+    const existing = this.pendingReview;
+    if (existing?.review.lifecycle === "ready") {
+      await this.resumeReadyReview(ctx, existing, requestedTarget);
+      return;
+    }
+    if (existing?.review.lifecycle === "preparing-route") {
+      await this.resumeRoutePreparation(ctx, existing, requestedTarget);
+      return;
+    }
+    await this.startReview(ctx, requestedTarget ?? DEFAULT_REVIEW_TARGET);
+  }
+
+  /**
+   * The guided_review tool workflow: validate the route against the pending
+   * snapshot, return advisory signals once, confirm the repository still
+   * matches, attach the route, and open the walkthrough.
+   */
+  async attachRouteAndOpen(
+    ctx: ReviewUiContext,
+    routeCandidate: ReviewRouteCandidate,
+    signal: AbortSignal | undefined,
+  ): Promise<GuidedReviewResult> {
+    const pending = this.pendingReview;
+    if (pending === undefined) {
+      throw new Error(
+        "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
+      );
+    }
+    if (routeCandidate.snapshotId !== pending.review.snapshot.id) {
+      throw new Error(
+        `Route snapshot ${routeCandidate.snapshotId} does not match pending snapshot ${pending.review.snapshot.id}. Use the frozen snapshot ID from the /diffwalk prompt.`,
+      );
+    }
+    if (pending.inProgress) {
+      throw new Error(
+        `Guided review for snapshot ${pending.review.snapshot.id} is already open.`,
+      );
+    }
+    if (pending.review.lifecycle !== "preparing-route") {
+      throw new Error(
+        `Review ${pending.review.id} already has a validated route. Run /diffwalk to resume it.`,
+      );
+    }
+
+    const route = validateReviewRoute(
+      pending.review.snapshot,
+      pending.review.delta,
+      routeCandidate,
+    );
+    if (!pending.advisoryNudged) {
+      const advisories = assessRouteQuality(
+        pending.review.snapshot,
+        route,
+        detectExactMoves(pending.review.snapshot),
+      );
+      if (advisories.length > 0) {
+        pending.advisoryNudged = true;
+        throw new ReviewRouteAdvisoryNudge(advisories);
+      }
+    }
+    try {
+      await this.verifySnapshot(pending.review.snapshot, signal);
+    } catch (error: unknown) {
+      if (error instanceof ReviewSnapshotDriftError) {
+        this.pendingReview = undefined;
+        throw new ReviewSnapshotDriftError(
+          `Repository drift invalidated snapshot ${pending.review.snapshot.id}. Run /diffwalk again before opening DiffWalk.`,
+        );
+      }
+      throw error;
+    }
+
+    pending.review = attachReviewRoute(pending.review, route, {
+      expectedVersion: pending.review.version,
+      timestamp: new Date().toISOString(),
+    });
+    return this.runPendingReview(ctx, pending);
+  }
+
   discardPendingReview(ctx: CommandContext): void {
     const existing = this.pendingReview;
     if (existing === undefined) {
@@ -348,6 +494,91 @@ export class DiffWalkSession {
       `Discarded the pending DiffWalk review against ${existing.series.targetRef} and ${describeDrafts(existing.review)}.`,
       "info",
     );
+  }
+
+  /** A paused walkthrough resumes unless the user asked for another base or the repository drifted. */
+  private async resumeReadyReview(
+    ctx: CommandContext & ReviewUiContext,
+    existing: PendingReview,
+    requestedTarget: string | undefined,
+  ): Promise<void> {
+    if (existing.inProgress) {
+      throw new Error(`Review ${existing.review.id} is already open.`);
+    }
+    const pendingTarget = existing.series.targetRef;
+    if (requestedTarget !== undefined && requestedTarget !== pendingTarget) {
+      if (hasReviewProgress(existing.review)) {
+        throw new Error(
+          `A DiffWalk review against ${pendingTarget} is pending with ${describeDrafts(existing.review)} and ${describeReviewedUnits(existing.review)}. ` +
+            `Run /diffwalk without arguments to resume it, or /diffwalk ${DISCARD_OPTION} to drop it before reviewing against ${requestedTarget}.`,
+        );
+      }
+      this.pendingReview = undefined;
+      ctx.ui.notify(
+        `Replacing the untouched review against ${pendingTarget} with a review against ${requestedTarget}.`,
+        "info",
+      );
+      await this.startReview(ctx, requestedTarget);
+      return;
+    }
+    try {
+      await this.verifySnapshot(existing.review.snapshot);
+    } catch (error: unknown) {
+      if (!(error instanceof ReviewSnapshotDriftError)) throw error;
+      this.pendingReview = undefined;
+      ctx.ui.notify(
+        `The repository changed while the review of snapshot ${existing.review.snapshot.id} was paused. ` +
+          `Discarded the stale review and ${describeDrafts(existing.review)}. Starting a new review against ${requestedTarget ?? pendingTarget}.`,
+        "warning",
+      );
+      await this.startReview(ctx, requestedTarget ?? pendingTarget);
+      return;
+    }
+    const result = await this.runPendingReview(ctx, existing);
+    if (result.status === "submitted" && shouldSendReviewToAgent(result)) {
+      this.pi.sendMessage(
+        {
+          customType: DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+          content: formatGuidedReviewResult(result),
+          display: true,
+          details: buildSubmittedReviewMessageDetails(result),
+        },
+        { triggerTurn: true },
+      );
+    } else {
+      ctx.ui.notify(reviewOutcomeNotification(result), "info");
+    }
+  }
+
+  /** A review waiting for a route re-sends the kickoff unless its snapshot is stale. */
+  private async resumeRoutePreparation(
+    ctx: CommandContext,
+    existing: PendingReview,
+    requestedTarget: string | undefined,
+  ): Promise<void> {
+    const pendingTarget = existing.series.targetRef;
+    let drifted = false;
+    try {
+      await this.verifySnapshot(existing.review.snapshot);
+    } catch (error: unknown) {
+      if (!(error instanceof ReviewSnapshotDriftError)) throw error;
+      drifted = true;
+    }
+    if (
+      drifted ||
+      (requestedTarget !== undefined && requestedTarget !== pendingTarget)
+    ) {
+      this.pendingReview = undefined;
+      ctx.ui.notify(
+        drifted
+          ? `The repository changed before a route was prepared for snapshot ${existing.review.snapshot.id}. Capturing a new snapshot.`
+          : `Replacing the pending review against ${pendingTarget} with a review against ${requestedTarget}.`,
+        "info",
+      );
+      await this.startReview(ctx, requestedTarget ?? pendingTarget);
+      return;
+    }
+    this.sendKickoffPrompt(existing);
   }
 
   private async submitPendingReview(
@@ -489,12 +720,12 @@ async function captureRulesSource(
   return result.rules;
 }
 
-export function describeDrafts(review: InProgressReview): string {
+function describeDrafts(review: InProgressReview): string {
   const count = review.comments.length;
   return `${count} draft comment${count === 1 ? "" : "s"}`;
 }
 
-export function describeReviewedUnits(review: InProgressReview): string {
+function describeReviewedUnits(review: InProgressReview): string {
   const count = review.unitProgress.filter(
     (progress) => progress.disposition !== "pending",
   ).length;
@@ -502,7 +733,7 @@ export function describeReviewedUnits(review: InProgressReview): string {
 }
 
 /** A pending review is replaceable until the human records work inside it. */
-export function hasReviewProgress(review: InProgressReview): boolean {
+function hasReviewProgress(review: InProgressReview): boolean {
   return (
     review.comments.length > 0 ||
     review.unitProgress.some((progress) => progress.disposition !== "pending")

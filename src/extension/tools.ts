@@ -1,23 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { ReviewSnapshotDriftError } from "../git/errors.ts";
-import { attachReviewRoute } from "../review/in-progress.ts";
-import { detectExactMoves } from "../review/moves.ts";
 import {
-  assessRouteQuality,
-  ReviewRouteAdvisoryNudge,
-} from "../review/route-advisory.ts";
-import { validateReviewRoute } from "../review/route-validation.ts";
-import {
-  attachReviewThreadResponses,
-  pendingReviewThreadTurn,
   type ReviewResponseCandidate,
   ReviewResponseCandidateSchema,
 } from "../review/threads.ts";
 import {
   type GuidedReviewResult,
   ReviewRouteCandidateSchema,
-  type ReviewThreadBatchId,
 } from "../review/types.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
 import {
@@ -51,61 +40,11 @@ export function registerGuidedReviewTool(
     parameters: ReviewRouteCandidateSchema,
     executionMode: "sequential",
     async execute(_toolCallId, routeCandidate, signal, _onUpdate, ctx) {
-      const pending = session.pending;
-      if (pending === undefined) {
-        throw new Error(
-          "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
-        );
-      }
-      if (routeCandidate.snapshotId !== pending.review.snapshot.id) {
-        throw new Error(
-          `Route snapshot ${routeCandidate.snapshotId} does not match pending snapshot ${pending.review.snapshot.id}. Use the frozen snapshot ID from the /diffwalk prompt.`,
-        );
-      }
-      if (pending.inProgress) {
-        throw new Error(
-          `Guided review for snapshot ${pending.review.snapshot.id} is already open.`,
-        );
-      }
-      if (pending.review.lifecycle !== "preparing-route") {
-        throw new Error(
-          `Review ${pending.review.id} already has a validated route. Run /diffwalk to resume it.`,
-        );
-      }
-
-      const route = validateReviewRoute(
-        pending.review.snapshot,
-        pending.review.delta,
+      const result = await session.attachRouteAndOpen(
+        ctx,
         routeCandidate,
+        signal,
       );
-      if (!pending.advisoryNudged) {
-        const advisories = assessRouteQuality(
-          pending.review.snapshot,
-          route,
-          detectExactMoves(pending.review.snapshot),
-        );
-        if (advisories.length > 0) {
-          pending.advisoryNudged = true;
-          throw new ReviewRouteAdvisoryNudge(advisories);
-        }
-      }
-      try {
-        await session.verifySnapshot(pending.review.snapshot, signal);
-      } catch (error: unknown) {
-        if (error instanceof ReviewSnapshotDriftError) {
-          session.clearPending();
-          throw new ReviewSnapshotDriftError(
-            `Repository drift invalidated snapshot ${pending.review.snapshot.id}. Run /diffwalk again before opening DiffWalk.`,
-          );
-        }
-        throw error;
-      }
-
-      pending.review = attachReviewRoute(pending.review, route, {
-        expectedVersion: pending.review.version,
-        timestamp: new Date().toISOString(),
-      });
-      const result = await session.runPendingReview(ctx, pending);
       return {
         content: [{ type: "text", text: formatGuidedReviewResult(result) }],
         details: result,
@@ -145,20 +84,7 @@ export function registerReviewResponsesTool(
       return normalizeResponseArguments(args, session);
     },
     async execute(_toolCallId, candidate, signal, _onUpdate, ctx) {
-      signal?.throwIfAborted();
-      const batch = session.threadBatch(
-        candidate.batchId as ReviewThreadBatchId,
-      );
-      if (batch === undefined) {
-        throw new Error(
-          `No pending DiffWalk thread batch matches ${candidate.batchId}. Use the batchId from the pending reviewer turn.`,
-        );
-      }
-      session.assertThreadBatchCanChange(batch);
-      const answered = attachReviewThreadResponses(batch, candidate);
-      session.persistThreadBatch(answered);
-      signal?.throwIfAborted();
-      const reviewed = await session.openThreadBatch(ctx, answered);
+      const reviewed = await session.respondToThreads(ctx, candidate, signal);
       const followUp = reviewed.status === "follow-up-submitted";
       return {
         content: [
@@ -242,13 +168,10 @@ function normalizeResponseArguments(
   if (typeof input.batchId !== "string" || !Array.isArray(input.responses)) {
     return original;
   }
-  const batch = session.threadBatch(input.batchId as ReviewThreadBatchId);
   const turnId =
     typeof input.turnId === "string"
       ? input.turnId
-      : batch === undefined
-        ? undefined
-        : pendingReviewThreadTurn(batch)?.id;
+      : session.pendingThreadTurnId(input.batchId);
   if (turnId === undefined) return original;
   const responses: ReviewResponseCandidate["responses"] = [];
   for (const response of input.responses) {
