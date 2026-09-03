@@ -25,6 +25,20 @@ DiffWalk is a pi extension that lets an agent guide a human through a code revie
 
 Evaluate every product and implementation decision against that purpose. Do not turn DiffWalk into an autonomous approval bot or a generic diff viewer.
 
+## Module Layout
+
+| Directory | Contents |
+|---|---|
+| `src/git/` | Git invocation and revision resolution (`runner.ts`), pure patch parsing (`patch.ts`), frozen file reconstruction (`content.ts`), snapshot capture and drift checks (`snapshot.ts`) |
+| `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation and advisory |
+| `src/extension/` | pi integration: `DiffWalkSession` (`session.ts`) owns the pending review, series, and thread batches and runs every workflow; `command.ts` and `tools.ts` parse input and format output; `prompts.ts` and `model-payloads.ts` hold text sent to the model; `tui-messages.ts` renders messages and tool results; `rules.ts` loads rules files |
+| `src/ui/` | Rendering helpers shared by both UIs: theme, text escaping and wrapping, layout, path display, diff lines |
+| `src/review-ui/` | Guided walkthrough: `component.ts` holds the screen state machine; view model, diff view, viewport, and per-screen rendering are separate modules |
+| `src/thread-ui/` | Comment thread component and its rendering |
+| `test/` | Mirrors `src/`. Shared domain fixtures live in `test/support/`; `test/review-ui/harness.ts` and `test/extension/harness.ts` hold the fake terminal and fake pi used by their directories |
+
+Keep new code in the directory that owns the concern. Domain logic in `src/review/` must not import from `src/ui/`, `src/review-ui/`, `src/thread-ui/`, or `src/extension/`.
+
 ## Setup and Commands
 
 ```bash
@@ -32,7 +46,7 @@ npm ci --ignore-scripts             # install exactly the locked dependencies
 npx biome check .                   # formatting and lint checks
 npm run check                       # full static check
 npm test                            # all tests
-node --test test/git-diff.test.ts   # one focused test file
+node --test test/git/snapshot.test.ts   # one focused test file
 npm run format                      # only when formatting is within the approved scope
 ```
 
@@ -75,6 +89,8 @@ Keep coverage for these behavior categories; the existing test files are the sou
 - advisory signals for hunk mirroring, alphabetical ordering, and split moves, and the one-shot nudge accepting a resubmitted route
 - the pinned model-visible prompt surface matching its golden fixture, and a kickoff prompt that does not grow with the amount of changed source text
 - comment anchors on added and removed lines, rejection of context lines, and snapshot drift detection
+- pinned identifier hashes in `test/review/ids.test.ts`: series, round, and unit ids are persisted across pi sessions, so a formula change must fail a test rather than orphan stored reviews
+- the import-direction and cycle rules in `test/architecture.test.ts`
 
 Before considering the TUI complete, run an interactive smoke test through pi in a controlled terminal. Verify navigation, scrolling, comment editing, submission, cancellation, narrow terminal behavior, and Chinese IME input.
 

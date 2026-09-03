@@ -15,7 +15,7 @@
   },
   "scripts": {
     "lint": "tsc --noEmit && biome check --error-on-warnings --write .",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test \"test/**/*.test.ts\"",
     "ci": "npm run lint && npm run test"
   },
   "peerDependencies": {
