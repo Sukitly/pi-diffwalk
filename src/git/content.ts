@@ -1,3 +1,4 @@
+import { hashAs } from "../review/ids.ts";
 import type {
   DiffLine,
   FileChange,
@@ -12,8 +13,9 @@ import {
   contentBodyLines,
   type FileChangeDraft,
   type HunkDraft,
+  splitLines,
 } from "./patch.ts";
-import { type GitRunner, hashAs, runGit, splitLines } from "./runner.ts";
+import { type GitRunner, runGit } from "./runner.ts";
 
 export async function buildFileChange(
   git: GitRunner,

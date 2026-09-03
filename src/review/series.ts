@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import {
   assertReviewDeltaMatchesSnapshot,
   coverageFileKey,
   fileKey,
 } from "./delta.ts";
+import { hashAs } from "./ids.ts";
 import { changedLineKey, listFileChangedLines } from "./span.ts";
 import type {
   ChangedLineRecord,
@@ -337,15 +337,4 @@ function assertNonEmpty(value: string, label: string): void {
   if (value.trim().length === 0) {
     throw new ReviewSeriesError(`${label} is required.`);
   }
-}
-
-function hashAs<Value extends string>(
-  namespace: string,
-  value: unknown,
-): Value {
-  const hash = createHash("sha256");
-  hash.update(namespace);
-  hash.update("\0");
-  hash.update(JSON.stringify(value));
-  return `${namespace}:${hash.digest("hex")}` as Value;
 }

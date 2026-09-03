@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
 import {
   assertReviewDeltaMatchesSnapshot,
   isNeedsReviewReasonSkippable,
 } from "./delta.ts";
+import { hashAs } from "./ids.ts";
 import {
   type ChangedLine,
   changedLineKey,
@@ -341,23 +341,17 @@ function createReviewUnitId(
   unitIndex: number,
   spans: readonly ResolvedSpan[],
 ): ReviewUnitId {
-  const hash = createHash("sha256");
-  hash.update("review-unit");
-  hash.update("\0");
-  hash.update(
-    JSON.stringify({
-      snapshotId,
-      sequence: unitIndex + 1,
-      spans: spans.map((span) => ({
-        fileChangeId: span.fileChangeId,
-        oldStart: span.oldStart ?? null,
-        oldEnd: span.oldEnd ?? null,
-        newStart: span.newStart ?? null,
-        newEnd: span.newEnd ?? null,
-      })),
-    }),
-  );
-  return `review-unit:${hash.digest("hex")}` as ReviewUnitId;
+  return hashAs<ReviewUnitId>("review-unit", {
+    snapshotId,
+    sequence: unitIndex + 1,
+    spans: spans.map((span) => ({
+      fileChangeId: span.fileChangeId,
+      oldStart: span.oldStart ?? null,
+      oldEnd: span.oldEnd ?? null,
+      newStart: span.newStart ?? null,
+      newEnd: span.newEnd ?? null,
+    })),
+  });
 }
 
 /** Rebuilds the model-facing candidate shape from a validated route. */

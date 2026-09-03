@@ -6,7 +6,6 @@ import type {
   UnsupportedChange,
 } from "../review/types.ts";
 import { GitSnapshotError } from "./errors.ts";
-import { requiredAt, splitLines } from "./runner.ts";
 
 export interface RawFileChange {
   readonly statusCode: string;
@@ -468,4 +467,38 @@ function recordTouchesPaths(
     (change.oldPath !== undefined && paths.has(change.oldPath)) ||
     (change.newPath !== undefined && paths.has(change.newPath))
   );
+}
+
+export function splitLines(output: string): readonly string[] {
+  const withoutFinalNewline = output.endsWith("\n")
+    ? output.slice(0, -1)
+    : output;
+  return withoutFinalNewline.length === 0
+    ? []
+    : withoutFinalNewline.split("\n");
+}
+
+export function splitNul(output: string): string[] {
+  if (output.length === 0) return [];
+  const fields = output.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  return fields;
+}
+
+export function compareStringsByUtf8(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left), Buffer.from(right));
+}
+
+export function requiredAt<Value>(
+  values: readonly Value[],
+  index: number,
+  label: string,
+): Value {
+  const value = values[index];
+  if (value === undefined) {
+    throw new GitSnapshotError(
+      `Git output is missing ${label} at index ${index}.`,
+    );
+  }
+  return value;
 }

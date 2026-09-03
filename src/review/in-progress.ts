@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   type ReviewCommentAnchor,
   type ReviewCommentInput,
@@ -6,6 +5,7 @@ import {
 } from "./comments.ts";
 import { computeReviewCoverage } from "./coverage.ts";
 import { assertReviewDeltaMatchesSnapshot } from "./delta.ts";
+import { hashAs } from "./ids.ts";
 import {
   appendReviewRound,
   createReviewRound,
@@ -368,15 +368,4 @@ function assertTimestamp(timestamp: string): void {
       "Review mutation timestamp is required.",
     );
   }
-}
-
-function hashAs<Value extends string>(
-  namespace: string,
-  value: unknown,
-): Value {
-  const hash = createHash("sha256");
-  hash.update(namespace);
-  hash.update("\0");
-  hash.update(JSON.stringify(value));
-  return `${namespace}:${hash.digest("hex")}` as Value;
 }

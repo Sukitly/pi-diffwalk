@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
+import { hashAs } from "./ids.ts";
 import type {
   ChangedLineRef,
   ReviewComment,
@@ -514,15 +514,4 @@ function copyAnchor(anchor: ReviewThreadAnchor): ReviewThreadAnchor {
     ...anchor,
     nearbyContext: anchor.nearbyContext.map((line) => ({ ...line })),
   };
-}
-
-function hashAs<Value extends string>(
-  namespace: string,
-  value: unknown,
-): Value {
-  const hash = createHash("sha256");
-  hash.update(namespace);
-  hash.update("\0");
-  hash.update(JSON.stringify(value));
-  return `${namespace}:${hash.digest("hex")}` as Value;
 }

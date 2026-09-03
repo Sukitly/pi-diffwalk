@@ -1,3 +1,4 @@
+import { hashAs } from "../review/ids.ts";
 import type {
   FileChange,
   NoticeId,
@@ -12,17 +13,17 @@ import { GitSnapshotError, ReviewSnapshotDriftError } from "./errors.ts";
 import {
   buildTrackedDrafts,
   buildUntrackedDraft,
+  compareStringsByUtf8,
   parseRawDiff,
   type RawFileChange,
+  splitNul,
   splitPatchBlocks,
   type UntrackedFile,
 } from "./patch.ts";
 import {
-  compareStringsByUtf8,
   DIFF_CONFIG,
   diffArgs,
   type GitRunner,
-  hashAs,
   PATCH_OPTIONS,
   RAW_OPTIONS,
   resolveCommit,
@@ -30,7 +31,6 @@ import {
   resolveRepositoryRoot,
   resolveSourceBranch,
   runGit,
-  splitNul,
 } from "./runner.ts";
 
 interface RepositoryStateArtifacts {
