@@ -1,14 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ReviewSnapshotDriftError } from "../git/errors.ts";
 import {
-  buildSubmittedReviewMessageDetails,
-  DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
-  reviewOutcomeNotification,
-} from "./messages.ts";
-import {
   formatGuidedReviewResult,
   shouldSendReviewToAgent,
-} from "./results.ts";
+} from "./model-payloads.ts";
 import {
   type CommandContext,
   type DiffWalkSession,
@@ -18,6 +13,11 @@ import {
   type PendingReview,
   type ReviewUiContext,
 } from "./session.ts";
+import {
+  buildSubmittedReviewMessageDetails,
+  DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
+  reviewOutcomeNotification,
+} from "./tui-messages.ts";
 
 const DEFAULT_REVIEW_TARGET = "HEAD";
 const DISCARD_OPTION = "--discard";

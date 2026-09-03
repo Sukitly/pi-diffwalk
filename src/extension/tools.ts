@@ -21,9 +21,10 @@ import {
 } from "../review/types.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
 import {
-  renderGuidedReviewToolResult,
-  renderThreadFollowUpToolResult,
-} from "./messages.ts";
+  formatGuidedReviewResult,
+  formatReviewThreadFollowUp,
+  shouldSendReviewToAgent,
+} from "./model-payloads.ts";
 import {
   GUIDED_REVIEW_TOOL_DESCRIPTION,
   GUIDED_REVIEW_TOOL_NAME,
@@ -32,12 +33,11 @@ import {
   REVIEW_RESPONSES_TOOL_NAME,
   REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
 } from "./prompts.ts";
-import {
-  formatGuidedReviewResult,
-  formatReviewThreadFollowUp,
-  shouldSendReviewToAgent,
-} from "./results.ts";
 import type { DiffWalkSession } from "./session.ts";
+import {
+  renderGuidedReviewToolResult,
+  renderThreadFollowUpToolResult,
+} from "./tui-messages.ts";
 
 export function registerGuidedReviewTool(
   pi: ExtensionAPI,

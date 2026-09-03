@@ -154,6 +154,17 @@ export function pendingReviewThreadTurn(
     : undefined;
 }
 
+export function requireThreadTurn(
+  batch: ReviewThreadBatch,
+  turnId: ReviewThreadTurnId,
+): ReviewThreadTurn {
+  const turn = batch.turns.find((candidate) => candidate.id === turnId);
+  if (turn === undefined) {
+    throw new Error(`DiffWalk batch ${batch.id} has no turn ${turnId}.`);
+  }
+  return turn;
+}
+
 export function attachReviewThreadResponses(
   batch: ReviewThreadBatch,
   candidate: ReviewResponseCandidate,

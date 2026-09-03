@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { formatGuidedReviewResult } from "../../src/extension/model-payloads.ts";
+import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
 import {
   buildKickoffMessageDetails,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
@@ -9,9 +11,7 @@ import {
   renderKickoffMessage,
   renderSubmittedReviewMessage,
   type SubmittedReviewMessageDetails,
-} from "../../src/extension/messages.ts";
-import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
-import { formatGuidedReviewResult } from "../../src/extension/results.ts";
+} from "../../src/extension/tui-messages.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import type {
   GuidedReviewResult,

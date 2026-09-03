@@ -28,6 +28,7 @@ import {
 import {
   createReviewThreadBatch,
   isReviewThreadBatchAnswered,
+  requireThreadTurn,
   resolvedCommentLines,
 } from "../review/threads.ts";
 import type {
@@ -45,13 +46,8 @@ import { openGuidedReview } from "../review-ui/index.ts";
 import { openReviewThreads } from "../thread-ui/index.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
 import { createPiGitRunner } from "./git-runner.ts";
-import {
-  buildKickoffMessageDetails,
-  DIFFWALK_KICKOFF_MESSAGE_TYPE,
-  DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
-} from "./messages.ts";
+import { formatReviewThreadFollowUp } from "./model-payloads.ts";
 import { buildReviewKickoffPrompt } from "./prompts.ts";
-import { formatReviewThreadFollowUp, requireThreadTurn } from "./results.ts";
 import {
   DIFFWALK_RULES_SOURCE,
   type DiffWalkRulesLoadResult,
@@ -60,6 +56,11 @@ import {
   loadGlobalDiffWalkRules,
   loadProjectDiffWalkRules,
 } from "./rules.ts";
+import {
+  buildKickoffMessageDetails,
+  DIFFWALK_KICKOFF_MESSAGE_TYPE,
+  DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
+} from "./tui-messages.ts";
 
 export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;

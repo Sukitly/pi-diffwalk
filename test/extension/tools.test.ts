@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
   DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
-} from "../../src/extension/messages.ts";
+} from "../../src/extension/tui-messages.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
 import { DIFFWALK_THREAD_BATCH_ENTRY_TYPE } from "../../src/review/thread-persistence.ts";
 import type {

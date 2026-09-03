@@ -3,6 +3,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
+  formatGuidedReviewResult,
+  formatReviewThreadFollowUp,
+} from "../../src/extension/model-payloads.ts";
+import {
   buildReviewKickoffPrompt,
   GUIDED_REVIEW_TOOL_DESCRIPTION,
   GUIDED_REVIEW_TOOL_NAME,
@@ -11,10 +15,6 @@ import {
   REVIEW_RESPONSES_TOOL_NAME,
   REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/prompts.ts";
-import {
-  formatGuidedReviewResult,
-  formatReviewThreadFollowUp,
-} from "../../src/extension/results.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import { detectExactMoves } from "../../src/review/moves.ts";
 import {

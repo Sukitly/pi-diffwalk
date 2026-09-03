@@ -1,5 +1,6 @@
 import type { MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { requireThreadTurn } from "../review/threads.ts";
 import type {
   FileChange,
   GuidedReviewResult,
@@ -11,11 +12,11 @@ import type {
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import { countNoun } from "../ui/layout.ts";
-import { requireThreadTurn } from "./results.ts";
 
 /**
- * Kickoff and submission payloads reach the LLM verbatim. The TUI renders
- * separate user-facing facts and keeps protocol details out of the transcript.
+ * What the TUI shows for DiffWalk messages and tool results. Kickoff and
+ * submission payloads reach the LLM verbatim; these renderers show
+ * separate user-facing facts and keep protocol details out of the transcript.
  */
 export const DIFFWALK_KICKOFF_MESSAGE_TYPE = "diffwalk-kickoff";
 export const DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE = "diffwalk-review-result";

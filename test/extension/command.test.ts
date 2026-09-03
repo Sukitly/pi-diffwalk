@@ -7,7 +7,7 @@ import {
 import {
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
-} from "../../src/extension/messages.ts";
+} from "../../src/extension/tui-messages.ts";
 import type { NoticeId } from "../../src/review/types.ts";
 import { makeSnapshot } from "../support/domain-fixtures.ts";
 import {

@@ -1,4 +1,7 @@
-import { reviewThreadConversation } from "../review/threads.ts";
+import {
+  requireThreadTurn,
+  reviewThreadConversation,
+} from "../review/threads.ts";
 import type {
   GuidedReviewResult,
   ReviewThreadBatch,
@@ -7,24 +10,13 @@ import type {
 import { REVIEW_RESPONSES_TOOL_NAME } from "./prompts.ts";
 
 /**
- * Model-facing payloads. They reach the LLM verbatim as tool results or
- * message content, so their shape is part of the prompt surface and is
- * covered by the golden fixture.
+ * Text sent to the model: guided review tool results and the follow-up
+ * message content. Both reach the LLM verbatim, so their shape is part of
+ * the prompt surface covered by the golden fixture.
  */
 
 export function shouldSendReviewToAgent(result: GuidedReviewResult): boolean {
   return result.status === "submitted" && result.comments.length > 0;
-}
-
-export function requireThreadTurn(
-  batch: ReviewThreadBatch,
-  turnId: ReviewThreadTurnId,
-): ReviewThreadBatch["turns"][number] {
-  const turn = batch.turns.find((candidate) => candidate.id === turnId);
-  if (turn === undefined) {
-    throw new Error(`DiffWalk batch ${batch.id} has no turn ${turnId}.`);
-  }
-  return turn;
 }
 
 export function formatReviewThreadFollowUp(

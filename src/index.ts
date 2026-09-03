@@ -1,6 +1,15 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerDiffWalkCommand } from "./extension/command.ts";
 import {
+  DEFAULT_DEPENDENCIES,
+  type DiffWalkDependencies,
+  DiffWalkSession,
+} from "./extension/session.ts";
+import {
+  registerGuidedReviewTool,
+  registerReviewResponsesTool,
+} from "./extension/tools.ts";
+import {
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
   DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
@@ -10,16 +19,7 @@ import {
   renderThreadFollowUpMessage,
   type SubmittedReviewMessageDetails,
   type ThreadFollowUpMessageDetails,
-} from "./extension/messages.ts";
-import {
-  DEFAULT_DEPENDENCIES,
-  type DiffWalkDependencies,
-  DiffWalkSession,
-} from "./extension/session.ts";
-import {
-  registerGuidedReviewTool,
-  registerReviewResponsesTool,
-} from "./extension/tools.ts";
+} from "./extension/tui-messages.ts";
 
 export default function diffWalk(pi: ExtensionAPI): void {
   registerDiffWalk(pi);
