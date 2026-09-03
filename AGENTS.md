@@ -31,7 +31,7 @@ Evaluate every product and implementation decision against that purpose. Do not 
 |---|---|
 | `src/git/` | Git invocation and revision resolution (`runner.ts`), pure patch parsing (`patch.ts`), frozen file reconstruction (`content.ts`), snapshot capture and drift checks (`snapshot.ts`) |
 | `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation and advisory |
-| `src/extension/` | pi integration: `DiffWalkSession` state, the `/diffwalk` command, the two tools, model-facing prompts and results, TUI message renderers, rules loading |
+| `src/extension/` | pi integration: `DiffWalkSession` (`session.ts`) owns the pending review, series, and thread batches and runs every workflow; `command.ts` and `tools.ts` parse input and format output; `prompts.ts` and `model-payloads.ts` hold text sent to the model; `tui-messages.ts` renders messages and tool results; `rules.ts` loads rules files |
 | `src/ui/` | Rendering helpers shared by both UIs: theme, text escaping and wrapping, layout, path display, diff lines |
 | `src/review-ui/` | Guided walkthrough: `component.ts` holds the screen state machine; view model, diff view, viewport, and per-screen rendering are separate modules |
 | `src/thread-ui/` | Comment thread component and its rendering |
