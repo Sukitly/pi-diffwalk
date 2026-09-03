@@ -89,6 +89,8 @@ Keep coverage for these behavior categories; the existing test files are the sou
 - advisory signals for hunk mirroring, alphabetical ordering, and split moves, and the one-shot nudge accepting a resubmitted route
 - the pinned model-visible prompt surface matching its golden fixture, and a kickoff prompt that does not grow with the amount of changed source text
 - comment anchors on added and removed lines, rejection of context lines, and snapshot drift detection
+- pinned identifier hashes in `test/review/ids.test.ts`: series, round, and unit ids are persisted across pi sessions, so a formula change must fail a test rather than orphan stored reviews
+- the import-direction and cycle rules in `test/architecture.test.ts`
 
 Before considering the TUI complete, run an interactive smoke test through pi in a controlled terminal. Verify navigation, scrolling, comment editing, submission, cancellation, narrow terminal behavior, and Chinese IME input.
 
