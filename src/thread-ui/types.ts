@@ -47,3 +47,17 @@ export class ReviewThreadUiError extends Error {
     this.name = "ReviewThreadUiError";
   }
 }
+
+export function assertBatchMatchesSnapshot(
+  batch: ReviewThreadBatch,
+  snapshot: ReviewSnapshot,
+): void {
+  if (batch.snapshotId !== snapshot.id) {
+    throw new ReviewThreadUiError(
+      `Thread batch ${batch.id} references snapshot ${batch.snapshotId}, not ${snapshot.id}.`,
+    );
+  }
+  if (batch.threads.length === 0 || batch.turns.length === 0) {
+    throw new ReviewThreadUiError(`Thread batch ${batch.id} is empty.`);
+  }
+}

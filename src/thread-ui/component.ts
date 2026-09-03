@@ -43,7 +43,6 @@ import {
   wrapWithPrefix,
 } from "../ui/text.ts";
 import { createEditorTheme } from "../ui/theme.ts";
-import { assertBatchMatchesSnapshot } from "./index.ts";
 import { buildThreadRegions, ensureThreadVisible } from "./regions.ts";
 import {
   editorViewport,
@@ -54,6 +53,7 @@ import {
   renderThreadRows,
 } from "./render.ts";
 import {
+  assertBatchMatchesSnapshot,
   ReviewThreadUiError,
   type ReviewThreadUiInput,
   type ReviewThreadUiResult,

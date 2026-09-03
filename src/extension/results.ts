@@ -1,12 +1,10 @@
-import {
-  REVIEW_RESPONSES_TOOL_NAME,
-  reviewThreadConversation,
-} from "../review/threads.ts";
+import { reviewThreadConversation } from "../review/threads.ts";
 import type {
   GuidedReviewResult,
   ReviewThreadBatch,
   ReviewThreadTurnId,
 } from "../review/types.ts";
+import { REVIEW_RESPONSES_TOOL_NAME } from "./prompts.ts";
 
 /**
  * Model-facing payloads. They reach the LLM verbatim as tool results or

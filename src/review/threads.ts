@@ -15,12 +15,6 @@ import type {
   SnapshotId,
 } from "./types.ts";
 
-export const REVIEW_RESPONSES_TOOL_NAME = "submit_diffwalk_responses";
-export const REVIEW_RESPONSES_TOOL_DESCRIPTION =
-  "Submit one structured Agent response for every thread in the pending DiffWalk turn, then open the anchored conversation UI";
-export const REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET =
-  "Return complete structured responses for a pending DiffWalk conversation turn";
-
 export const ReviewResponseCandidateSchema = Type.Object(
   {
     batchId: Type.String({

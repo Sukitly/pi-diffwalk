@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewSnapshot, ReviewThreadBatch } from "../review/types.ts";
 import { ReviewThreadComponent } from "./component.ts";
 import {
+  assertBatchMatchesSnapshot,
   ReviewThreadUiError,
   type ReviewThreadUiInput,
   type ReviewThreadUiResult,
@@ -36,18 +36,4 @@ export async function openReviewThreads(
       },
     },
   );
-}
-
-export function assertBatchMatchesSnapshot(
-  batch: ReviewThreadBatch,
-  snapshot: ReviewSnapshot,
-): void {
-  if (batch.snapshotId !== snapshot.id) {
-    throw new ReviewThreadUiError(
-      `Thread batch ${batch.id} references snapshot ${batch.snapshotId}, not ${snapshot.id}.`,
-    );
-  }
-  if (batch.threads.length === 0 || batch.turns.length === 0) {
-    throw new ReviewThreadUiError(`Thread batch ${batch.id} is empty.`);
-  }
 }

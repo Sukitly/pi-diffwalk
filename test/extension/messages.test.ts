@@ -10,9 +10,9 @@ import {
   renderSubmittedReviewMessage,
   type SubmittedReviewMessageDetails,
 } from "../../src/extension/messages.ts";
+import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
 import { formatGuidedReviewResult } from "../../src/extension/results.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
-import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/review/threads.ts";
 import type {
   GuidedReviewResult,
   ReviewThreadBatch,

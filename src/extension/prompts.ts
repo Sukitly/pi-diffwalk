@@ -32,6 +32,12 @@ export const GUIDED_REVIEW_TOOL_DESCRIPTION =
 export const GUIDED_REVIEW_TOOL_PROMPT_SNIPPET =
   "Open the validated human-guided review route for the pending DiffWalk snapshot";
 
+export const REVIEW_RESPONSES_TOOL_NAME = "submit_diffwalk_responses";
+export const REVIEW_RESPONSES_TOOL_DESCRIPTION =
+  "Submit one structured Agent response for every thread in the pending DiffWalk turn, then open the anchored conversation UI";
+export const REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET =
+  "Return complete structured responses for a pending DiffWalk conversation turn";
+
 /**
  * The agent inventory deliberately carries no file content.
  *

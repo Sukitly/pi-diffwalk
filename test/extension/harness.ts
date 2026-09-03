@@ -7,6 +7,7 @@ import type {
   ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
@@ -17,7 +18,6 @@ import {
 } from "../../src/review/in-progress.ts";
 import {
   appendReviewThreadTurn,
-  REVIEW_RESPONSES_TOOL_NAME,
   type ReviewResponseCandidateSchema,
   setReviewThreadResolved,
 } from "../../src/review/threads.ts";

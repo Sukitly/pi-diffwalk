@@ -7,6 +7,9 @@ import {
   GUIDED_REVIEW_TOOL_DESCRIPTION,
   GUIDED_REVIEW_TOOL_NAME,
   GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
+  REVIEW_RESPONSES_TOOL_DESCRIPTION,
+  REVIEW_RESPONSES_TOOL_NAME,
+  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/prompts.ts";
 import {
   formatGuidedReviewResult,
@@ -23,9 +26,6 @@ import {
   appendReviewThreadTurn,
   attachReviewThreadResponses,
   createReviewThreadBatch,
-  REVIEW_RESPONSES_TOOL_DESCRIPTION,
-  REVIEW_RESPONSES_TOOL_NAME,
-  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
   ReviewResponseCandidateSchema,
 } from "../../src/review/threads.ts";
 import type {

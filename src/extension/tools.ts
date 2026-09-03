@@ -11,9 +11,6 @@ import { validateReviewRoute } from "../review/route-validation.ts";
 import {
   attachReviewThreadResponses,
   pendingReviewThreadTurn,
-  REVIEW_RESPONSES_TOOL_DESCRIPTION,
-  REVIEW_RESPONSES_TOOL_NAME,
-  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
   type ReviewResponseCandidate,
   ReviewResponseCandidateSchema,
 } from "../review/threads.ts";
@@ -31,6 +28,9 @@ import {
   GUIDED_REVIEW_TOOL_DESCRIPTION,
   GUIDED_REVIEW_TOOL_NAME,
   GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
+  REVIEW_RESPONSES_TOOL_DESCRIPTION,
+  REVIEW_RESPONSES_TOOL_NAME,
+  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
 } from "./prompts.ts";
 import {
   formatGuidedReviewResult,
