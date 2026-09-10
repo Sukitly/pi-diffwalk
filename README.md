@@ -2,7 +2,7 @@
 
 Agent-guided code review for [pi](https://github.com/earendil-works/pi).
 
-> **Alpha:** Core review workflows are available, but APIs, controls, and persisted review formats may change.
+> Before 1.0, APIs, controls, and persisted review formats may change.
 
 Coding agents can produce changes faster than a human can rebuild the context needed to review them. A raw diff does not solve that problem. It shows what changed, but not where to begin, why a file matters, or which part of the system to inspect next.
 
@@ -46,14 +46,14 @@ cd /path/to/project
 pi -e /absolute/path/to/pi-diffwalk
 ```
 
-After the first npm Alpha release is published, install or try that release with:
+After the first npm release is published, install or try it with:
 
 ```bash
-pi install npm:pi-diffwalk@alpha
-pi -e npm:pi-diffwalk@alpha
+pi install npm:pi-diffwalk
+pi -e npm:pi-diffwalk
 ```
 
-The npm examples require a published `alpha` dist-tag. Preparing the release scripts does not publish a package. Extensions run with your full system permissions; inspect the source before installing.
+The npm examples require a published `latest` dist-tag. Preparing the release scripts does not publish a package. Extensions run with your full system permissions; inspect the source before installing.
 
 ## Usage
 
@@ -219,30 +219,29 @@ The release script uses Node.js and npm only. It supports explicit stable versio
    npm whoami --registry=https://registry.npmjs.org/
    ```
 
-2. Run preflight for the first Alpha release:
+2. Run preflight for the first release:
 
    ```bash
-   npm run release -- 0.1.0-alpha.1 --dry-run
+   npm run release -- 0.1.0 --dry-run
    ```
 
 3. Publish the checked version:
 
    ```bash
-   npm run release -- 0.1.0-alpha.1
+   npm run release -- 0.1.0
    ```
 
-   Confirm the prompt to update `package.json` and `package-lock.json`, create the `Release v0.1.0-alpha.1` commit and annotated tag, atomically push the release branch and that tag, and publish to npm. Add `--yes` only when deliberately skipping confirmation. npm may still require authentication or an OTP.
+   Confirm the prompt to update `package.json` and `package-lock.json`, create the `Release v0.1.0` commit and annotated tag, atomically push the release branch and that tag, and publish to npm. Add `--yes` only when deliberately skipping confirmation. npm may still require authentication or an OTP.
 
-4. If you want GitHub release notes, create a Release from `v0.1.0-alpha.1` and mark it as a **pre-release**. The script creates a Git tag, not a GitHub Release.
+4. If you want GitHub release notes, create a Release from `v0.1.0` without marking it as a pre-release. The script creates a Git tag, not a GitHub Release.
 
 | Release | Command | npm dist-tag |
 |---|---|---|
-| First Alpha | `npm run release -- 0.1.0-alpha.1` | `alpha` |
-| Next Alpha | `npm run release -- 0.1.0-alpha.2` | `alpha` |
-| Stable promotion | `npm run release -- 0.1.0` | `latest` |
-| Later stable patch | `npm run release -- 0.1.1` | `latest` |
+| First release | `npm run release -- 0.1.0` | `latest` |
+| Patch release | `npm run release -- 0.1.1` | `latest` |
+| Minor release | `npm run release -- 0.2.0` | `latest` |
 
-The target must be newer than the local version and every published version. Other prerelease labels are intentionally unsupported. Before a stable promotion, review the Alpha notice and change `publishConfig.tag` from `alpha` to `latest`; the release script always passes the correct tag explicitly, but manual npm publication uses the manifest default.
+The target must be newer than the local version and every published version. Other prerelease labels are intentionally unsupported. The release script passes `latest` for stable versions and `alpha` for optional `alpha.N` prereleases. Manual npm publication defaults to `latest` through `publishConfig.tag`.
 
 Preflight verifies branch state, local and remote tag availability, npm authentication, published versions, static checks, tests, package contents, and a dry-run branch push. `--dry-run` performs network checks but does not bump a version, create a commit or tag, push changes, or publish. npm can still write its own cache or logs. Package lifecycle hooks are disabled. No dependency installation runs during release; install the lockfile first.
 
@@ -250,13 +249,13 @@ Preflight verifies branch state, local and remote tag availability, npm authenti
 
 - **Preflight fails:** fix the reported problem and rerun the same command. No release changes were created.
 - **Version, commit, tag, or push fails:** inspect `git status` and the local release commit and tag. npm publication was not attempted. Finish the release commit and tag if necessary, then push both together. Do not blindly run another version bump. Branch protection can reject a direct release push even after a dry-run push succeeds; do not bypass repository protections.
-- **npm publication fails after the push:** check whether the exact version already exists with `npm view pi-diffwalk@0.1.0-alpha.1 version --registry=https://registry.npmjs.org/`. If absent, resolve the authentication or registry error and retry from the release commit:
+- **npm publication fails after the push:** check whether the exact version already exists with `npm view pi-diffwalk@0.1.0 version --registry=https://registry.npmjs.org/`. If absent, resolve the authentication or registry error and retry from the release commit:
 
   ```bash
-  npm publish --ignore-scripts --access public --tag alpha --registry=https://registry.npmjs.org/
+  npm publish --ignore-scripts --access public --tag latest --registry=https://registry.npmjs.org/
   ```
 
-  Use `--tag latest` for a stable release. Do not create another version to retry publication.
+  Use `--tag alpha` only when retrying an optional Alpha prerelease. Do not create another version to retry publication.
 - **Registry verification fails:** publication may have succeeded. Inspect `npm view pi-diffwalk dist-tags --json --registry=https://registry.npmjs.org/` before taking further action.
 
 ## License
