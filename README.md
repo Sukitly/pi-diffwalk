@@ -10,14 +10,74 @@ DiffWalk turns a code review into a guided walkthrough. The agent plans a semant
 
 DiffWalk is a review navigator, not an autonomous reviewer. It does not approve code on your behalf, does not replace tests, static analysis, or security review, and does not let the agent edit code or rewrite the displayed patch during a walkthrough.
 
-## Getting Started
+## Requirements
+
+- Node.js 22.19.0 or newer, npm, and Git on `PATH`.
+- [pi](https://github.com/earendil-works/pi) with a configured model. Development checks use pi 0.84.0.
+- An interactive terminal and a Git worktree with an existing commit. Print and RPC modes are not supported.
+
+## Installation
+
+Install from GitHub:
 
 ```bash
-npm ci --ignore-scripts
-pi -e ./src/index.ts
+pi install https://github.com/Sukitly/pi-diffwalk
 ```
 
-Run `/diffwalk` from a Git worktree in pi's interactive TUI mode.
+Try the repository version for one pi session without saving an installation:
+
+```bash
+pi -e https://github.com/Sukitly/pi-diffwalk
+```
+
+Use a local checkout:
+
+```bash
+git clone https://github.com/Sukitly/pi-diffwalk.git
+cd pi-diffwalk
+npm ci --ignore-scripts
+pi -e .
+```
+
+To review another repository with the local checkout:
+
+```bash
+cd /path/to/project
+pi -e /absolute/path/to/pi-diffwalk
+```
+
+After the first npm Alpha release is published, install or try that release with:
+
+```bash
+pi install npm:pi-diffwalk@alpha
+pi -e npm:pi-diffwalk@alpha
+```
+
+The npm examples require a published `alpha` dist-tag. Preparing the release scripts does not publish a package. Extensions run with your full system permissions; inspect the source before installing.
+
+## Usage
+
+1. Start pi in the repository whose changes you want to review:
+
+   ```bash
+   cd /path/to/project
+   pi
+   ```
+
+   If pi was already running when you installed DiffWalk, run `/reload`.
+
+2. Start a review in pi:
+
+   ```text
+   /diffwalk
+   ```
+
+   The default compares staged, unstaged, and untracked changes against `HEAD`. Use `/diffwalk main` to include your branch changes relative to local `main`, or `/diffwalk origin/main` after fetching that remote ref yourself. The base is a direct comparison, not an automatic merge-base calculation.
+
+3. Read the agent-planned walkthrough. Use `j`/`k` to select a line, `c` to comment, and `n` to mark a unit reviewed and continue. Press `?` for controls.
+4. On the submission page, choose **Discuss first** or **Apply change requests**. Review the agent's replies and resolve answered threads when satisfied.
+
+Use `/diffwalk --threads` to reopen comment conversations. Run `/diffwalk` again after changes to review the remaining work. An empty comparison starts no walkthrough.
 
 ## Commands
 
@@ -134,6 +194,70 @@ A paused review does not lock the repository. If the worktree changes while a re
 - A paused walkthrough lives in extension memory only. It does not survive `/reload` or a pi restart. Completed rounds and comment threads do persist in the session.
 - Detected code moves are reported to the agent for route planning but are not yet marked in the walkthrough screen.
 - There is no GitHub pull request integration; DiffWalk reviews local Git state only.
+
+## Development
+
+```bash
+npm ci --ignore-scripts
+npm run check
+npm test
+npm pack --dry-run --ignore-scripts
+```
+
+`npm run check` runs TypeScript and Biome without modifying files. `npm run format` explicitly applies formatting. There is no build step: pi loads the packaged TypeScript source directly. The npm package includes `src/`, `README.md`, `LICENSE`, and `package.json`, not tests or release scripts.
+
+Before a release, manually verify navigation, scrolling, comment editing, submission, cancellation, narrow terminals, and Chinese IME input in pi. Automated tests do not replace terminal acceptance testing.
+
+## Publishing
+
+The release script uses Node.js and npm only. It supports explicit stable versions and `alpha.N` prereleases, including the first publication. The `pi-package` keyword enables discovery by pi's npm package catalog.
+
+1. Merge the release changes, synchronize a clean `main` or `master` with the same branch on `origin`, and authenticate:
+
+   ```bash
+   npm login --registry=https://registry.npmjs.org/
+   npm whoami --registry=https://registry.npmjs.org/
+   ```
+
+2. Run preflight for the first Alpha release:
+
+   ```bash
+   npm run release -- 0.1.0-alpha.1 --dry-run
+   ```
+
+3. Publish the checked version:
+
+   ```bash
+   npm run release -- 0.1.0-alpha.1
+   ```
+
+   Confirm the prompt to update `package.json` and `package-lock.json`, create the `Release v0.1.0-alpha.1` commit and annotated tag, atomically push the release branch and that tag, and publish to npm. Add `--yes` only when deliberately skipping confirmation. npm may still require authentication or an OTP.
+
+4. If you want GitHub release notes, create a Release from `v0.1.0-alpha.1` and mark it as a **pre-release**. The script creates a Git tag, not a GitHub Release.
+
+| Release | Command | npm dist-tag |
+|---|---|---|
+| First Alpha | `npm run release -- 0.1.0-alpha.1` | `alpha` |
+| Next Alpha | `npm run release -- 0.1.0-alpha.2` | `alpha` |
+| Stable promotion | `npm run release -- 0.1.0` | `latest` |
+| Later stable patch | `npm run release -- 0.1.1` | `latest` |
+
+The target must be newer than the local version and every published version. Other prerelease labels are intentionally unsupported. Before a stable promotion, review the Alpha notice and change `publishConfig.tag` from `alpha` to `latest`; the release script always passes the correct tag explicitly, but manual npm publication uses the manifest default.
+
+Preflight verifies branch state, local and remote tag availability, npm authentication, published versions, static checks, tests, package contents, and a dry-run branch push. `--dry-run` performs network checks but does not bump a version, create a commit or tag, push changes, or publish. npm can still write its own cache or logs. Package lifecycle hooks are disabled. No dependency installation runs during release; install the lockfile first.
+
+### Release failures
+
+- **Preflight fails:** fix the reported problem and rerun the same command. No release changes were created.
+- **Version, commit, tag, or push fails:** inspect `git status` and the local release commit and tag. npm publication was not attempted. Finish the release commit and tag if necessary, then push both together. Do not blindly run another version bump. Branch protection can reject a direct release push even after a dry-run push succeeds; do not bypass repository protections.
+- **npm publication fails after the push:** check whether the exact version already exists with `npm view pi-diffwalk@0.1.0-alpha.1 version --registry=https://registry.npmjs.org/`. If absent, resolve the authentication or registry error and retry from the release commit:
+
+  ```bash
+  npm publish --ignore-scripts --access public --tag alpha --registry=https://registry.npmjs.org/
+  ```
+
+  Use `--tag latest` for a stable release. Do not create another version to retry publication.
+- **Registry verification fails:** publication may have succeeded. Inspect `npm view pi-diffwalk dist-tags --json --registry=https://registry.npmjs.org/` before taking further action.
 
 ## License
 

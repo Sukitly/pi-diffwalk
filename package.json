@@ -1,10 +1,32 @@
 {
   "name": "pi-diffwalk",
   "version": "0.0.0",
-  "private": true,
   "description": "Agent-guided code review for pi",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sukitly/pi-diffwalk.git"
+  },
+  "homepage": "https://github.com/Sukitly/pi-diffwalk#readme",
+  "bugs": {
+    "url": "https://github.com/Sukitly/pi-diffwalk/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "code-review"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "alpha"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
@@ -14,7 +36,10 @@
     ]
   },
   "scripts": {
-    "lint": "tsc --noEmit && biome check --error-on-warnings --write .",
+    "check": "tsc --noEmit && biome check --error-on-warnings .",
+    "lint": "npm run check",
+    "format": "biome format --write .",
+    "release": "node scripts/release.ts",
     "test": "node --test \"test/**/*.test.ts\"",
     "ci": "npm run lint && npm run test"
   },
