@@ -1,6 +1,6 @@
 {
   "name": "pi-diffwalk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Agent-guided code review for pi",
   "type": "module",
   "license": "MIT",
