@@ -2,6 +2,8 @@
 
 Agent-guided code review for [pi](https://github.com/earendil-works/pi).
 
+> **Alpha:** Core review workflows are available, but APIs, controls, and persisted review formats may change.
+
 Coding agents can produce changes faster than a human can rebuild the context needed to review them. A raw diff does not solve that problem. It shows what changed, but not where to begin, why a file matters, or which part of the system to inspect next.
 
 DiffWalk turns a code review into a guided walkthrough. The agent plans a semantic route through the change and explains the context for each stop. DiffWalk renders the real Git diff one review unit at a time. The human reads the code, records comments, and decides whether the change is acceptable.
