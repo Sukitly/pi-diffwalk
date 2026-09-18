@@ -56,13 +56,16 @@ export type FoldDecision =
   | {
       readonly fold: false;
       readonly blockers: readonly string[];
-      readonly features: ReviewUnitFeatures;
+      /** Absent when a hard gate blocked the fold before any model was asked. */
+      readonly features?: ReviewUnitFeatures;
     };
 
-export function decideFold(
-  features: ReviewUnitFeatures,
-  gates: FoldGates,
-): FoldDecision {
+/**
+ * The gates code owns. A unit that fails one is walked without asking the
+ * model, so nothing is sent and nothing is spent on a unit that could never
+ * fold.
+ */
+export function gateBlockers(gates: FoldGates): readonly string[] {
   const blockers: string[] = [];
   if (gates.changedLineCount > FOLD_MAX_CHANGED_LINES) {
     blockers.push(
@@ -72,6 +75,14 @@ export function decideFold(
   if (gates.hasUnresolvedComment) {
     blockers.push("a line carries an unresolved comment");
   }
+  return blockers;
+}
+
+export function decideFold(
+  features: ReviewUnitFeatures,
+  gates: FoldGates,
+): FoldDecision {
+  const blockers: string[] = [...gateBlockers(gates)];
   if (features.changesBehavior >= FOLD_THRESHOLDS.changesBehavior) {
     blockers.push(
       `changes runtime behavior (${formatProbability(features.changesBehavior)})`,
@@ -91,7 +102,7 @@ export function decideFold(
   }
   const kind = confidentChoice(features.kind, "behavior" as ReviewUnitKind);
   if (!FOLDABLE_KINDS.has(kind)) {
-    blockers.push(`is a ${kind} change`);
+    blockers.push(`is ${article(kind)} ${kind} change`);
   }
   if (gates.hasReference) {
     if (features.mirrorsReference === undefined) {
@@ -153,6 +164,10 @@ function describeBoundary(boundary: ReviewUnitBoundary): string {
     case "external-process":
       return "an external process";
   }
+}
+
+function article(word: string): "a" | "an" {
+  return /^[aeiou]/i.test(word) ? "an" : "a";
 }
 
 function formatProbability(value: number): string {

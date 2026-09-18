@@ -243,6 +243,44 @@ test("with a judge, every unit is folded or walked on its features", async () =>
   );
 });
 
+test("a unit over the size gate is walked without asking the judge", async () => {
+  let calls = 0;
+  const big = makeSnapshot("snapshot-index", [
+    {
+      path: "src/big.ts",
+      lines: [
+        " head",
+        ...Array.from({ length: 41 }, (_, index) => `+line ${index}`),
+        " tail",
+      ],
+    },
+  ]);
+  const harness = createHarness({
+    snapshot: big,
+    foldConfiguration: { status: "enabled", apiKey: "sk" },
+    unitFeatureJudge: async () => {
+      calls += 1;
+      return clear;
+    },
+  });
+  await harness.command("", commandContext());
+
+  const result = await harness.unitTool.execute(
+    "u1",
+    { ...unitFor("src/big.ts"), spans: [span("src/big.ts", { new: [2, 42] })] },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+
+  assert.equal(calls, 0);
+  assert.deepEqual(result.details?.acceptedUnit.walked, {
+    outcome: "walked",
+    source: "typesafe",
+    blockers: ["41 changed lines exceed the fold limit of 40"],
+  });
+});
+
 test("an agent routine claim adds a reference check but does not fold by itself", async () => {
   const inputs: { unitText: string; referenceText?: string }[] = [];
   const harness = createHarness({

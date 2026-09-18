@@ -7,6 +7,7 @@ import {
 import {
   decideFold,
   type FoldDecision,
+  gateBlockers,
   renderUnitText,
   unitChangedLineCount,
 } from "../review/fold.ts";
@@ -195,6 +196,13 @@ export async function foldUnit(input: FoldUnitInput): Promise<FoldDecision> {
       unresolved.has(changedLineKey(line)),
     ),
   );
+  const gates = {
+    changedLineCount: unitChangedLineCount(snapshot, unit),
+    hasUnresolvedComment,
+    hasReference: unit.routine !== undefined,
+  };
+  const gated = gateBlockers(gates);
+  if (gated.length > 0) return { fold: false, blockers: gated };
   const referenceText =
     unit.routine === undefined
       ? undefined
@@ -209,11 +217,7 @@ export async function foldUnit(input: FoldUnitInput): Promise<FoldDecision> {
     },
     input.signal,
   );
-  return decideFold(features, {
-    changedLineCount: unitChangedLineCount(snapshot, unit),
-    hasUnresolvedComment,
-    hasReference: unit.routine !== undefined,
-  });
+  return decideFold(features, gates);
 }
 
 export function verdictOf(decision: FoldDecision): ReviewUnitVerdict {
@@ -223,6 +227,8 @@ export function verdictOf(decision: FoldDecision): ReviewUnitVerdict {
         outcome: "walked",
         source: "typesafe",
         blockers: decision.blockers,
-        features: decision.features,
+        ...(decision.features === undefined
+          ? {}
+          : { features: decision.features }),
       };
 }

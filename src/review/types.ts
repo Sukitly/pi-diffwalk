@@ -549,7 +549,8 @@ export type ReviewUnitVerdict =
       readonly outcome: "walked";
       readonly source: "typesafe";
       readonly blockers: readonly string[];
-      readonly features: ReviewUnitFeatures;
+      /** Absent when a hard gate walked the unit before the model was asked. */
+      readonly features?: ReviewUnitFeatures;
     };
 
 /** Surface features of one unit as a decision model reports them. */

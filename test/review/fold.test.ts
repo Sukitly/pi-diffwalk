@@ -65,6 +65,12 @@ test("each blocker is named and every blocker is reported", () => {
     "touches authorization",
     "is a behavior change",
   ]);
+  const vowel = decideFold(
+    { ...foldable, kind: { choice: "interface", confidence: 0.9 } },
+    gates,
+  );
+  assert.equal(vowel.fold, false);
+  if (!vowel.fold) assert.deepEqual(vowel.blockers, ["is an interface change"]);
 });
 
 test("an uncertain choice is read as its unsafe alternative", () => {

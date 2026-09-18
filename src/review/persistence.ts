@@ -337,7 +337,7 @@ const ReviewRoundUnitSchema = Type.Object(
           outcome: Type.Literal("walked"),
           source: Type.Literal("typesafe"),
           blockers: Type.Array(Type.String()),
-          features: ReviewUnitFeaturesSchema,
+          features: Type.Optional(ReviewUnitFeaturesSchema),
         },
         { additionalProperties: false },
       ),
