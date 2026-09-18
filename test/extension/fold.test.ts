@@ -206,7 +206,7 @@ test("with a judge, every unit folds unless its features earn attention", async 
   ]);
   assert.match(
     (attention.content[0] as { text: string }).text,
-    /^Accepted review unit 1 \(needs review: touches authorization \(90%\); behavior code changes runtime behavior \(90%\); behavior code adds control flow \(80%\)\)\./,
+    /^Accepted review unit 1 \(review this: touches authorization \(90%\); behavior code changes runtime behavior \(90%\); behavior code adds control flow \(80%\)\)\./,
   );
 
   const folded = await harness.unitTool.execute(
@@ -237,7 +237,7 @@ test("with a judge, every unit folds unless its features earn attention", async 
   assert.equal(route?.units[0]?.attention?.source, "typesafe");
   assert.match(
     (folded.content[0] as { text: string }).text,
-    /^Accepted review unit 2 \(folded: Test change, no boundary\.\)/,
+    /^Accepted review unit 2 \(skip this: Test change, no boundary\.\)/,
   );
 });
 

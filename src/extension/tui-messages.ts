@@ -174,11 +174,11 @@ export function renderAddUnitToolResult(
   const unit = progress.acceptedUnit;
   const verdict =
     unit.attention !== undefined
-      ? ` • needs review: ${unit.attention.reasons.join("; ")}`
+      ? ` • review this: ${unit.attention.reasons.join("; ")}`
       : unit.fold !== undefined
         ? unit.fold.source === "agent"
-          ? " • folded (agent claim)"
-          : " • folded"
+          ? " • skip this (agent claim)"
+          : ` • skip this: ${unit.fold.reasons.join(" ")}`
         : "";
   return new Text(
     theme.fg(

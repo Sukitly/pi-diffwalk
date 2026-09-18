@@ -125,7 +125,7 @@ test("a model fold shows why under Why and no Mirrors line", () => {
   const output = renderText(harness);
 
   assert.match(output, /Folded: User route registration/);
-  assert.match(output, /Why: Config change, no boundary\./);
+  assert.match(output, /Skipped because: Config change, no boundary\./);
   assert.doesNotMatch(output, /Mirrors:/);
   assert.doesNotMatch(output, /userHandler/);
 

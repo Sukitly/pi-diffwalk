@@ -114,7 +114,7 @@ export function renderFoldedUnit(
     ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
     "",
   );
-  const label = fold.source === "agent" ? "Routine: " : "Why: ";
+  const label = fold.source === "agent" ? "Routine: " : "Skipped because: ";
   for (const [index, reason] of fold.reasons.entries()) {
     rows.push(
       ...wrapWithPrefix(

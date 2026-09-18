@@ -99,12 +99,12 @@ function describeVerdict(
   unit: ReviewRouteDraftProgress["acceptedUnit"],
 ): string {
   if (unit.attention !== undefined) {
-    return ` (needs review: ${unit.attention.reasons.join("; ")})`;
+    return ` (review this: ${unit.attention.reasons.join("; ")})`;
   }
   if (unit.fold !== undefined) {
     return unit.fold.source === "agent"
-      ? " (folded on the routine claim)"
-      : ` (folded: ${unit.fold.reasons.join(" ")})`;
+      ? " (skip this: the agent's routine claim)"
+      : ` (skip this: ${unit.fold.reasons.join(" ")})`;
   }
   return "";
 }
