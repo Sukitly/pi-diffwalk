@@ -30,7 +30,7 @@ Evaluate every product and implementation decision against that purpose. Do not 
 | Directory | Contents |
 |---|---|
 | `src/git/` | Git invocation and revision resolution (`runner.ts`), pure patch parsing (`patch.ts`), frozen file reconstruction (`content.ts`), snapshot capture and drift checks (`snapshot.ts`), path facts for exclusion from `check-ignore` and `check-attr` (`exclusion.ts`) |
-| `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation and advisory, mechanical exclusion (`exclusion.ts`) |
+| `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation and advisory, incremental route assembly (`route-draft.ts`), mechanical exclusion (`exclusion.ts`) |
 | `src/extension/` | pi integration: `DiffWalkSession` (`session.ts`) owns the pending review, series, and thread batches and runs every workflow; `command.ts` and `tools.ts` parse input and format output; `prompts.ts` and `model-payloads.ts` hold text sent to the model; `tui-messages.ts` renders messages and tool results; `rules.ts` loads rules files; `exclusions.ts` locates exclude files and applies the trust rules to exclusion sources; `routine.ts` parses and checks routine references |
 | `src/ui/` | Rendering helpers shared by both UIs: theme, text escaping and wrapping, layout, path display, diff lines |
 | `src/review-ui/` | Guided walkthrough: `component.ts` holds the screen state machine; view model, diff view, viewport, and per-screen rendering are separate modules |
@@ -84,6 +84,7 @@ Keep coverage for these behavior categories; the existing test files are the sou
 
 - Git snapshot shapes: staged, unstaged, mixed, untracked, added, deleted, renamed, binary, empty, no trailing newline, spaces and Unicode in paths, several changed regions in one file, whole-file reconstruction, deterministic identifiers and changed-line sets
 - route validation: every rejection path in Product Invariants 4 and 5, valid explicit skips, partial-hunk spans, and multi-file units
+- incremental route assembly: units accepted one at a time, the remaining-work report, a rejected unit leaving accepted units intact, completeness enforced only when the route is finished, and the prompt regions the agent picks from
 - review delta: carried-forward lines surviving a line shift and a neighbouring edit
 - exact move detection: relocation across files, uniform reindentation, ambiguity from a third occurrence, size thresholds, and same-hunk suppression
 - advisory signals for hunk mirroring, alphabetical ordering, and split moves, and the one-shot nudge accepting a resubmitted route

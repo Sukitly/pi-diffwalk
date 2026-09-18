@@ -61,7 +61,7 @@ test("combines --no-exclude with an optional base revision", () => {
 test("rejects a different explicit base once the human worked in the review", async () => {
   const harness = createHarness({ markProgressOnOpen: true });
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -84,7 +84,7 @@ test("rejects a different explicit base once the human worked in the review", as
 test("replaces an untouched routed review when the base changes", async () => {
   const harness = createHarness();
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -110,7 +110,7 @@ test("discards a pending review without opening the walkthrough", async () => {
   assert.deepEqual(notifications, ["No DiffWalk review is pending."]);
 
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -133,7 +133,7 @@ test("discards a pending review without opening the walkthrough", async () => {
 test("discards a drifted paused review and starts a new one", async () => {
   const harness = createHarness();
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -208,7 +208,7 @@ test("names carried-forward, unreviewable, and noticed changes when nothing need
   const harness = createHarness();
   harness.behavior.submitOnOpen = true;
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -252,7 +252,7 @@ test("fails /diffwalk clearly outside interactive TUI mode", async () => {
 test("completes a resumed review with no comments without messaging the agent", async () => {
   const harness = createHarness();
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -277,7 +277,7 @@ test("completes a resumed review with no comments without messaging the agent", 
 test("reports resumed pauses and discards with the tool outcome wording", async () => {
   const pausedHarness = createHarness();
   await pausedHarness.command("", commandContext());
-  await pausedHarness.tool.execute(
+  await pausedHarness.submitRoute(
     "call-paused",
     validRoute(),
     undefined,
@@ -292,7 +292,7 @@ test("reports resumed pauses and discards with the tool outcome wording", async 
 
   const discardedHarness = createHarness();
   await discardedHarness.command("", commandContext());
-  await discardedHarness.tool.execute(
+  await discardedHarness.submitRoute(
     "call-discarded",
     validRoute(),
     undefined,
@@ -313,7 +313,7 @@ test("reports resumed pauses and discards with the tool outcome wording", async 
 test("sends a resumed submission result when comments need an agent response", async () => {
   const harness = createHarness();
   await harness.command("", commandContext());
-  await harness.tool.execute(
+  await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,

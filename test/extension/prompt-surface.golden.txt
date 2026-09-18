@@ -15,15 +15,16 @@ Construct the route according to these rules:
 - Order review units by behavior, contracts, data flow, and failure paths instead of alphabetical file order.
 - A review unit is a semantic region. Draw its spans around what a reviewer must understand together, not around Git hunk boundaries.
 - One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.
-- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each.
+- Each file lists `regions`: the smallest parts of the change a unit can take. A region is contiguous and has one status, so build a unit by taking whole regions instead of computing line numbers.
+- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each. Split a region only when its lines truly belong to different units.
 - A span may include unchanged lines for context. Unchanged lines may appear in several units; every changed line must belong to exactly one unit.
-- Cover every line listed under `needsReview` and `unresolvedComment` exactly once, either inside a review unit or in `skippedSpans` with a specific visible reason.
-- Lines listed under `unresolvedComment` carry an unanswered comment from an earlier round and cannot be skipped.
-- Do not cover lines listed under `carriedForward`. They were reviewed in an earlier round and stay available outside the planned route.
-- Do not cover lines listed under `excluded`. A mechanical rule removed them from this review; each entry names the rule.
-- `suggestedSpans` mirrors Git hunk boundaries. Use it only as a starting point; redraw it whenever a semantic region disagrees with it.
+- Cover every region with status `needs-review` or `unresolved-comment` exactly once, either inside a review unit or in the skipped regions you pass when finishing, with a specific visible reason.
+- Regions with status `unresolved-comment` carry an unanswered comment from an earlier round and cannot be skipped.
+- Do not cover regions with status `carried-forward`. They were reviewed in an earlier round and stay available outside the planned route.
+- Do not cover regions with status `excluded`. A mechanical rule removed them from this review; `rule` names it.
 - `moves` lists exact relocations detected by comparing changed-line content. Put both sides of a move in the same review unit unless separating them is the honest reading order.
 - Provide at least one review unit; do not skip everything.
+- Order the calls the way the reviewer should read the change. The position of a unit in the walkthrough is the order in which it was appended.
 - `title`: one concise phrase.
 - `whyHere`: one sentence explaining the dependency or reading order.
 - `context`: one to three sentences with only the required call path, contract, or invariant.
@@ -32,7 +33,8 @@ Construct the route according to these rules:
 - Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.
 - `routine`: set it only when the unit repeats a pattern that already exists in the repository and a reviewer would learn nothing from reading it. `reference` names the existing code it mirrors as a path, optionally with :start-end line numbers; it must be a real file. `reason` states what makes the unit a repetition. A routine unit may cover at most 40 changed lines and may not contain a line with an unresolved comment. Do not mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine. The walkthrough folds routine units; the reviewer can expand any of them.
 
-When ready, call guided_review with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.
+Submit the route one unit at a time: call diffwalk_route_unit once per unit, in walkthrough order, and do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next unit. When nothing is left, call diffwalk_route_finish with the skipped regions, using an empty list when there are none.
+A rejected unit affects only that call: fix the reported problem and call diffwalk_route_unit again with the corrected unit. Do not respond with a prose-only route.
 
 BEGIN_DIFFWALK_INVENTORY_JSON
 {
@@ -85,16 +87,10 @@ BEGIN_DIFFWALK_INVENTORY_JSON
       "reviewable": true,
       "oldLineCount": 5,
       "newLineCount": 2,
-      "needsReview": {
-        "old": [
-          "2-4"
-        ]
-      },
-      "suggestedSpans": [
+      "regions": [
         {
-          "path": "src/from.ts",
-          "oldStart": 2,
-          "oldEnd": 4
+          "old": "2-4",
+          "status": "needs-review"
         }
       ]
     },
@@ -107,16 +103,10 @@ BEGIN_DIFFWALK_INVENTORY_JSON
       "reviewable": true,
       "oldLineCount": 2,
       "newLineCount": 5,
-      "needsReview": {
-        "new": [
-          "2-4"
-        ]
-      },
-      "suggestedSpans": [
+      "regions": [
         {
-          "path": "src/to.ts",
-          "newStart": 2,
-          "newEnd": 4
+          "new": "2-4",
+          "status": "needs-review"
         }
       ]
     },
@@ -150,14 +140,15 @@ Construct the route according to these rules:
 - Order review units by behavior, contracts, data flow, and failure paths instead of alphabetical file order.
 - A review unit is a semantic region. Draw its spans around what a reviewer must understand together, not around Git hunk boundaries.
 - One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.
-- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each.
+- Each file lists `regions`: the smallest parts of the change a unit can take. A region is contiguous and has one status, so build a unit by taking whole regions instead of computing line numbers.
+- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each. Split a region only when its lines truly belong to different units.
 - A span may include unchanged lines for context. Unchanged lines may appear in several units; every changed line must belong to exactly one unit.
-- Cover every line listed under `needsReview` and `unresolvedComment` exactly once, either inside a review unit or in `skippedSpans` with a specific visible reason.
-- Lines listed under `unresolvedComment` carry an unanswered comment from an earlier round and cannot be skipped.
-- Do not cover lines listed under `carriedForward`. They were reviewed in an earlier round and stay available outside the planned route.
-- Do not cover lines listed under `excluded`. A mechanical rule removed them from this review; each entry names the rule.
-- `suggestedSpans` mirrors Git hunk boundaries. Use it only as a starting point; redraw it whenever a semantic region disagrees with it.
+- Cover every region with status `needs-review` or `unresolved-comment` exactly once, either inside a review unit or in the skipped regions you pass when finishing, with a specific visible reason.
+- Regions with status `unresolved-comment` carry an unanswered comment from an earlier round and cannot be skipped.
+- Do not cover regions with status `carried-forward`. They were reviewed in an earlier round and stay available outside the planned route.
+- Do not cover regions with status `excluded`. A mechanical rule removed them from this review; `rule` names it.
 - Provide at least one review unit; do not skip everything.
+- Order the calls the way the reviewer should read the change. The position of a unit in the walkthrough is the order in which it was appended.
 - `title`: one concise phrase.
 - `whyHere`: one sentence explaining the dependency or reading order.
 - `context`: one to three sentences with only the required call path, contract, or invariant.
@@ -174,9 +165,10 @@ BEGIN_DIFFWALK_REVIEW_RULES_JSON
   "instructions": "- Keep behavioral tests with the code they prove."
 }
 END_DIFFWALK_REVIEW_RULES_JSON
-Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.
+Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or the diffwalk_route_unit and diffwalk_route_finish tool contracts above.
 
-When ready, call guided_review with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.
+Submit the route one unit at a time: call diffwalk_route_unit once per unit, in walkthrough order, and do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next unit. When nothing is left, call diffwalk_route_finish with the skipped regions, using an empty list when there are none.
+A rejected unit affects only that call: fix the reported problem and call diffwalk_route_unit again with the corrected unit. Do not respond with a prose-only route.
 
 BEGIN_DIFFWALK_INVENTORY_JSON
 {
@@ -211,26 +203,18 @@ BEGIN_DIFFWALK_INVENTORY_JSON
       "reviewable": true,
       "oldLineCount": 2,
       "newLineCount": 5,
-      "needsReview": {
-        "new": [
-          "4"
-        ]
-      },
-      "unresolvedComment": {
-        "new": [
-          "3"
-        ]
-      },
-      "carriedForward": {
-        "new": [
-          "2"
-        ]
-      },
-      "suggestedSpans": [
+      "regions": [
         {
-          "path": "src/entry.ts",
-          "newStart": 2,
-          "newEnd": 4
+          "new": "2",
+          "status": "carried-forward"
+        },
+        {
+          "new": "3",
+          "status": "unresolved-comment"
+        },
+        {
+          "new": "4",
+          "status": "needs-review"
         }
       ]
     }
@@ -239,10 +223,15 @@ BEGIN_DIFFWALK_INVENTORY_JSON
 END_DIFFWALK_INVENTORY_JSON
 
 === guided_review tool ===
-name: guided_review
-description: Open the DiffWalk walkthrough for the frozen snapshot prepared by /diffwalk. The route must cover every needs-review changed line exactly once.
-promptSnippet: Open the validated human-guided review route for the pending DiffWalk snapshot
-parameters: {"type":"object","required":["snapshotId","units","skippedSpans"],"properties":{"snapshotId":{"type":"string","description":"Identifier of the frozen snapshot being routed"},"units":{"type":"array","items":{"type":"object","required":["title","whyHere","context","changeSummary","reviewFocus","spans"],"properties":{"title":{"type":"string","description":"Concise phrase naming this review unit"},"whyHere":{"type":"string","description":"One concise sentence explaining why this unit belongs here in the review order"},"context":{"type":"string","description":"One to three concise sentences covering only the call path, contract, or invariant needed for this unit"},"changeSummary":{"type":"string","description":"One or two direct sentences describing the behavior change without patch text"},"reviewFocus":{"type":"array","items":{"type":"object","required":["question"],"properties":{"question":{"type":"string","description":"One question naming a specific way this change could be wrong"},"anchor":{"type":"object","required":["path","side","line"],"properties":{"path":{"type":"string","description":"Path of the changed file the question is about"},"side":{"anyOf":[{"type":"string","const":"old"},{"type":"string","const":"new"}],"description":"old for a removed line, new for an added line"},"line":{"type":"integer","minimum":1,"description":"1-based line number on that side"}},"additionalProperties":false,"description":"The changed line this question is about. It must be inside this unit's spans. Omit the anchor only for a question about the unit as a whole."}},"additionalProperties":false},"description":"One to three distinct questions naming specific ways this change could be wrong, each anchored to the changed line it concerns","minItems":1,"maxItems":3},"spans":{"type":"array","items":{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Path of a changed file in the frozen snapshot"},"oldStart":{"type":"integer","minimum":1,"description":"First line of the region in the old file, 1-based inclusive"},"oldEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the old file, 1-based inclusive"},"newStart":{"type":"integer","minimum":1,"description":"First line of the region in the new file, 1-based inclusive"},"newEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the new file, 1-based inclusive"}},"additionalProperties":false,"description":"A region of one file. Use the new side for added lines and the old side for removed lines; set both when a region contains each."},"description":"File regions covered by this unit; a unit may span several files","minItems":1},"routine":{"type":"object","required":["reference","reason"],"properties":{"reference":{"type":"string","description":"Existing code this unit mirrors, as a repository path optionally followed by :start-end line numbers"},"reason":{"type":"string","description":"One sentence stating what makes the unit a repetition of the reference"}},"additionalProperties":false,"description":"Present only when the unit repeats an existing pattern and needs no judgment. The walkthrough folds it; the reviewer can expand it or override the claim."}},"additionalProperties":false},"description":"Semantic review units in walkthrough order"},"skippedSpans":{"type":"array","items":{"type":"object","required":["span","reason"],"properties":{"span":{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Path of a changed file in the frozen snapshot"},"oldStart":{"type":"integer","minimum":1,"description":"First line of the region in the old file, 1-based inclusive"},"oldEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the old file, 1-based inclusive"},"newStart":{"type":"integer","minimum":1,"description":"First line of the region in the new file, 1-based inclusive"},"newEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the new file, 1-based inclusive"}},"additionalProperties":false,"description":"A region of one file. Use the new side for added lines and the old side for removed lines; set both when a region contains each."},"reason":{"type":"string","description":"Visible reason why the changed lines in this region are excluded from the walkthrough"}},"additionalProperties":false},"description":"Regions whose changed lines are explicitly skipped with visible reasons; lines with unresolved comments cannot be skipped"}},"additionalProperties":false}
+name: diffwalk_route_unit
+description: Append one semantic review unit to the route being prepared for the frozen DiffWalk snapshot. Call it once per unit, in walkthrough order. The result reports what still needs routing.
+promptSnippet: Append one review unit to the pending DiffWalk route
+parameters: {"type":"object","required":["snapshotId","unit"],"properties":{"snapshotId":{"type":"string","description":"Identifier of the frozen snapshot being routed"},"unit":{"type":"object","required":["title","whyHere","context","changeSummary","reviewFocus","spans"],"properties":{"title":{"type":"string","description":"Concise phrase naming this review unit"},"whyHere":{"type":"string","description":"One concise sentence explaining why this unit belongs here in the review order"},"context":{"type":"string","description":"One to three concise sentences covering only the call path, contract, or invariant needed for this unit"},"changeSummary":{"type":"string","description":"One or two direct sentences describing the behavior change without patch text"},"reviewFocus":{"type":"array","items":{"type":"object","required":["question"],"properties":{"question":{"type":"string","description":"One question naming a specific way this change could be wrong"},"anchor":{"type":"object","required":["path","side","line"],"properties":{"path":{"type":"string","description":"Path of the changed file the question is about"},"side":{"anyOf":[{"type":"string","const":"old"},{"type":"string","const":"new"}],"description":"old for a removed line, new for an added line"},"line":{"type":"integer","minimum":1,"description":"1-based line number on that side"}},"additionalProperties":false,"description":"The changed line this question is about. It must be inside this unit's spans. Omit the anchor only for a question about the unit as a whole."}},"additionalProperties":false},"description":"One to three distinct questions naming specific ways this change could be wrong, each anchored to the changed line it concerns","minItems":1,"maxItems":3},"spans":{"type":"array","items":{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Path of a changed file in the frozen snapshot"},"oldStart":{"type":"integer","minimum":1,"description":"First line of the region in the old file, 1-based inclusive"},"oldEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the old file, 1-based inclusive"},"newStart":{"type":"integer","minimum":1,"description":"First line of the region in the new file, 1-based inclusive"},"newEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the new file, 1-based inclusive"}},"additionalProperties":false,"description":"A region of one file. Use the new side for added lines and the old side for removed lines; set both when a region contains each."},"description":"File regions covered by this unit; a unit may span several files","minItems":1},"routine":{"type":"object","required":["reference","reason"],"properties":{"reference":{"type":"string","description":"Existing code this unit mirrors, as a repository path optionally followed by :start-end line numbers"},"reason":{"type":"string","description":"One sentence stating what makes the unit a repetition of the reference"}},"additionalProperties":false,"description":"Present only when the unit repeats an existing pattern and needs no judgment. The walkthrough folds it; the reviewer can expand it or override the claim."}},"additionalProperties":false}},"additionalProperties":false}
+
+name: diffwalk_route_finish
+description: Complete the DiffWalk route with any explicitly skipped regions and open the walkthrough. Every changed line needing review must be covered by an appended unit or skipped here.
+promptSnippet: Complete the pending DiffWalk route and open the walkthrough
+parameters: {"type":"object","required":["snapshotId","skippedSpans"],"properties":{"snapshotId":{"type":"string","description":"Identifier of the frozen snapshot being routed"},"skippedSpans":{"type":"array","items":{"type":"object","required":["span","reason"],"properties":{"span":{"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Path of a changed file in the frozen snapshot"},"oldStart":{"type":"integer","minimum":1,"description":"First line of the region in the old file, 1-based inclusive"},"oldEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the old file, 1-based inclusive"},"newStart":{"type":"integer","minimum":1,"description":"First line of the region in the new file, 1-based inclusive"},"newEnd":{"type":"integer","minimum":1,"description":"Last line of the region in the new file, 1-based inclusive"}},"additionalProperties":false,"description":"A region of one file. Use the new side for added lines and the old side for removed lines; set both when a region contains each."},"reason":{"type":"string","description":"Visible reason why the changed lines in this region are excluded from the walkthrough"}},"additionalProperties":false},"description":"Regions whose changed lines are explicitly skipped with visible reasons; lines with unresolved comments cannot be skipped"}},"additionalProperties":false}
 
 === submit_diffwalk_responses tool ===
 name: submit_diffwalk_responses

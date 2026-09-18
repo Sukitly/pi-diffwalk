@@ -2,17 +2,14 @@ import {
   assertReviewDeltaMatchesSnapshot,
   isNeedsReviewReasonSkippable,
 } from "../review/delta.ts";
+import { describeExclusion } from "../review/exclusion.ts";
 import { detectExactMoves, type MoveSideRange } from "../review/moves.ts";
 import { ROUTINE_MAX_CHANGED_LINES } from "../review/route-validation.ts";
-import {
-  type ChangedLine,
-  changedLineKey,
-  type LineRange,
-  listFileChangedLines,
-} from "../review/span.ts";
+import { changedLineKey, type LineRange } from "../review/span.ts";
 import type {
   ChangedLineRequirement,
-  ExclusionReason,
+  ChangeSide,
+  FileChange,
   FileChangeId,
   FileChangeSource,
   FileChangeStatus,
@@ -20,19 +17,26 @@ import type {
   ReviewComparison,
   ReviewDelta,
   ReviewSnapshot,
-  ReviewSpan,
   SnapshotId,
   SnapshotNoticeType,
 } from "../review/types.ts";
 import type { LoadedDiffWalkRules } from "./rules.ts";
 
-export const GUIDED_REVIEW_TOOL_NAME = "guided_review";
+export const ROUTE_UNIT_TOOL_NAME = "diffwalk_route_unit";
 
-export const GUIDED_REVIEW_TOOL_DESCRIPTION =
-  "Open the DiffWalk walkthrough for the frozen snapshot prepared by /diffwalk. The route must cover every needs-review changed line exactly once.";
+export const ROUTE_UNIT_TOOL_DESCRIPTION =
+  "Append one semantic review unit to the route being prepared for the frozen DiffWalk snapshot. Call it once per unit, in walkthrough order. The result reports what still needs routing.";
 
-export const GUIDED_REVIEW_TOOL_PROMPT_SNIPPET =
-  "Open the validated human-guided review route for the pending DiffWalk snapshot";
+export const ROUTE_UNIT_TOOL_PROMPT_SNIPPET =
+  "Append one review unit to the pending DiffWalk route";
+
+export const ROUTE_FINISH_TOOL_NAME = "diffwalk_route_finish";
+
+export const ROUTE_FINISH_TOOL_DESCRIPTION =
+  "Complete the DiffWalk route with any explicitly skipped regions and open the walkthrough. Every changed line needing review must be covered by an appended unit or skipped here.";
+
+export const ROUTE_FINISH_TOOL_PROMPT_SNIPPET =
+  "Complete the pending DiffWalk route and open the walkthrough";
 
 export const REVIEW_RESPONSES_TOOL_NAME = "submit_diffwalk_responses";
 export const REVIEW_RESPONSES_TOOL_DESCRIPTION =
@@ -95,22 +99,28 @@ export interface ReviewPromptFile {
   readonly unreviewableReason?: string;
   readonly oldLineCount?: number;
   readonly newLineCount?: number;
-  readonly needsReview?: ReviewPromptSideRanges;
-  readonly carriedForward?: ReviewPromptSideRanges;
-  readonly unresolvedComment?: ReviewPromptSideRanges;
-  /** Lines a mechanical rule removed from this review, grouped by rule. */
-  readonly excluded?: readonly ReviewPromptExclusion[];
-  readonly suggestedSpans?: readonly ReviewSpan[];
+  /**
+   * The smallest regions a route can assign independently, in file order.
+   * Each region is a run of consecutive changed lines that share one review
+   * status, so a unit is built by picking regions instead of computing line
+   * numbers.
+   */
+  readonly regions?: readonly ReviewPromptRegion[];
 }
 
-export interface ReviewPromptExclusion extends ReviewPromptSideRanges {
-  readonly reason: ExclusionReason;
-  readonly pattern?: string;
-}
+export type ReviewPromptRegionStatus =
+  | "needs-review"
+  | "unresolved-comment"
+  | "carried-forward"
+  | "excluded";
 
-export interface ReviewPromptSideRanges {
-  readonly old?: readonly string[];
-  readonly new?: readonly string[];
+export interface ReviewPromptRegion {
+  /** Inclusive line range on that side, as `start-end` or a single number. */
+  readonly old?: string;
+  readonly new?: string;
+  readonly status: ReviewPromptRegionStatus;
+  /** The rule that removed an excluded region. */
+  readonly rule?: string;
 }
 
 export function buildReviewPromptInventory(
@@ -141,40 +151,14 @@ export function buildReviewPromptInventory(
       };
     }
 
-    const changed = listFileChangedLines(change);
-    const needsReview = selectRanges(
-      changed,
-      requirements,
-      (requirement) =>
-        requirement.type === "needs-review" &&
-        isNeedsReviewReasonSkippable(requirement.reason),
-    );
-    const unresolved = selectRanges(
-      changed,
-      requirements,
-      (requirement) =>
-        requirement.type === "needs-review" &&
-        !isNeedsReviewReasonSkippable(requirement.reason),
-    );
-    const carried = selectRanges(
-      changed,
-      requirements,
-      (requirement) => requirement.type === "carried-forward",
-    );
-    const excluded = selectExclusions(changed, requirements);
+    const regions = buildPromptRegions(change, requirements);
 
     return {
       ...base,
       reviewable: true,
       oldLineCount: change.content.oldLineCount,
       newLineCount: change.content.newLineCount,
-      ...(isEmpty(needsReview) ? {} : { needsReview }),
-      ...(isEmpty(unresolved) ? {} : { unresolvedComment: unresolved }),
-      ...(isEmpty(carried) ? {} : { carriedForward: carried }),
-      ...(excluded.length === 0 ? {} : { excluded }),
-      ...(change.content.suggestedSpans.length === 0
-        ? {}
-        : { suggestedSpans: change.content.suggestedSpans }),
+      ...(regions.length === 0 ? {} : { regions }),
     };
   });
 
@@ -252,19 +236,20 @@ export function buildReviewKickoffPrompt(
     "- Order review units by behavior, contracts, data flow, and failure paths instead of alphabetical file order.",
     "- A review unit is a semantic region. Draw its spans around what a reviewer must understand together, not around Git hunk boundaries.",
     "- One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.",
-    "- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each.",
+    "- Each file lists `regions`: the smallest parts of the change a unit can take. A region is contiguous and has one status, so build a unit by taking whole regions instead of computing line numbers.",
+    "- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each. Split a region only when its lines truly belong to different units.",
     "- A span may include unchanged lines for context. Unchanged lines may appear in several units; every changed line must belong to exactly one unit.",
-    "- Cover every line listed under `needsReview` and `unresolvedComment` exactly once, either inside a review unit or in `skippedSpans` with a specific visible reason.",
-    "- Lines listed under `unresolvedComment` carry an unanswered comment from an earlier round and cannot be skipped.",
-    "- Do not cover lines listed under `carriedForward`. They were reviewed in an earlier round and stay available outside the planned route.",
-    "- Do not cover lines listed under `excluded`. A mechanical rule removed them from this review; each entry names the rule.",
-    "- `suggestedSpans` mirrors Git hunk boundaries. Use it only as a starting point; redraw it whenever a semantic region disagrees with it.",
+    "- Cover every region with status `needs-review` or `unresolved-comment` exactly once, either inside a review unit or in the skipped regions you pass when finishing, with a specific visible reason.",
+    "- Regions with status `unresolved-comment` carry an unanswered comment from an earlier round and cannot be skipped.",
+    "- Do not cover regions with status `carried-forward`. They were reviewed in an earlier round and stay available outside the planned route.",
+    "- Do not cover regions with status `excluded`. A mechanical rule removed them from this review; `rule` names it.",
     ...(inventory.moves.length === 0
       ? []
       : [
           "- `moves` lists exact relocations detected by comparing changed-line content. Put both sides of a move in the same review unit unless separating them is the honest reading order.",
         ]),
     "- Provide at least one review unit; do not skip everything.",
+    "- Order the calls the way the reviewer should read the change. The position of a unit in the walkthrough is the order in which it was appended.",
     "- `title`: one concise phrase.",
     "- `whyHere`: one sentence explaining the dependency or reading order.",
     "- `context`: one to three sentences with only the required call path, contract, or invariant.",
@@ -289,10 +274,11 @@ export function buildReviewKickoffPrompt(
             2,
           ),
           "END_DIFFWALK_REVIEW_RULES_JSON",
-          "Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or guided_review tool contract above.",
+          `Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or the ${ROUTE_UNIT_TOOL_NAME} and ${ROUTE_FINISH_TOOL_NAME} tool contracts above.`,
         ]),
     "",
-    `When ready, call ${GUIDED_REVIEW_TOOL_NAME} with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.`,
+    `Submit the route one unit at a time: call ${ROUTE_UNIT_TOOL_NAME} once per unit, in walkthrough order, and do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next unit. When nothing is left, call ${ROUTE_FINISH_TOOL_NAME} with the skipped regions, using an empty list when there are none.`,
+    `A rejected unit affects only that call: fix the reported problem and call ${ROUTE_UNIT_TOOL_NAME} again with the corrected unit. Do not respond with a prose-only route.`,
     "",
     "BEGIN_DIFFWALK_INVENTORY_JSON",
     JSON.stringify(inventory, null, 2),
@@ -300,80 +286,91 @@ export function buildReviewKickoffPrompt(
   ].join("\n");
 }
 
-function selectRanges(
-  changed: readonly ChangedLine[],
+/**
+ * Splits a file change into the regions a route can assign. A region breaks
+ * at a context line and wherever the review status changes, so every region
+ * is both contiguous and uniform, and a unit never has to split one.
+ */
+function buildPromptRegions(
+  change: FileChange,
   requirements: ReadonlyMap<string, ChangedLineRequirement>,
-  predicate: (requirement: ChangedLineRequirement) => boolean,
-): ReviewPromptSideRanges {
-  const selected = changed.filter((line) => {
-    const requirement = requirements.get(changedLineKey(line));
-    return requirement !== undefined && predicate(requirement);
-  });
-  const old = toRangeStrings(
-    selected.filter((line) => line.side === "old").map((line) => line.line),
-  );
-  const next = toRangeStrings(
-    selected.filter((line) => line.side === "new").map((line) => line.line),
-  );
+): readonly ReviewPromptRegion[] {
+  const content = change.content;
+  if (content.type !== "text") return [];
+  const regions: ReviewPromptRegion[] = [];
+  let current: RegionDraft | undefined;
+  const flush = () => {
+    if (current !== undefined) regions.push(finishRegion(current));
+    current = undefined;
+  };
+  for (const line of content.lines) {
+    if (line.type === "context") {
+      flush();
+      continue;
+    }
+    const side: ChangeSide = line.type === "added" ? "new" : "old";
+    const number = side === "new" ? line.newLine : line.oldLine;
+    if (number === undefined) continue;
+    const requirement = requirements.get(
+      changedLineKey({ fileChangeId: change.id, side, line: number }),
+    );
+    if (requirement === undefined) continue;
+    const label = regionLabel(requirement);
+    if (current !== undefined && current.key !== label.key) flush();
+    current ??= { ...label, old: undefined, new: undefined };
+    const bounds = side === "new" ? current.new : current.old;
+    const next =
+      bounds === undefined
+        ? { start: number, end: number }
+        : {
+            start: Math.min(bounds.start, number),
+            end: Math.max(bounds.end, number),
+          };
+    if (side === "new") current.new = next;
+    else current.old = next;
+  }
+  flush();
+  return regions;
+}
+
+interface RegionDraft {
+  readonly key: string;
+  readonly status: ReviewPromptRegionStatus;
+  readonly rule?: string;
+  old: LineRange | undefined;
+  new: LineRange | undefined;
+}
+
+function regionLabel(requirement: ChangedLineRequirement): {
+  readonly key: string;
+  readonly status: ReviewPromptRegionStatus;
+  readonly rule?: string;
+} {
+  if (requirement.type === "carried-forward") {
+    return { key: "carried-forward", status: "carried-forward" };
+  }
+  if (requirement.type === "excluded") {
+    const rule = describeExclusion(requirement);
+    return { key: `excluded\u0000${rule}`, status: "excluded", rule };
+  }
+  return isNeedsReviewReasonSkippable(requirement.reason)
+    ? { key: "needs-review", status: "needs-review" }
+    : { key: "unresolved-comment", status: "unresolved-comment" };
+}
+
+function finishRegion(draft: RegionDraft): ReviewPromptRegion {
   return {
-    ...(old.length === 0 ? {} : { old }),
-    ...(next.length === 0 ? {} : { new: next }),
+    ...(draft.old === undefined ? {} : { old: formatRange(draft.old) }),
+    ...(draft.new === undefined ? {} : { new: formatRange(draft.new) }),
+    status: draft.status,
+    ...(draft.rule === undefined ? {} : { rule: draft.rule }),
   };
 }
 
-/** One entry per distinct rule, so the agent sees why each region is gone. */
-function selectExclusions(
-  changed: readonly ChangedLine[],
-  requirements: ReadonlyMap<string, ChangedLineRequirement>,
-): readonly ReviewPromptExclusion[] {
-  const groups = new Map<
-    string,
-    { reason: ExclusionReason; pattern?: string }
-  >();
-  for (const line of changed) {
-    const requirement = requirements.get(changedLineKey(line));
-    if (requirement?.type !== "excluded") continue;
-    const key = `${requirement.reason}\u0000${requirement.pattern ?? ""}`;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        reason: requirement.reason,
-        ...(requirement.pattern === undefined
-          ? {}
-          : { pattern: requirement.pattern }),
-      });
-    }
-  }
-  return [...groups.entries()].map(([key, group]) => ({
-    ...group,
-    ...selectRanges(
-      changed,
-      requirements,
-      (requirement) =>
-        requirement.type === "excluded" &&
-        `${requirement.reason}\u0000${requirement.pattern ?? ""}` === key,
-    ),
-  }));
-}
-
-function isEmpty(ranges: ReviewPromptSideRanges): boolean {
-  return ranges.old === undefined && ranges.new === undefined;
-}
-
-function toRangeStrings(numbers: readonly number[]): readonly string[] {
-  const ranges: LineRange[] = [];
-  for (const value of [...numbers].sort((left, right) => left - right)) {
-    const last = ranges.at(-1);
-    if (last !== undefined && last.end === value - 1) {
-      ranges[ranges.length - 1] = { start: last.start, end: value };
-      continue;
-    }
-    ranges.push({ start: value, end: value });
-  }
-  return ranges.map((range) =>
-    range.start === range.end
-      ? `${range.start}`
-      : `${range.start}-${range.end}`,
-  );
+function formatRange(range: LineRange): string {
+  return range.start === range.end
+    ? `${range.start}`
+    : `${range.start}-${range.end}`;
 }
 
 function copyComparison(comparison: ReviewComparison): ReviewComparison {

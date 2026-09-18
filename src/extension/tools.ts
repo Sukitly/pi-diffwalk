@@ -1,12 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import type { ReviewRouteDraftProgress } from "../review/route-draft.ts";
 import {
   type ReviewResponseCandidate,
   ReviewResponseCandidateSchema,
 } from "../review/threads.ts";
 import {
   type GuidedReviewResult,
-  ReviewRouteCandidateSchema,
+  ReviewRouteFinishCandidateSchema,
+  ReviewRouteUnitCandidateSchema,
 } from "../review/types.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
 import {
@@ -15,36 +17,99 @@ import {
   shouldSendReviewToAgent,
 } from "./model-payloads.ts";
 import {
-  GUIDED_REVIEW_TOOL_DESCRIPTION,
-  GUIDED_REVIEW_TOOL_NAME,
-  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
   REVIEW_RESPONSES_TOOL_DESCRIPTION,
   REVIEW_RESPONSES_TOOL_NAME,
   REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  ROUTE_FINISH_TOOL_DESCRIPTION,
+  ROUTE_FINISH_TOOL_NAME,
+  ROUTE_FINISH_TOOL_PROMPT_SNIPPET,
+  ROUTE_UNIT_TOOL_DESCRIPTION,
+  ROUTE_UNIT_TOOL_NAME,
+  ROUTE_UNIT_TOOL_PROMPT_SNIPPET,
 } from "./prompts.ts";
 import type { DiffWalkSession } from "./session.ts";
 import {
   renderGuidedReviewToolResult,
+  renderRouteUnitToolResult,
   renderThreadFollowUpToolResult,
 } from "./tui-messages.ts";
 
-export function registerGuidedReviewTool(
+export function registerRouteUnitTool(
   pi: ExtensionAPI,
   session: DiffWalkSession,
 ): void {
-  pi.registerTool<typeof ReviewRouteCandidateSchema, GuidedReviewResult>({
-    name: GUIDED_REVIEW_TOOL_NAME,
-    label: "Guided Review",
-    description: GUIDED_REVIEW_TOOL_DESCRIPTION,
-    promptSnippet: GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
-    parameters: ReviewRouteCandidateSchema,
+  pi.registerTool<
+    typeof ReviewRouteUnitCandidateSchema,
+    ReviewRouteDraftProgress
+  >({
+    name: ROUTE_UNIT_TOOL_NAME,
+    label: "DiffWalk Route Unit",
+    description: ROUTE_UNIT_TOOL_DESCRIPTION,
+    promptSnippet: ROUTE_UNIT_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewRouteUnitCandidateSchema,
     executionMode: "sequential",
-    async execute(_toolCallId, routeCandidate, signal, _onUpdate, ctx) {
-      const result = await session.attachRouteAndOpen(
-        ctx,
-        routeCandidate,
-        signal,
+    async execute(_toolCallId, candidate) {
+      const progress = await session.appendRouteUnit(candidate);
+      return {
+        content: [{ type: "text", text: formatRouteUnitProgress(progress) }],
+        details: progress,
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", `DiffWalk unit: ${args.unit?.title ?? ""}`),
+        0,
+        0,
       );
+    },
+    renderResult(result, _options, theme, context) {
+      if (context.isError) {
+        const content = result.content.find((item) => item.type === "text");
+        return new Text(
+          theme.fg(
+            "error",
+            content?.type === "text" ? content.text : "Review unit rejected.",
+          ),
+          0,
+          0,
+        );
+      }
+      return result.details === undefined
+        ? new Text("Review unit accepted.", 0, 0)
+        : renderRouteUnitToolResult(result.details, theme);
+    },
+  });
+}
+
+/** The remaining work is the only thing the agent needs back from an append. */
+function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
+  const accepted = `Accepted review unit ${progress.unitCount}.`;
+  if (progress.remaining.length === 0) {
+    return `${accepted} Every changed line needing review is now covered. Call ${ROUTE_FINISH_TOOL_NAME} to open the walkthrough.`;
+  }
+  const total = progress.remaining.reduce(
+    (sum, file) => sum + file.lineCount,
+    0,
+  );
+  const files = progress.remaining
+    .map((file) => `- ${file.path}: ${file.ranges.join(", ")}`)
+    .join("\n");
+  return `${accepted} ${total} changed line${total === 1 ? "" : "s"} still need routing:\n${files}`;
+}
+
+export function registerRouteFinishTool(
+  pi: ExtensionAPI,
+  session: DiffWalkSession,
+): void {
+  pi.registerTool<typeof ReviewRouteFinishCandidateSchema, GuidedReviewResult>({
+    name: ROUTE_FINISH_TOOL_NAME,
+    label: "DiffWalk Review",
+    description: ROUTE_FINISH_TOOL_DESCRIPTION,
+    promptSnippet: ROUTE_FINISH_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewRouteFinishCandidateSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, candidate, signal, _onUpdate, ctx) {
+      const result = await session.finishRouteAndOpen(ctx, candidate, signal);
       return {
         content: [{ type: "text", text: formatGuidedReviewResult(result) }],
         details: result,

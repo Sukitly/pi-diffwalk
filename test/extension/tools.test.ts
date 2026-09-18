@@ -23,7 +23,7 @@ import {
 test("requires /diffwalk and binds the tool route to the pending snapshot", async () => {
   const harness = createHarness();
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-1",
       validRoute(),
       undefined,
@@ -44,7 +44,7 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
   });
 
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-2",
       validRoute("other-snapshot"),
       undefined,
@@ -55,7 +55,7 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
   );
 
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-3",
       { ...validRoute(), units: [] },
       undefined,
@@ -65,7 +65,7 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
     /Invalid review route:[\s\S]*src\/file\.ts new 2-2[\s\S]*must contain at least one review unit with spans/,
   );
 
-  const completed = await harness.tool.execute(
+  const completed = await harness.submitRoute(
     "call-4",
     validRoute(),
     undefined,
@@ -86,7 +86,7 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
   assert.equal(harness.sentMessages.length, 1);
 
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-5",
       validRoute(),
       undefined,
@@ -101,7 +101,7 @@ test("terminates the initial tool turn when the review is discarded", async () =
   const harness = createHarness({ discardOnOpen: true });
   await harness.command("", commandContext());
 
-  const discarded = await harness.tool.execute(
+  const discarded = await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -123,7 +123,7 @@ test("continues the initial tool turn when a submitted review has comments", asy
   });
   await harness.command("", commandContext());
 
-  const submitted = await harness.tool.execute(
+  const submitted = await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -146,7 +146,7 @@ test("accepts complete structured responses and opens anchored threads", async (
     commentOnSubmit: true,
   });
   await harness.command("", commandContext());
-  const submitted = await harness.tool.execute(
+  const submitted = await harness.submitRoute(
     "call-review",
     validRoute(),
     undefined,
@@ -203,7 +203,7 @@ test("continues the Agent turn when the reviewer submits an inline follow-up", a
     submitFollowUpOnThreadOpen: true,
   });
   await harness.command("", commandContext());
-  const submitted = await harness.tool.execute(
+  const submitted = await harness.submitRoute(
     "call-review",
     validRoute(),
     undefined,
@@ -275,7 +275,7 @@ test("carries a reviewer-resolved comment forward in the next round", async () =
     resolveThreadOnOpen: true,
   });
   await harness.command("", commandContext());
-  const submitted = await harness.tool.execute(
+  const submitted = await harness.submitRoute(
     "call-review",
     validRoute(),
     undefined,
@@ -316,7 +316,7 @@ test("finishes thread turns before freezing a later review delta", async () => {
     commentOnSubmit: true,
   });
   await harness.command("", commandContext());
-  const submitted = await harness.tool.execute(
+  const submitted = await harness.submitRoute(
     "call-review",
     validRoute(),
     undefined,
@@ -365,7 +365,7 @@ test("reopens the latest persisted comment threads", async () => {
     commentOnSubmit: true,
   });
   await first.command("", commandContext());
-  await first.tool.execute(
+  await first.submitRoute(
     "call-review",
     validRoute(),
     undefined,
@@ -386,7 +386,7 @@ test("starts an Agent turn for a follow-up submitted from /diffwalk --threads", 
     commentOnSubmit: true,
   });
   await first.command("", commandContext());
-  const submitted = await first.tool.execute(
+  const submitted = await first.submitRoute(
     "call-review",
     validRoute(),
     undefined,
@@ -476,7 +476,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
 
   let advisoryMessage: string | undefined;
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-1",
       splitRoute,
       undefined,
@@ -506,7 +506,7 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
   );
   assert.deepEqual(harness.openedSnapshots, []);
 
-  const completed = await harness.tool.execute(
+  const completed = await harness.submitRoute(
     "call-2",
     splitRoute,
     undefined,
@@ -526,7 +526,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
 
   let driftMessage: string | undefined;
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-drift",
       validRoute(),
       new AbortController().signal,
@@ -555,7 +555,7 @@ test("rejects repository drift before opening the walkthrough", async () => {
   assert.deepEqual(harness.openedSnapshots, []);
 
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-stale",
       validRoute(),
       undefined,
@@ -572,7 +572,7 @@ test("submits through the domain pipeline against the captured repository state"
   await harness.command("", commandContext());
 
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-1",
       validRoute(),
       undefined,
@@ -599,7 +599,7 @@ test("rejects a routine reference that is not a repository file, then accepts a 
   };
 
   await assert.rejects(
-    harness.tool.execute(
+    harness.submitRoute(
       "call-missing",
       routineRoute("src/missing.ts:3-9"),
       undefined,
@@ -611,7 +611,7 @@ test("rejects a routine reference that is not a repository file, then accepts a 
   assert.deepEqual(harness.openedSnapshots, []);
 
   harness.behavior.submitOnOpen = true;
-  const result = await harness.tool.execute(
+  const result = await harness.submitRoute(
     "call-ok",
     routineRoute("src/pattern.ts:3-9"),
     undefined,
@@ -623,4 +623,79 @@ test("rejects a routine reference that is not a repository file, then accepts a 
     (result.details as { status?: string } | undefined)?.status ?? "submitted",
     "submitted",
   );
+});
+
+test("appends units one at a time and keeps accepted ones after a rejection", async () => {
+  const harness = createHarness({
+    snapshot: makeSnapshot("snapshot-index", [
+      { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
+      { path: "src/other.ts", lines: [" head", "+second", " tail"] },
+    ]),
+  });
+  await harness.command("", commandContext());
+  const unitCall = (title: string, path: string) => ({
+    snapshotId: "snapshot-index",
+    unit: {
+      title,
+      whyHere: "Behavior starts here.",
+      context: "entry -> implementation",
+      changeSummary: "Updates behavior.",
+      reviewFocus: [{ question: "Is the behavior correct?" }],
+      spans: [span(path, { new: [2, 2] })],
+    },
+  });
+
+  const first = await harness.unitTool.execute(
+    "unit-1",
+    unitCall("Entry point", "src/file.ts"),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(first.details?.unitCount, 1);
+  assert.deepEqual(first.details?.remaining, [
+    { path: "src/other.ts", ranges: ["new 2"], lineCount: 1 },
+  ]);
+
+  await assert.rejects(
+    harness.unitTool.execute(
+      "unit-2",
+      unitCall("Covers the same line", "src/file.ts"),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /is covered by review units 1, 2/,
+  );
+  await assert.rejects(
+    harness.tool.execute(
+      "finish-early",
+      { snapshotId: "snapshot-index", skippedSpans: [] },
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /src\/other\.ts new 2-2 needs review but no unit covers it/,
+  );
+
+  const second = await harness.unitTool.execute(
+    "unit-3",
+    unitCall("Second file", "src/other.ts"),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(second.details?.unitCount, 2);
+  assert.deepEqual(second.details?.remaining, []);
+
+  harness.behavior.submitOnOpen = true;
+  const finished = await harness.tool.execute(
+    "finish",
+    { snapshotId: "snapshot-index", skippedSpans: [] },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(harness.openedSnapshots.length, 1);
+  assert.equal(finished.details?.status, "submitted");
 });

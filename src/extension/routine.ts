@@ -1,6 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative } from "node:path";
-import type { ReviewRoute } from "../review/types.ts";
+import type { ReviewUnit } from "../review/types.ts";
 
 /**
  * A routine claim names existing code the unit mirrors. The reference is
@@ -67,31 +67,27 @@ export class RoutineReferenceError extends Error {
   }
 }
 
-/** Throws a message the agent can act on when any routine reference is unusable. */
+/**
+ * Throws a message the agent can act on when a unit's routine reference is
+ * unusable. The check runs as the unit is appended, so only that unit has to
+ * be corrected and resubmitted.
+ */
 export async function assertRoutineReferences(
-  route: ReviewRoute,
+  unit: ReviewUnit,
+  unitNumber: number,
   repositoryRoot: string,
   exists: RoutineReferenceCheck,
 ): Promise<void> {
-  const problems: string[] = [];
-  for (const [index, unit] of route.units.entries()) {
-    if (unit.routine === undefined) continue;
-    const parsed = parseRoutineReference(unit.routine.reference);
-    if (parsed === undefined) {
-      problems.push(
-        `Review unit ${index + 1} routine.reference ${JSON.stringify(unit.routine.reference)} must be a repository path optionally followed by :start-end line numbers.`,
-      );
-      continue;
-    }
-    if (!(await exists(repositoryRoot, parsed.path))) {
-      problems.push(
-        `Review unit ${index + 1} routine.reference names ${JSON.stringify(parsed.path)}, which is not a file in the repository.`,
-      );
-    }
-  }
-  if (problems.length > 0) {
-    throw new RoutineReferenceError(
-      `Routine references must name existing code:\n${problems.map((problem) => `- ${problem}`).join("\n")}\nCorrect the reference or remove the routine claim, then call the tool again.`,
-    );
-  }
+  if (unit.routine === undefined) return;
+  const parsed = parseRoutineReference(unit.routine.reference);
+  const problem =
+    parsed === undefined
+      ? `Review unit ${unitNumber} routine.reference ${JSON.stringify(unit.routine.reference)} must be a repository path optionally followed by :start-end line numbers.`
+      : (await exists(repositoryRoot, parsed.path))
+        ? undefined
+        : `Review unit ${unitNumber} routine.reference names ${JSON.stringify(parsed.path)}, which is not a file in the repository.`;
+  if (problem === undefined) return;
+  throw new RoutineReferenceError(
+    `Routine references must name existing code:\n- ${problem}\nCorrect the reference or remove the routine claim, then append the unit again.`,
+  );
 }

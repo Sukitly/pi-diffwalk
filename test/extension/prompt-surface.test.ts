@@ -8,12 +8,15 @@ import {
 } from "../../src/extension/model-payloads.ts";
 import {
   buildReviewKickoffPrompt,
-  GUIDED_REVIEW_TOOL_DESCRIPTION,
-  GUIDED_REVIEW_TOOL_NAME,
-  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
   REVIEW_RESPONSES_TOOL_DESCRIPTION,
   REVIEW_RESPONSES_TOOL_NAME,
   REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  ROUTE_FINISH_TOOL_DESCRIPTION,
+  ROUTE_FINISH_TOOL_NAME,
+  ROUTE_FINISH_TOOL_PROMPT_SNIPPET,
+  ROUTE_UNIT_TOOL_DESCRIPTION,
+  ROUTE_UNIT_TOOL_NAME,
+  ROUTE_UNIT_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/prompts.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import { detectExactMoves } from "../../src/review/moves.ts";
@@ -38,7 +41,10 @@ import type {
   ReviewThreadBatchId,
   SnapshotId,
 } from "../../src/review/types.ts";
-import { ReviewRouteCandidateSchema } from "../../src/review/types.ts";
+import {
+  ReviewRouteFinishCandidateSchema,
+  ReviewRouteUnitCandidateSchema,
+} from "../../src/review/types.ts";
 import { makeRound, makeSnapshot, span } from "../support/domain-fixtures.ts";
 
 /**
@@ -184,10 +190,15 @@ function advisoryNudge(): string {
 
 function toolSurface(): string {
   return [
-    `name: ${GUIDED_REVIEW_TOOL_NAME}`,
-    `description: ${GUIDED_REVIEW_TOOL_DESCRIPTION}`,
-    `promptSnippet: ${GUIDED_REVIEW_TOOL_PROMPT_SNIPPET}`,
-    `parameters: ${JSON.stringify(ReviewRouteCandidateSchema)}`,
+    `name: ${ROUTE_UNIT_TOOL_NAME}`,
+    `description: ${ROUTE_UNIT_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${ROUTE_UNIT_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewRouteUnitCandidateSchema)}`,
+    "",
+    `name: ${ROUTE_FINISH_TOOL_NAME}`,
+    `description: ${ROUTE_FINISH_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${ROUTE_FINISH_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewRouteFinishCandidateSchema)}`,
   ].join("\n");
 }
 

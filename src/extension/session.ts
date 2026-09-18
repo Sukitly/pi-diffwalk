@@ -34,7 +34,13 @@ import {
   assessRouteQuality,
   ReviewRouteAdvisoryNudge,
 } from "../review/route-advisory.ts";
-import { validateReviewRoute } from "../review/route-validation.ts";
+import {
+  appendReviewRouteUnit,
+  createReviewRouteDraft,
+  finishReviewRouteDraft,
+  type ReviewRouteDraft,
+  type ReviewRouteDraftProgress,
+} from "../review/route-draft.ts";
 import { createReviewSeries } from "../review/series.ts";
 import {
   DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
@@ -54,7 +60,8 @@ import type {
   GuidedReviewResult,
   InProgressReview,
   ReviewDelta,
-  ReviewRouteCandidate,
+  ReviewRouteFinishCandidate,
+  ReviewRouteUnitCandidate,
   ReviewSeries,
   ReviewSeriesId,
   ReviewSnapshot,
@@ -149,6 +156,8 @@ interface PendingReview {
   routeRules?: LoadedDiffWalkRules;
   /** Advisory route-quality signals are returned at most once per review. */
   advisoryNudged: boolean;
+  /** Units accepted so far while the agent assembles the route one at a time. */
+  routeDraft: ReviewRouteDraft;
 }
 
 /**
@@ -393,6 +402,7 @@ export class DiffWalkSession {
       inProgress: false,
       ...(routeRules === undefined ? {} : { routeRules }),
       advisoryNudged: false,
+      routeDraft: createReviewRouteDraft(snapshot.id),
     };
     this.pendingReview = pending;
     this.sendKickoffPrompt(pending);
@@ -512,42 +522,42 @@ export class DiffWalkSession {
    * snapshot, return advisory signals once, confirm the repository still
    * matches, attach the route, and open the walkthrough.
    */
-  async attachRouteAndOpen(
-    ctx: ReviewUiContext,
-    routeCandidate: ReviewRouteCandidate,
-    signal: AbortSignal | undefined,
-  ): Promise<GuidedReviewResult> {
-    const pending = this.pendingReview;
-    if (pending === undefined) {
-      throw new Error(
-        "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
-      );
-    }
-    if (routeCandidate.snapshotId !== pending.review.snapshot.id) {
-      throw new Error(
-        `Route snapshot ${routeCandidate.snapshotId} does not match pending snapshot ${pending.review.snapshot.id}. Use the frozen snapshot ID from the /diffwalk prompt.`,
-      );
-    }
-    if (pending.inProgress) {
-      throw new Error(
-        `Guided review for snapshot ${pending.review.snapshot.id} is already open.`,
-      );
-    }
-    if (pending.review.lifecycle !== "preparing-route") {
-      throw new Error(
-        `Review ${pending.review.id} already has a validated route. Run /diffwalk to resume it.`,
-      );
-    }
-
-    const route = validateReviewRoute(
+  /**
+   * Accepts one route unit. Validation runs against the whole draft, so a
+   * unit that conflicts with an earlier one is rejected here rather than at
+   * the end, and only the unit being added has to be rewritten.
+   */
+  async appendRouteUnit(
+    candidate: ReviewRouteUnitCandidate,
+  ): Promise<ReviewRouteDraftProgress> {
+    const pending = this.requireRoutableReview(candidate.snapshotId);
+    const progress = appendReviewRouteUnit(
       pending.review.snapshot,
       pending.review.delta,
-      routeCandidate,
+      pending.routeDraft,
+      candidate.unit,
     );
     await assertRoutineReferences(
-      route,
+      progress.acceptedUnit,
+      progress.unitCount,
       pending.review.snapshot.repositoryRoot,
       this.dependencies.routineReferenceExists,
+    );
+    pending.routeDraft = progress.draft;
+    return progress;
+  }
+
+  async finishRouteAndOpen(
+    ctx: ReviewUiContext,
+    candidate: ReviewRouteFinishCandidate,
+    signal: AbortSignal | undefined,
+  ): Promise<GuidedReviewResult> {
+    const pending = this.requireRoutableReview(candidate.snapshotId);
+    const route = finishReviewRouteDraft(
+      pending.review.snapshot,
+      pending.review.delta,
+      pending.routeDraft,
+      candidate.skippedSpans,
     );
     if (!pending.advisoryNudged) {
       const advisories = assessRouteQuality(
@@ -557,6 +567,9 @@ export class DiffWalkSession {
       );
       if (advisories.length > 0) {
         pending.advisoryNudged = true;
+        // The advisory asks for a different route, so the accepted units are
+        // dropped and the agent appends the reordered route from the start.
+        pending.routeDraft = createReviewRouteDraft(pending.review.snapshot.id);
         throw new ReviewRouteAdvisoryNudge(advisories);
       }
     }
@@ -577,6 +590,31 @@ export class DiffWalkSession {
       timestamp: new Date().toISOString(),
     });
     return this.runPendingReview(ctx, pending);
+  }
+
+  private requireRoutableReview(snapshotId: string): PendingReview {
+    const pending = this.pendingReview;
+    if (pending === undefined) {
+      throw new Error(
+        "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
+      );
+    }
+    if (snapshotId !== pending.review.snapshot.id) {
+      throw new Error(
+        `Route snapshot ${snapshotId} does not match pending snapshot ${pending.review.snapshot.id}. Use the frozen snapshot ID from the /diffwalk prompt.`,
+      );
+    }
+    if (pending.inProgress) {
+      throw new Error(
+        `Guided review for snapshot ${pending.review.snapshot.id} is already open.`,
+      );
+    }
+    if (pending.review.lifecycle !== "preparing-route") {
+      throw new Error(
+        `Review ${pending.review.id} already has a validated route. Run /diffwalk to resume it.`,
+      );
+    }
+    return pending;
   }
 
   discardPendingReview(ctx: CommandContext): void {

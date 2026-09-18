@@ -1,5 +1,6 @@
 import type { MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import type { ReviewRouteDraftProgress } from "../review/route-draft.ts";
 import { requireThreadTurn } from "../review/threads.ts";
 import type {
   FileChange,
@@ -155,6 +156,29 @@ export function renderGuidedReviewToolResult(
     reviewOutcomeDisplayLines(result);
   const titleColor = result.status === "submitted" ? "success" : "warning";
   return new Text([theme.fg(titleColor, title), ...body].join("\n"), 0, 0);
+}
+
+/** One line per accepted unit: what was taken, and how much is left. */
+export function renderRouteUnitToolResult(
+  progress: ReviewRouteDraftProgress,
+  theme: Theme,
+): Text {
+  const remainingLines = progress.remaining.reduce(
+    (sum, file) => sum + file.lineCount,
+    0,
+  );
+  const summary =
+    remainingLines === 0
+      ? "route complete"
+      : `${countNoun(remainingLines, "line")} left in ${countNoun(progress.remaining.length, "file")}`;
+  return new Text(
+    theme.fg(
+      remainingLines === 0 ? "success" : "muted",
+      `Unit ${progress.unitCount} accepted, ${summary}`,
+    ),
+    0,
+    0,
+  );
 }
 
 export function reviewOutcomeNotification(result: GuidedReviewResult): string {

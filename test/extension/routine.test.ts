@@ -53,7 +53,7 @@ test("routineReferenceExists accepts regular files inside the repository only", 
   assert.equal(await routineReferenceExists(repository, ""), false);
 });
 
-test("assertRoutineReferences reports every unusable reference at once", async () => {
+test("assertRoutineReferences rejects the unit carrying the unusable reference", async () => {
   const snapshot = makeSnapshot("snapshot-routine", [
     { path: "src/a.ts", lines: [" head", "+a", " tail"] },
     { path: "src/b.ts", lines: [" head", "+b", " tail"] },
@@ -83,13 +83,13 @@ test("assertRoutineReferences reports every unusable reference at once", async (
   const exists = async (_root: string, path: string) =>
     path === "src/exists.ts";
 
-  await assertRoutineReferences(
-    { ...route, units: route.units.slice(0, 2) } as typeof route,
-    "/repo",
-    exists,
-  );
+  const [first, second, third] = route.units;
+  assert.ok(first && second && third);
+
+  await assertRoutineReferences(first, 1, "/repo", exists);
+  await assertRoutineReferences(second, 2, "/repo", exists);
   await assert.rejects(
-    assertRoutineReferences(route, "/repo", exists),
+    assertRoutineReferences(third, 3, "/repo", exists),
     (error: unknown) => {
       assert.ok(error instanceof RoutineReferenceError);
       assert.match(

@@ -8,7 +8,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.ts";
-import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
+import {
+  REVIEW_RESPONSES_TOOL_NAME,
+  ROUTE_UNIT_TOOL_NAME,
+} from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
@@ -19,6 +22,7 @@ import {
   markReviewUnitReviewed,
   upsertInProgressReviewComment,
 } from "../../src/review/in-progress.ts";
+import type { ReviewRouteDraftProgress } from "../../src/review/route-draft.ts";
 import {
   appendReviewThreadTurn,
   type ReviewResponseCandidateSchema,
@@ -30,7 +34,8 @@ import type {
   GuidedReviewResult,
   ReviewComment,
   ReviewRouteCandidate,
-  ReviewRouteCandidateSchema,
+  ReviewRouteFinishCandidateSchema,
+  ReviewRouteUnitCandidateSchema,
   ReviewSnapshot,
   SnapshotId,
 } from "../../src/review/types.ts";
@@ -38,8 +43,13 @@ import type { ReviewThreadUiResult } from "../../src/thread-ui/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 
 export type GuidedToolDefinition = ToolDefinition<
-  typeof ReviewRouteCandidateSchema,
+  typeof ReviewRouteFinishCandidateSchema,
   GuidedReviewResult
+>;
+
+export type RouteUnitToolDefinition = ToolDefinition<
+  typeof ReviewRouteUnitCandidateSchema,
+  ReviewRouteDraftProgress
 >;
 
 export type ResponseToolDefinition = ToolDefinition<
@@ -99,7 +109,17 @@ export interface Harness {
     args: string,
     ctx: ExtensionCommandContext,
   ) => Promise<void>;
+  /** The finishing tool, which opens the walkthrough. */
   readonly tool: GuidedToolDefinition;
+  readonly unitTool: RouteUnitToolDefinition;
+  /** Appends every unit, then finishes, the way an agent drives the route. */
+  readonly submitRoute: (
+    toolCallId: string,
+    route: ReviewRouteCandidate,
+    signal: AbortSignal | undefined,
+    onUpdate: undefined,
+    ctx: ExtensionContext,
+  ) => Promise<Awaited<ReturnType<GuidedToolDefinition["execute"]>>>;
   readonly responseTool: ResponseToolDefinition;
   readonly sentMessages: readonly string[];
   readonly sentMessageMeta: readonly SentMessageMeta[];
@@ -140,6 +160,7 @@ export function createHarness(
     | ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
     | undefined;
   let tool: GuidedToolDefinition | undefined;
+  let unitTool: RouteUnitToolDefinition | undefined;
   let responseTool: ResponseToolDefinition | undefined;
   const sentMessages: string[] = [];
   const sentMessageMeta: SentMessageMeta[] = [];
@@ -170,9 +191,16 @@ export function createHarness(
       assert.equal(name, "diffwalk");
       command = options.handler;
     },
-    registerTool(definition: GuidedToolDefinition | ResponseToolDefinition) {
+    registerTool(
+      definition:
+        | GuidedToolDefinition
+        | RouteUnitToolDefinition
+        | ResponseToolDefinition,
+    ) {
       if (definition.name === REVIEW_RESPONSES_TOOL_NAME) {
         responseTool = definition as ResponseToolDefinition;
+      } else if (definition.name === ROUTE_UNIT_TOOL_NAME) {
+        unitTool = definition as RouteUnitToolDefinition;
       } else {
         tool = definition as GuidedToolDefinition;
       }
@@ -342,7 +370,34 @@ export function createHarness(
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
+  assert.ok(unitTool);
   assert.ok(responseTool);
+  const finishTool = tool;
+  const appendTool = unitTool;
+  const submitRoute = async (
+    toolCallId: string,
+    route: ReviewRouteCandidate,
+    signal: AbortSignal | undefined,
+    _onUpdate: undefined,
+    ctx: ExtensionContext,
+  ): Promise<Awaited<ReturnType<GuidedToolDefinition["execute"]>>> => {
+    for (const [index, unit] of route.units.entries()) {
+      await appendTool.execute(
+        `${toolCallId}-unit-${index + 1}`,
+        { snapshotId: route.snapshotId, unit },
+        signal,
+        undefined,
+        ctx,
+      );
+    }
+    return finishTool.execute(
+      toolCallId,
+      { snapshotId: route.snapshotId, skippedSpans: route.skippedSpans },
+      signal,
+      undefined,
+      ctx,
+    );
+  };
   assert.ok(sessionStartHandler);
   const restoreSession = async (
     entries: readonly AppendedEntry[],
@@ -375,6 +430,8 @@ export function createHarness(
     pathExclusionCalls,
     behavior,
     restoreSession,
+    unitTool: appendTool,
+    submitRoute,
   };
 }
 

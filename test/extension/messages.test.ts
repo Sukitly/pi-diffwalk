@@ -37,7 +37,7 @@ import {
 test("renders every successful guided-review outcome", async () => {
   const pausedHarness = createHarness();
   await pausedHarness.command("", commandContext());
-  const paused = await pausedHarness.tool.execute(
+  const paused = await pausedHarness.submitRoute(
     "call-paused",
     validRoute(),
     undefined,
@@ -68,7 +68,7 @@ test("renders every successful guided-review outcome", async () => {
 
   const discardedHarness = createHarness({ discardOnOpen: true });
   await discardedHarness.command("", commandContext());
-  const discarded = await discardedHarness.tool.execute(
+  const discarded = await discardedHarness.submitRoute(
     "call-discarded",
     validRoute(),
     undefined,
@@ -82,7 +82,7 @@ test("renders every successful guided-review outcome", async () => {
 
   const noCommentsHarness = createHarness({ submitOnOpen: true });
   await noCommentsHarness.command("", commandContext());
-  const noComments = await noCommentsHarness.tool.execute(
+  const noComments = await noCommentsHarness.submitRoute(
     "call-no-comments",
     validRoute(),
     undefined,
@@ -104,7 +104,7 @@ test("renders every successful guided-review outcome", async () => {
     commentOnSubmit: true,
   });
   await commentsHarness.command("", commandContext());
-  const comments = await commentsHarness.tool.execute(
+  const comments = await commentsHarness.submitRoute(
     "call-comments",
     validRoute(),
     undefined,

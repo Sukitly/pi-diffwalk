@@ -96,11 +96,12 @@ A Git revision cannot start with `-`, so an option never shadows a base. When th
 1. DiffWalk freezes a snapshot of the current Git changes. Every changed line receives a stable address: a file, a side, and a line number.
 2. Mechanical exclusion rules remove changed lines that need no judgment, such as lockfiles or whitespace-only edits. The inventory lists every excluded line with the rule that removed it.
 3. The agent reads the change with its own tools and plans a review route: semantic units ordered by behavior, contracts, and data flow instead of file order. A unit may span several files, so an implementation and the test that proves it are read together. A small unit that repeats an existing pattern may be marked routine, naming the code it mirrors.
-4. DiffWalk validates the route. Every changed line that needs review must be covered by exactly one review unit or explicitly skipped with a visible reason. Excluded lines must stay outside the route.
-5. The TUI walks you through the route one unit at a time. A one or two sentence change summary sits under the header. The agent's review questions sit beneath the diff lines they are about, sharing one background block with the line; a question about the unit as a whole appears above the diff. The reasons the unit comes next and the contract to keep in mind stay on the details page. You attach comments to exact diff lines.
-6. Submission returns all comments to the agent as one batch, in one of two modes: **Discuss first** (the agent investigates without editing code) or **Apply change requests**.
-7. The agent answers every comment with a structured response. A follow-up view shows each conversation under its diff anchor. You can reply to continue a thread and resolve it when satisfied. Only the reviewer can resolve a thread.
-8. Running `/diffwalk` again against the same base carries forward already-reviewed lines and resolved comments, and routes only what still needs review. Completed rounds and comment threads persist in the pi session across restarts.
+4. The agent submits the route one unit at a time. Each unit is validated as it arrives and the reply reports which changed lines are still unrouted, so a mistake costs one unit instead of the whole route. The inventory hands the agent ready-made regions to pick from: contiguous runs of changed lines that share one review status.
+5. A final call completes the route with any explicitly skipped regions. Every changed line that needs review must then be covered by exactly one review unit or skipped with a visible reason. Excluded lines must stay outside the route.
+6. The TUI walks you through the route one unit at a time. A one or two sentence change summary sits under the header. The agent's review questions sit beneath the diff lines they are about, sharing one background block with the line; a question about the unit as a whole appears above the diff. The reasons the unit comes next and the contract to keep in mind stay on the details page. You attach comments to exact diff lines.
+7. Submission returns all comments to the agent as one batch, in one of two modes: **Discuss first** (the agent investigates without editing code) or **Apply change requests**.
+8. The agent answers every comment with a structured response. A follow-up view shows each conversation under its diff anchor. You can reply to continue a thread and resolve it when satisfied. Only the reviewer can resolve a thread.
+9. Running `/diffwalk` again against the same base carries forward already-reviewed lines and resolved comments, and routes only what still needs review. Completed rounds and comment threads persist in the pi session across restarts.
 
 ```text
 DiffWalk / Review                                  Unit 3/12
@@ -219,6 +220,7 @@ Each completed round keeps a per-unit record: whether the agent claimed routine,
 - The snapshot is immutable for the duration of a review.
 - Every changed line is covered by exactly one review unit, explicitly skipped with a visible reason, or excluded by a mechanical rule that the inventory names. A line carrying an unresolved comment cannot be skipped, excluded, or placed in a routine unit.
 - A routine claim never removes code from the route. A folded unit keeps its position, shows its claim and reference, and expands with one key.
+- A unit is accepted or rejected on its own. A rejected unit never invalidates the units already accepted, and the walkthrough opens only after the completed route passes the full coverage check.
 - Worktree drift is detected before comments are submitted. Comments and agent responses keep stable snapshot anchors even if the worktree changes later.
 - Agent responses cannot resolve comments. Resolution is an explicit reviewer action.
 - Binary files, renames, deletions, and other changes that cannot be reviewed line by line are represented or explicitly reported as unsupported.

@@ -48,9 +48,9 @@ test("a project exclude file replaces the global one and is passed to Git with a
   assert.match(prompt, /"excludedLineCount": 1/);
   assert.match(
     prompt,
-    /"excluded": \[\s*\{\s*"reason": "excluded-path",\s*"pattern": "\*-lock\.json",\s*"new": \[\s*"2"\s*\]\s*\}\s*\]/,
+    /"new": "2",\s*"status": "excluded",\s*"rule": "matches exclude pattern \\"\*-lock\.json\\""/,
   );
-  assert.match(prompt, /Do not cover lines listed under `excluded`/);
+  assert.match(prompt, /Do not cover regions with status `excluded`/);
 });
 
 test("falls back to the global exclude file when the project file is absent", async () => {
@@ -190,7 +190,7 @@ test("whitespace-only lines are excluded without any exclude file", async () => 
   const prompt = harness.sentMessages[0] ?? "";
   assert.match(prompt, /"excludedLineCount": 2/);
   assert.match(prompt, /"needsReviewLineCount": 1/);
-  assert.match(prompt, /"reason": "whitespace-only"/);
+  assert.match(prompt, /"rule": "whitespace-only change"/);
 });
 
 test("reports excluded lines when nothing is left to review", async () => {

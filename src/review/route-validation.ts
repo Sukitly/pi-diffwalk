@@ -71,10 +71,20 @@ export class ReviewRouteValidationError extends Error {
   }
 }
 
+export interface ReviewRouteValidationOptions {
+  /**
+   * A draft route is still being assembled one unit at a time, so gaps in
+   * coverage are expected. Every other rule applies at both stages: a unit
+   * that is wrong is rejected as soon as it arrives, not at the end.
+   */
+  readonly stage?: "draft" | "final";
+}
+
 export function validateReviewRoute(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
   candidate: ReviewRouteCandidate,
+  options: ReviewRouteValidationOptions = {},
 ): ReviewRoute {
   assertReviewDeltaMatchesSnapshot(snapshot, delta);
   const issues: ReviewRouteValidationIssue[] = [];
@@ -289,25 +299,27 @@ export function validateReviewRoute(
     });
   }
 
-  const uncovered = coverage.uncovered.filter(
-    (line) => requirementOf(requirements, line)?.type === "needs-review",
-  );
-  for (const description of describeChangedLines(snapshot, uncovered)) {
-    issues.push({
-      code: "missing-coverage",
-      message: `${description} needs review but no unit covers it and no skip excludes it.`,
-    });
-  }
+  if (options.stage !== "draft") {
+    const uncovered = coverage.uncovered.filter(
+      (line) => requirementOf(requirements, line)?.type === "needs-review",
+    );
+    for (const description of describeChangedLines(snapshot, uncovered)) {
+      issues.push({
+        code: "missing-coverage",
+        message: `${description} needs review but no unit covers it and no skip excludes it.`,
+      });
+    }
 
-  const needsReviewExists = delta.lines.some(
-    (requirement) => requirement.type === "needs-review",
-  );
-  if (needsReviewExists && !unitSpans.some((spans) => spans.length > 0)) {
-    issues.push({
-      code: "missing-review-unit",
-      message:
-        "A route with changed lines requiring review must contain at least one review unit with spans.",
-    });
+    const needsReviewExists = delta.lines.some(
+      (requirement) => requirement.type === "needs-review",
+    );
+    if (needsReviewExists && !unitSpans.some((spans) => spans.length > 0)) {
+      issues.push({
+        code: "missing-review-unit",
+        message:
+          "A route with changed lines requiring review must contain at least one review unit with spans.",
+      });
+    }
   }
 
   throwIfIssues(issues);
