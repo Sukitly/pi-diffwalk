@@ -17,24 +17,24 @@ import {
   shouldSendReviewToAgent,
 } from "./model-payloads.ts";
 import {
-  REVIEW_RESPONSES_TOOL_DESCRIPTION,
-  REVIEW_RESPONSES_TOOL_NAME,
-  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
-  ROUTE_FINISH_TOOL_DESCRIPTION,
-  ROUTE_FINISH_TOOL_NAME,
-  ROUTE_FINISH_TOOL_PROMPT_SNIPPET,
-  ROUTE_UNIT_TOOL_DESCRIPTION,
-  ROUTE_UNIT_TOOL_NAME,
-  ROUTE_UNIT_TOOL_PROMPT_SNIPPET,
+  ADD_UNIT_TOOL_DESCRIPTION,
+  ADD_UNIT_TOOL_NAME,
+  ADD_UNIT_TOOL_PROMPT_SNIPPET,
+  OPEN_TOOL_DESCRIPTION,
+  OPEN_TOOL_NAME,
+  OPEN_TOOL_PROMPT_SNIPPET,
+  RESPOND_TOOL_DESCRIPTION,
+  RESPOND_TOOL_NAME,
+  RESPOND_TOOL_PROMPT_SNIPPET,
 } from "./prompts.ts";
 import type { DiffWalkSession } from "./session.ts";
 import {
+  renderAddUnitToolResult,
   renderGuidedReviewToolResult,
-  renderRouteUnitToolResult,
   renderThreadFollowUpToolResult,
 } from "./tui-messages.ts";
 
-export function registerRouteUnitTool(
+export function registerAddUnitTool(
   pi: ExtensionAPI,
   session: DiffWalkSession,
 ): void {
@@ -42,14 +42,14 @@ export function registerRouteUnitTool(
     typeof ReviewRouteUnitCandidateSchema,
     ReviewRouteDraftProgress
   >({
-    name: ROUTE_UNIT_TOOL_NAME,
-    label: "DiffWalk Route Unit",
-    description: ROUTE_UNIT_TOOL_DESCRIPTION,
-    promptSnippet: ROUTE_UNIT_TOOL_PROMPT_SNIPPET,
+    name: ADD_UNIT_TOOL_NAME,
+    label: "DiffWalk Add Unit",
+    description: ADD_UNIT_TOOL_DESCRIPTION,
+    promptSnippet: ADD_UNIT_TOOL_PROMPT_SNIPPET,
     parameters: ReviewRouteUnitCandidateSchema,
     executionMode: "sequential",
     async execute(_toolCallId, candidate) {
-      const progress = await session.appendRouteUnit(candidate);
+      const progress = await session.addRouteUnit(candidate);
       return {
         content: [{ type: "text", text: formatRouteUnitProgress(progress) }],
         details: progress,
@@ -76,7 +76,7 @@ export function registerRouteUnitTool(
       }
       return result.details === undefined
         ? new Text("Review unit accepted.", 0, 0)
-        : renderRouteUnitToolResult(result.details, theme);
+        : renderAddUnitToolResult(result.details, theme);
     },
   });
 }
@@ -85,7 +85,7 @@ export function registerRouteUnitTool(
 function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
   const accepted = `Accepted review unit ${progress.unitCount}.`;
   if (progress.remaining.length === 0) {
-    return `${accepted} Every changed line needing review is now covered. Call ${ROUTE_FINISH_TOOL_NAME} to open the walkthrough.`;
+    return `${accepted} Every changed line needing review is now covered. Call ${OPEN_TOOL_NAME} to open the walkthrough.`;
   }
   const total = progress.remaining.reduce(
     (sum, file) => sum + file.lineCount,
@@ -97,19 +97,19 @@ function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
   return `${accepted} ${total} changed line${total === 1 ? "" : "s"} still need routing:\n${files}`;
 }
 
-export function registerRouteFinishTool(
+export function registerOpenTool(
   pi: ExtensionAPI,
   session: DiffWalkSession,
 ): void {
   pi.registerTool<typeof ReviewRouteFinishCandidateSchema, GuidedReviewResult>({
-    name: ROUTE_FINISH_TOOL_NAME,
+    name: OPEN_TOOL_NAME,
     label: "DiffWalk Review",
-    description: ROUTE_FINISH_TOOL_DESCRIPTION,
-    promptSnippet: ROUTE_FINISH_TOOL_PROMPT_SNIPPET,
+    description: OPEN_TOOL_DESCRIPTION,
+    promptSnippet: OPEN_TOOL_PROMPT_SNIPPET,
     parameters: ReviewRouteFinishCandidateSchema,
     executionMode: "sequential",
     async execute(_toolCallId, candidate, signal, _onUpdate, ctx) {
-      const result = await session.finishRouteAndOpen(ctx, candidate, signal);
+      const result = await session.openRoute(ctx, candidate, signal);
       return {
         content: [{ type: "text", text: formatGuidedReviewResult(result) }],
         details: result,
@@ -134,15 +134,15 @@ export function registerRouteFinishTool(
   });
 }
 
-export function registerReviewResponsesTool(
+export function registerRespondTool(
   pi: ExtensionAPI,
   session: DiffWalkSession,
 ): void {
   pi.registerTool<typeof ReviewResponseCandidateSchema, ReviewThreadUiResult>({
-    name: REVIEW_RESPONSES_TOOL_NAME,
+    name: RESPOND_TOOL_NAME,
     label: "DiffWalk Responses",
-    description: REVIEW_RESPONSES_TOOL_DESCRIPTION,
-    promptSnippet: REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+    description: RESPOND_TOOL_DESCRIPTION,
+    promptSnippet: RESPOND_TOOL_PROMPT_SNIPPET,
     parameters: ReviewResponseCandidateSchema,
     executionMode: "sequential",
     prepareArguments(args): ReviewResponseCandidate {

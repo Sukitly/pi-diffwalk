@@ -159,7 +159,7 @@ export function renderGuidedReviewToolResult(
 }
 
 /** One line per accepted unit: what was taken, and how much is left. */
-export function renderRouteUnitToolResult(
+export function renderAddUnitToolResult(
   progress: ReviewRouteDraftProgress,
   theme: Theme,
 ): Text {

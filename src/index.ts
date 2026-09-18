@@ -6,9 +6,9 @@ import {
   DiffWalkSession,
 } from "./extension/session.ts";
 import {
-  registerReviewResponsesTool,
-  registerRouteFinishTool,
-  registerRouteUnitTool,
+  registerAddUnitTool,
+  registerOpenTool,
+  registerRespondTool,
 } from "./extension/tools.ts";
 import {
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
@@ -50,7 +50,7 @@ export function registerDiffWalk(
   );
 
   registerDiffWalkCommand(pi, session);
-  registerReviewResponsesTool(pi, session);
-  registerRouteUnitTool(pi, session);
-  registerRouteFinishTool(pi, session);
+  registerRespondTool(pi, session);
+  registerAddUnitTool(pi, session);
+  registerOpenTool(pi, session);
 }

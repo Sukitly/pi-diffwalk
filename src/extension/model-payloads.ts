@@ -7,7 +7,7 @@ import type {
   ReviewThreadBatch,
   ReviewThreadTurnId,
 } from "../review/types.ts";
-import { REVIEW_RESPONSES_TOOL_NAME } from "./prompts.ts";
+import { RESPOND_TOOL_NAME } from "./prompts.ts";
 
 /**
  * Text sent to the model: guided review tool results and the follow-up
@@ -46,8 +46,8 @@ export function formatReviewThreadFollowUp(
     }),
     instruction:
       turn.submissionMode === "discuss-first"
-        ? `Investigate every pending reviewer follow-up without modifying files. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId. The tool reopens the anchored conversations for the reviewer.`
-        : `Apply direct change requests and investigate questions or disagreements in every pending reviewer follow-up. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId, explaining any applied change, uncertainty, or disagreement. The tool reopens the anchored conversations for the reviewer.`,
+        ? `Investigate every pending reviewer follow-up without modifying files. Do not answer in ordinary assistant text. Call ${RESPOND_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId. The tool reopens the anchored conversations for the reviewer.`
+        : `Apply direct change requests and investigate questions or disagreements in every pending reviewer follow-up. Do not answer in ordinary assistant text. Call ${RESPOND_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId, explaining any applied change, uncertainty, or disagreement. The tool reopens the anchored conversations for the reviewer.`,
   });
 }
 
@@ -84,7 +84,7 @@ export function formatGuidedReviewResult(result: GuidedReviewResult): string {
       result.comments.length === 0
         ? "No comments require an Agent response."
         : result.submissionMode === "discuss-first"
-          ? `Investigate every comment without modifying files. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId. The tool opens the anchored conversations for the reviewer.`
-          : `Apply direct change requests and investigate questions or disagreements. Do not answer in ordinary assistant text. Call ${REVIEW_RESPONSES_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId, explaining any applied change, uncertainty, or disagreement. The tool opens the anchored conversations for the reviewer.`,
+          ? `Investigate every comment without modifying files. Do not answer in ordinary assistant text. Call ${RESPOND_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId. The tool opens the anchored conversations for the reviewer.`
+          : `Apply direct change requests and investigate questions or disagreements. Do not answer in ordinary assistant text. Call ${RESPOND_TOOL_NAME} with this commentBatchId, turnId, and exactly one direct response for every threadId, explaining any applied change, uncertainty, or disagreement. The tool opens the anchored conversations for the reviewer.`,
   });
 }

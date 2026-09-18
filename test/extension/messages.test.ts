@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatGuidedReviewResult } from "../../src/extension/model-payloads.ts";
-import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
+import { RESPOND_TOOL_NAME } from "../../src/extension/prompts.ts";
 import {
   buildKickoffMessageDetails,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
@@ -334,7 +334,7 @@ test("formats structured pause, discard, and submission instructions", () => {
   assert.equal(formatted.turnId, "T1");
   assert.equal(formatted.comments[0]?.threadId, "C1");
   assert.match(formatted.instruction, /without modifying files/);
-  assert.match(formatted.instruction, new RegExp(REVIEW_RESPONSES_TOOL_NAME));
+  assert.match(formatted.instruction, new RegExp(RESPOND_TOOL_NAME));
   assert.match(
     formatted.instruction,
     /Do not answer in ordinary assistant text/,

@@ -7,16 +7,16 @@ import {
   formatReviewThreadFollowUp,
 } from "../../src/extension/model-payloads.ts";
 import {
+  ADD_UNIT_TOOL_DESCRIPTION,
+  ADD_UNIT_TOOL_NAME,
+  ADD_UNIT_TOOL_PROMPT_SNIPPET,
   buildReviewKickoffPrompt,
-  REVIEW_RESPONSES_TOOL_DESCRIPTION,
-  REVIEW_RESPONSES_TOOL_NAME,
-  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
-  ROUTE_FINISH_TOOL_DESCRIPTION,
-  ROUTE_FINISH_TOOL_NAME,
-  ROUTE_FINISH_TOOL_PROMPT_SNIPPET,
-  ROUTE_UNIT_TOOL_DESCRIPTION,
-  ROUTE_UNIT_TOOL_NAME,
-  ROUTE_UNIT_TOOL_PROMPT_SNIPPET,
+  OPEN_TOOL_DESCRIPTION,
+  OPEN_TOOL_NAME,
+  OPEN_TOOL_PROMPT_SNIPPET,
+  RESPOND_TOOL_DESCRIPTION,
+  RESPOND_TOOL_NAME,
+  RESPOND_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/prompts.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {
@@ -137,23 +137,23 @@ function kickoffWithoutMoves(): string {
 
 function toolSurface(): string {
   return [
-    `name: ${ROUTE_UNIT_TOOL_NAME}`,
-    `description: ${ROUTE_UNIT_TOOL_DESCRIPTION}`,
-    `promptSnippet: ${ROUTE_UNIT_TOOL_PROMPT_SNIPPET}`,
+    `name: ${ADD_UNIT_TOOL_NAME}`,
+    `description: ${ADD_UNIT_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${ADD_UNIT_TOOL_PROMPT_SNIPPET}`,
     `parameters: ${JSON.stringify(ReviewRouteUnitCandidateSchema)}`,
     "",
-    `name: ${ROUTE_FINISH_TOOL_NAME}`,
-    `description: ${ROUTE_FINISH_TOOL_DESCRIPTION}`,
-    `promptSnippet: ${ROUTE_FINISH_TOOL_PROMPT_SNIPPET}`,
+    `name: ${OPEN_TOOL_NAME}`,
+    `description: ${OPEN_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${OPEN_TOOL_PROMPT_SNIPPET}`,
     `parameters: ${JSON.stringify(ReviewRouteFinishCandidateSchema)}`,
   ].join("\n");
 }
 
 function responseToolSurface(): string {
   return [
-    `name: ${REVIEW_RESPONSES_TOOL_NAME}`,
-    `description: ${REVIEW_RESPONSES_TOOL_DESCRIPTION}`,
-    `promptSnippet: ${REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET}`,
+    `name: ${RESPOND_TOOL_NAME}`,
+    `description: ${RESPOND_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${RESPOND_TOOL_PROMPT_SNIPPET}`,
     `parameters: ${JSON.stringify(ReviewResponseCandidateSchema)}`,
   ].join("\n");
 }
@@ -239,8 +239,8 @@ function renderSurface(): string {
       "kickoff prompt: incremental review with selected project rules without moves",
       kickoffWithoutMoves(),
     ],
-    ["guided_review tool", toolSurface()],
-    ["submit_diffwalk_responses tool", responseToolSurface()],
+    ["route tools", toolSurface()],
+    ["respond tool", responseToolSurface()],
     ["tool results", resultSurface()],
     ["reviewer follow-up tool result", followUpSurface()],
   ];

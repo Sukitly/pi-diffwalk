@@ -9,8 +9,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.ts";
 import {
-  REVIEW_RESPONSES_TOOL_NAME,
-  ROUTE_UNIT_TOOL_NAME,
+  ADD_UNIT_TOOL_NAME,
+  RESPOND_TOOL_NAME,
 } from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
@@ -197,9 +197,9 @@ export function createHarness(
         | RouteUnitToolDefinition
         | ResponseToolDefinition,
     ) {
-      if (definition.name === REVIEW_RESPONSES_TOOL_NAME) {
+      if (definition.name === RESPOND_TOOL_NAME) {
         responseTool = definition as ResponseToolDefinition;
-      } else if (definition.name === ROUTE_UNIT_TOOL_NAME) {
+      } else if (definition.name === ADD_UNIT_TOOL_NAME) {
         unitTool = definition as RouteUnitToolDefinition;
       } else {
         tool = definition as GuidedToolDefinition;

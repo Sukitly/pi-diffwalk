@@ -223,7 +223,7 @@ export class DiffWalkSession {
   }
 
   /**
-   * The submit_diffwalk_responses tool workflow: record the agent's answers
+   * The diffwalk_respond tool workflow: record the agent's answers
    * on the pending turn, persist them, and reopen the threads for the
    * reviewer.
    */
@@ -519,7 +519,7 @@ export class DiffWalkSession {
    * unit that conflicts with an earlier one is rejected here rather than at
    * the end, and only the unit being added has to be rewritten.
    */
-  async appendRouteUnit(
+  async addRouteUnit(
     candidate: ReviewRouteUnitCandidate,
   ): Promise<ReviewRouteDraftProgress> {
     const pending = this.requireRoutableReview(candidate.snapshotId);
@@ -539,7 +539,7 @@ export class DiffWalkSession {
     return progress;
   }
 
-  async finishRouteAndOpen(
+  async openRoute(
     ctx: ReviewUiContext,
     candidate: ReviewRouteFinishCandidate,
     signal: AbortSignal | undefined,

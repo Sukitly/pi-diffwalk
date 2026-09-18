@@ -25,26 +25,26 @@ import type {
 } from "../review/types.ts";
 import type { LoadedDiffWalkRules } from "./rules.ts";
 
-export const ROUTE_UNIT_TOOL_NAME = "diffwalk_route_unit";
+export const ADD_UNIT_TOOL_NAME = "diffwalk_add_unit";
 
-export const ROUTE_UNIT_TOOL_DESCRIPTION =
+export const ADD_UNIT_TOOL_DESCRIPTION =
   "Append one semantic review unit to the route being prepared for the frozen DiffWalk snapshot. Call it once per unit, in walkthrough order. The result reports what still needs routing.";
 
-export const ROUTE_UNIT_TOOL_PROMPT_SNIPPET =
+export const ADD_UNIT_TOOL_PROMPT_SNIPPET =
   "Append one review unit to the pending DiffWalk route";
 
-export const ROUTE_FINISH_TOOL_NAME = "diffwalk_route_finish";
+export const OPEN_TOOL_NAME = "diffwalk_open";
 
-export const ROUTE_FINISH_TOOL_DESCRIPTION =
+export const OPEN_TOOL_DESCRIPTION =
   "Complete the DiffWalk route with any explicitly skipped regions and open the walkthrough. Every changed line needing review must be covered by an appended unit or skipped here.";
 
-export const ROUTE_FINISH_TOOL_PROMPT_SNIPPET =
+export const OPEN_TOOL_PROMPT_SNIPPET =
   "Complete the pending DiffWalk route and open the walkthrough";
 
-export const REVIEW_RESPONSES_TOOL_NAME = "submit_diffwalk_responses";
-export const REVIEW_RESPONSES_TOOL_DESCRIPTION =
+export const RESPOND_TOOL_NAME = "diffwalk_respond";
+export const RESPOND_TOOL_DESCRIPTION =
   "Submit one structured Agent response for every thread in the pending DiffWalk turn, then open the anchored conversation UI";
-export const REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET =
+export const RESPOND_TOOL_PROMPT_SNIPPET =
   "Return complete structured responses for a pending DiffWalk conversation turn";
 
 /**
@@ -277,11 +277,11 @@ export function buildReviewKickoffPrompt(
             2,
           ),
           "END_DIFFWALK_REVIEW_RULES_JSON",
-          `Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or the ${ROUTE_UNIT_TOOL_NAME} and ${ROUTE_FINISH_TOOL_NAME} tool contracts above.`,
+          `Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or the ${ADD_UNIT_TOOL_NAME} and ${OPEN_TOOL_NAME} tool contracts above.`,
         ]),
     "",
-    `Submit the route one unit at a time: call ${ROUTE_UNIT_TOOL_NAME} once per unit, in walkthrough order, and do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next unit. When nothing is left, call ${ROUTE_FINISH_TOOL_NAME} with the skipped regions, using an empty list when there are none.`,
-    `A rejected unit affects only that call: fix the reported problem and call ${ROUTE_UNIT_TOOL_NAME} again with the corrected unit. Do not respond with a prose-only route.`,
+    `Submit the route one unit at a time: call ${ADD_UNIT_TOOL_NAME} once per unit, in walkthrough order, and do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next unit. When nothing is left, call ${OPEN_TOOL_NAME} with the skipped regions, using an empty list when there are none.`,
+    `A rejected unit affects only that call: fix the reported problem and call ${ADD_UNIT_TOOL_NAME} again with the corrected unit. Do not respond with a prose-only route.`,
     "",
     "BEGIN_DIFFWALK_INVENTORY_JSON",
     JSON.stringify(inventory, null, 2),

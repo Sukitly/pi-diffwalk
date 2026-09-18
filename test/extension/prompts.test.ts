@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ADD_UNIT_TOOL_NAME,
   buildReviewKickoffPrompt,
   buildReviewPromptInventory,
-  ROUTE_FINISH_TOOL_NAME,
-  ROUTE_UNIT_TOOL_NAME,
+  OPEN_TOOL_NAME,
 } from "../../src/extension/prompts.ts";
 import {
   computeReviewDelta,
@@ -146,8 +146,8 @@ test("builds a deterministic read-only kickoff prompt", () => {
   );
   assert.match(prompt, /every changed line must belong to exactly one unit/);
   assert.match(prompt, /cannot be skipped/);
-  assert.match(prompt, new RegExp(ROUTE_UNIT_TOOL_NAME));
-  assert.match(prompt, new RegExp(ROUTE_FINISH_TOOL_NAME));
+  assert.match(prompt, new RegExp(ADD_UNIT_TOOL_NAME));
+  assert.match(prompt, new RegExp(OPEN_TOOL_NAME));
   assert.match(prompt, /BEGIN_DIFFWALK_INVENTORY_JSON/);
   assert.match(prompt, /END_DIFFWALK_INVENTORY_JSON/);
 });
