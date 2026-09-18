@@ -107,7 +107,7 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
       units: [
         {
           ...valid.units[0],
-          reviewFocus: ["One?", "Two?", "Three?", "Four?"].map((question) => ({
+          reviewFocus: ["1?", "2?", "3?", "4?", "5?", "6?"].map((question) => ({
             question,
           })),
         },
@@ -115,11 +115,29 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
     }),
     false,
   );
+  assert.equal(
+    Value.Check(ReviewRouteCandidateSchema, {
+      ...valid,
+      units: [{ ...valid.units[0], reviewFocus: [] }],
+    }),
+    true,
+  );
 });
 
-test("rejects more than three review focus questions", () => {
+test("accepts a unit with no questions and rejects more than the limit", () => {
   const snapshot = fixture();
   const delta = computeReviewDelta(snapshot);
+  const spans = [
+    span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+    span("src/contract.ts", { new: [2, 2] }),
+  ];
+
+  const silent = validateReviewRoute(
+    snapshot,
+    delta,
+    route(snapshot, [unit(spans, { reviewFocus: [] })]),
+  );
+  assert.deepEqual(silent.units[0]?.reviewFocus, []);
 
   assert.throws(
     () =>
@@ -127,17 +145,11 @@ test("rejects more than three review focus questions", () => {
         snapshot,
         delta,
         route(snapshot, [
-          unit(
-            [
-              span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
-              span("src/contract.ts", { new: [2, 2] }),
-            ],
-            {
-              reviewFocus: ["One?", "Two?", "Three?", "Four?"].map(
-                (question) => ({ question }),
-              ),
-            },
-          ),
+          unit(spans, {
+            reviewFocus: ["1?", "2?", "3?", "4?", "5?", "6?"].map(
+              (question) => ({ question }),
+            ),
+          }),
         ]),
       ),
     (error: unknown) => codesOf(error).includes("review-focus-limit"),

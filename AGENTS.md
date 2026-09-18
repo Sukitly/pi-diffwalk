@@ -83,7 +83,7 @@ Unit tests must not call a real model or require network access. Use temporary G
 Keep coverage for these behavior categories; the existing test files are the source of truth for the exact cases:
 
 - Git snapshot shapes: staged, unstaged, mixed, untracked, added, deleted, renamed, binary, empty, no trailing newline, spaces and Unicode in paths, several changed regions in one file, whole-file reconstruction, deterministic identifiers and changed-line sets
-- route validation: every rejection path in Product Invariants 4 and 5, valid explicit skips, partial-hunk spans, and multi-file units
+- route validation: every rejection path in Product Invariants 4 and 5, valid explicit skips, partial-hunk spans, multi-file units, and units carrying no review question at all or more than the allowed number
 - incremental route assembly: units accepted one at a time, the remaining-work report, a rejected unit leaving accepted units intact, completeness enforced only when the route is finished, and the prompt regions the agent picks from
 - review delta: carried-forward lines surviving a line shift and a neighbouring edit
 - exact move detection: relocation across files, uniform reindentation, ambiguity from a third occurrence, size thresholds, and same-hunk suppression

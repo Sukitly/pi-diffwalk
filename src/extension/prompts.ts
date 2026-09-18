@@ -4,7 +4,10 @@ import {
 } from "../review/delta.ts";
 import { describeExclusion } from "../review/exclusion.ts";
 import { detectExactMoves, type MoveSideRange } from "../review/moves.ts";
-import { ROUTINE_MAX_CHANGED_LINES } from "../review/route-validation.ts";
+import {
+  REVIEW_FOCUS_LIMIT,
+  ROUTINE_MAX_CHANGED_LINES,
+} from "../review/route-validation.ts";
 import { changedLineKey, type LineRange } from "../review/span.ts";
 import type {
   ChangedLineRequirement,
@@ -254,7 +257,7 @@ export function buildReviewKickoffPrompt(
     "- `whyHere`: one sentence explaining the dependency or reading order.",
     "- `context`: one to three sentences with only the required call path, contract, or invariant.",
     "- `changeSummary`: one or two direct behavior sentences; no patch text.",
-    "- `reviewFocus`: one to three distinct failure questions; do not restate the summary. Set `anchor` (path, side, line inside this unit's spans) to the changed line each question is about; the walkthrough shows the question beneath that line. Omit `anchor` only for a question about the whole unit.",
+    `- \`reviewFocus\`: distinct failure questions, at most ${REVIEW_FOCUS_LIMIT}; do not restate the summary. Ask as many as the unit genuinely raises and leave the list empty when it raises none; an invented question costs the reviewer more than the silence it fills. Set \`anchor\` (path, side, line inside this unit's spans) to the changed line each question is about; the walkthrough shows the question beneath that line. Omit \`anchor\` only for a question about the whole unit.`,
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
     "- `routine`: set it only when the unit repeats a pattern that already exists in the repository and a reviewer would learn nothing from reading it. `reference` names the existing code it mirrors as a path, optionally with :start-end line numbers; it must be a real file. `reason` states what makes the unit a repetition. A routine unit may cover at most " +
       `${ROUTINE_MAX_CHANGED_LINES} changed lines and may not contain a line with an unresolved comment. Do not mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine. The walkthrough folds routine units; the reviewer can expand any of them.`,

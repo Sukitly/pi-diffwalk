@@ -54,6 +54,14 @@ export type ReviewRouteValidationIssueCode =
  */
 export const ROUTINE_MAX_CHANGED_LINES = 40;
 
+/**
+ * How many review questions a unit may carry. A unit with nothing worth
+ * asking is allowed to carry none: a manufactured question costs the
+ * reviewer more than the empty space it fills. The cap only keeps a unit's
+ * questions from crowding the diff off the screen.
+ */
+export const REVIEW_FOCUS_LIMIT = 5;
+
 export interface ReviewRouteValidationIssue {
   readonly code: ReviewRouteValidationIssueCode;
   readonly message: string;
@@ -113,15 +121,10 @@ export function validateReviewRoute(
       `Review unit ${unitNumber} changeSummary`,
       issues,
     );
-    if (unit.reviewFocus.length === 0) {
-      issues.push({
-        code: "empty-field",
-        message: `Review unit ${unitNumber} requires at least one review focus question.`,
-      });
-    } else if (unit.reviewFocus.length > 3) {
+    if (unit.reviewFocus.length > REVIEW_FOCUS_LIMIT) {
       issues.push({
         code: "review-focus-limit",
-        message: `Review unit ${unitNumber} has ${unit.reviewFocus.length} review focus questions; at most three are allowed.`,
+        message: `Review unit ${unitNumber} has ${unit.reviewFocus.length} review focus questions; at most ${REVIEW_FOCUS_LIMIT} are allowed.`,
       });
     }
     for (const [focusIndex, focus] of unit.reviewFocus.entries()) {

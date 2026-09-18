@@ -423,9 +423,8 @@ const ReviewUnitCandidateSchema = Type.Object(
     }),
     reviewFocus: Type.Array(ReviewCheckCandidateSchema, {
       description:
-        "One to three distinct questions naming specific ways this change could be wrong, each anchored to the changed line it concerns",
-      minItems: 1,
-      maxItems: 3,
+        "Distinct questions naming specific ways this change could be wrong, each anchored to the changed line it concerns. Give as many as the unit genuinely needs and none when it needs none; never invent one to fill the field",
+      maxItems: 5,
     }),
     spans: Type.Array(ReviewSpanCandidateSchema, {
       description:

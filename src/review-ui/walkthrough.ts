@@ -148,6 +148,7 @@ export function renderExplanationLines(
   addSectionText(lines, "Why this comes next", unit.whyHere, theme, width);
   addSectionText(lines, "Context to keep in mind", unit.context, theme, width);
   addSectionText(lines, "Change", unit.changeSummary, theme, width);
+  if (unit.reviewFocus.length === 0) return lines;
   lines.push("", renderSectionHeading("Review checks", theme));
   for (const check of unit.reviewFocus) {
     const location =
