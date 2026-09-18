@@ -7,11 +7,14 @@ import type {
   ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.ts";
 import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
+import type { PathExclusionSources } from "../../src/git/exclusion.ts";
 import { registerDiffWalk } from "../../src/index.ts";
+import type { PathExclusionFacts } from "../../src/review/exclusion.ts";
 import {
   markReviewUnitReviewed,
   upsertInProgressReviewComment,
@@ -57,7 +60,19 @@ export interface HarnessBehavior {
   projectRulesResult: DiffWalkRulesLoadResult;
   globalRulesError?: Error;
   projectRulesError?: Error;
+  globalExcludeFile: DiffWalkExcludeFileResult;
+  projectExcludeFile: DiffWalkExcludeFileResult;
+  pathExclusionFacts: PathExclusionFacts;
+  pathExclusionError?: Error;
+  /** Paths that exist for routine references; undefined accepts every path. */
+  existingReferencePaths?: readonly string[];
   snapshot: ReviewSnapshot;
+}
+
+export interface PathExclusionCall {
+  readonly repositoryRoot: string;
+  readonly paths: readonly string[];
+  readonly sources: PathExclusionSources;
 }
 
 export interface SentMessageMeta {
@@ -93,6 +108,7 @@ export interface Harness {
   readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
   readonly ruleLoadCalls: readonly RuleLoadCall[];
+  readonly pathExclusionCalls: readonly PathExclusionCall[];
   readonly behavior: HarnessBehavior;
   /** Replays persisted entries into a fresh harness, as session_start does. */
   readonly restoreSession: (entries: readonly AppendedEntry[]) => Promise<void>;
@@ -112,6 +128,9 @@ export function createHarness(
     submitFollowUpOnThreadOpen: false,
     globalRulesResult: { status: "absent" },
     projectRulesResult: { status: "absent" },
+    globalExcludeFile: { status: "absent" },
+    projectExcludeFile: { status: "absent" },
+    pathExclusionFacts: { excludedPaths: new Map(), generatedPaths: new Set() },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -129,6 +148,7 @@ export function createHarness(
   const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
   const ruleLoadCalls: RuleLoadCall[] = [];
+  const pathExclusionCalls: PathExclusionCall[] = [];
   let sessionStartHandler:
     | ((event: unknown, ctx: unknown) => unknown)
     | undefined;
@@ -214,6 +234,25 @@ export function createHarness(
         throw behavior.projectRulesError;
       }
       return behavior.projectRulesResult;
+    },
+    async locateGlobalDiffWalkExcludeFile() {
+      return behavior.globalExcludeFile;
+    },
+    async locateProjectDiffWalkExcludeFile() {
+      return behavior.projectExcludeFile;
+    },
+    async routineReferenceExists(_repositoryRoot, path) {
+      return (
+        behavior.existingReferencePaths === undefined ||
+        behavior.existingReferencePaths.includes(path)
+      );
+    },
+    async resolvePathExclusionFacts(_git, repositoryRoot, paths, sources) {
+      pathExclusionCalls.push({ repositoryRoot, paths, sources });
+      if (behavior.pathExclusionError !== undefined) {
+        throw behavior.pathExclusionError;
+      }
+      return behavior.pathExclusionFacts;
     },
     async openReviewThreads(_ctx, input) {
       openedThreadBatches.push(input.batch.id);
@@ -333,6 +372,7 @@ export function createHarness(
     openedThreadBatches,
     appendedEntries,
     ruleLoadCalls,
+    pathExclusionCalls,
     behavior,
     restoreSession,
   };

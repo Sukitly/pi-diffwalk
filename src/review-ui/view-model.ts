@@ -4,6 +4,7 @@ import type {
   ReviewCommentTarget,
 } from "../review/comments.ts";
 import { assertReviewDeltaMatchesSnapshot } from "../review/delta.ts";
+import { describeExclusion } from "../review/exclusion.ts";
 import {
   changedLineKey,
   listFileChangedLines,
@@ -112,11 +113,19 @@ export function buildReviewViewModel(
     let planned = 0;
     let skipped = 0;
     let carried = 0;
+    let excluded = 0;
     const skipReasons = new Set<string>();
+    const exclusionReasons = new Set<string>();
     for (const line of changed) {
       const key = changedLineKey(line);
-      if (requirements.get(key)?.type === "carried-forward") {
+      const requirement = requirements.get(key);
+      if (requirement?.type === "carried-forward") {
         carried += 1;
+        continue;
+      }
+      if (requirement?.type === "excluded") {
+        excluded += 1;
+        exclusionReasons.add(describeExclusion(requirement));
         continue;
       }
       const reason = skipReasonByKey.get(key);
@@ -129,13 +138,15 @@ export function buildReviewViewModel(
     }
     inventory.push({
       type: "file",
-      title: `${fileInventoryStatus(planned, skipped, carried)}: ${displayChangePath(change)}`,
+      title: `${fileInventoryStatus(planned, skipped, carried, excluded)}: ${displayChangePath(change)}`,
       detail: fileInventoryDetail(
         changed.length,
         planned,
         skipped,
         carried,
+        excluded,
         skipReasons,
+        exclusionReasons,
       ),
       change,
       regions: buildDisplayRegions(content.lines),
@@ -224,6 +235,19 @@ function buildChangedLineDisplayOwnership(
         );
       }
       ownership.set(key, { type: "carried-forward" });
+    } else if (requirement.type === "excluded") {
+      if (ownership.has(key)) {
+        throw new GuidedReviewUiInvariantError(
+          `Excluded changed line ${key} is also routed or skipped.`,
+        );
+      }
+      ownership.set(key, {
+        type: "excluded",
+        reason: requirement.reason,
+        ...(requirement.pattern === undefined
+          ? {}
+          : { pattern: requirement.pattern }),
+      });
     } else if (!ownership.has(key)) {
       throw new GuidedReviewUiInvariantError(
         `Changed line ${key} has no walkthrough display ownership.`,
@@ -458,6 +482,7 @@ function appendCollapsedGap(
 ): void {
   let total = 0;
   let carriedForward = 0;
+  let excluded = 0;
   let skipped = 0;
   let otherUnit = 0;
   let shownLater = 0;
@@ -480,6 +505,10 @@ function appendCollapsedGap(
         carriedForward += 1;
         renderedIndexes.add(index);
         break;
+      case "excluded":
+        excluded += 1;
+        renderedIndexes.add(index);
+        break;
       case "skipped":
         skipped += 1;
         renderedIndexes.add(index);
@@ -498,7 +527,14 @@ function appendCollapsedGap(
   items.push({
     type: "omission",
     count: total,
-    reason: { type: "gap", carriedForward, skipped, otherUnit, shownLater },
+    reason: {
+      type: "gap",
+      carriedForward,
+      excluded,
+      skipped,
+      otherUnit,
+      shownLater,
+    },
   });
 }
 
@@ -578,6 +614,14 @@ function omissionReasonForOwnership(
   switch (ownership.type) {
     case "carried-forward":
       return { type: "carried-forward" };
+    case "excluded":
+      return {
+        type: "excluded",
+        reason: ownership.reason,
+        ...(ownership.pattern === undefined
+          ? {}
+          : { pattern: ownership.pattern }),
+      };
     case "skipped":
       return { type: "skipped", reason: ownership.reason };
     case "unit":
@@ -594,6 +638,8 @@ function externalLineDetail(ownership: ChangedLineDisplayOwnership): string {
   switch (ownership.type) {
     case "carried-forward":
       return "Reviewed in an earlier round; these changed lines are not selectable here.";
+    case "excluded":
+      return `Excluded by rule: ${describeExclusion(ownership)}; these changed lines are not selectable here.`;
     case "skipped":
       return `Skipped from the walkthrough: ${ownership.reason}`;
     case "unit":
@@ -757,11 +803,13 @@ function fileInventoryStatus(
   planned: number,
   skipped: number,
   carried: number,
+  excluded: number,
 ): string {
   const parts: string[] = [];
   if (planned > 0) parts.push("planned");
   if (skipped > 0) parts.push("skipped");
   if (carried > 0) parts.push("carried-forward");
+  if (excluded > 0) parts.push("excluded");
   return parts.length === 0 ? "unrouted" : parts.join("+");
 }
 
@@ -770,12 +818,17 @@ function fileInventoryDetail(
   planned: number,
   skipped: number,
   carried: number,
+  excluded: number,
   skipReasons: ReadonlySet<string>,
+  exclusionReasons: ReadonlySet<string>,
 ): string {
   const parts = [
-    `${total} changed line${total === 1 ? "" : "s"}: ${planned} planned, ${skipped} skipped, ${carried} carried forward.`,
+    `${total} changed line${total === 1 ? "" : "s"}: ${planned} planned, ${skipped} skipped, ${carried} carried forward${excluded > 0 ? `, ${excluded} excluded` : ""}.`,
   ];
   for (const reason of skipReasons) parts.push(`Skip reason: ${reason}`);
+  for (const reason of exclusionReasons) {
+    parts.push(`Excluded by rule: ${reason}`);
+  }
   return parts.join(" ");
 }
 

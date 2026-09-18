@@ -582,3 +582,45 @@ test("submits through the domain pipeline against the captured repository state"
     /no longer matches review snapshot/,
   );
 });
+
+test("rejects a routine reference that is not a repository file, then accepts a corrected one", async () => {
+  const harness = createHarness({ existingReferencePaths: ["src/pattern.ts"] });
+  await harness.command("", commandContext());
+  const routineRoute = (reference: string) => {
+    const base = validRoute();
+    const unit = base.units[0];
+    assert.ok(unit);
+    return {
+      ...base,
+      units: [
+        { ...unit, routine: { reference, reason: "Mirrors the pattern." } },
+      ],
+    };
+  };
+
+  await assert.rejects(
+    harness.tool.execute(
+      "call-missing",
+      routineRoute("src/missing.ts:3-9"),
+      undefined,
+      undefined,
+      toolContext(),
+    ),
+    /Routine references must name existing code:[\s\S]*Review unit 1 routine\.reference names "src\/missing\.ts"/,
+  );
+  assert.deepEqual(harness.openedSnapshots, []);
+
+  harness.behavior.submitOnOpen = true;
+  const result = await harness.tool.execute(
+    "call-ok",
+    routineRoute("src/pattern.ts:3-9"),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(harness.openedSnapshots.length, 1);
+  assert.equal(
+    (result.details as { status?: string } | undefined)?.status ?? "submitted",
+    "submitted",
+  );
+});

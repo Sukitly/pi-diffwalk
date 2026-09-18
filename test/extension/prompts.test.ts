@@ -200,7 +200,7 @@ test("keeps the kickoff prompt proportional to the number of changed regions", (
   // must not grow with the amount of changed source text. The bound tracks the
   // fixed instruction text plus one small inventory.
   assert.ok(
-    prompt.length < 4400,
+    prompt.length < 5200,
     `Expected a compact prompt, got ${prompt.length} characters.`,
   );
   assert.equal(prompt.includes("added line 200"), false);

@@ -1,3 +1,4 @@
+import type { ExclusionMark } from "./exclusion.ts";
 import {
   type ChangedLine,
   changedLineKey,
@@ -33,6 +34,12 @@ const MAX_ALIGNMENT_CELLS = 1_000_000;
 
 export interface ComputeReviewDeltaOptions {
   readonly resolvedCommentLines?: readonly ChangedLineRef[];
+  /**
+   * Changed-line key to the mechanical exclusion that removes it. Exclusion
+   * yields to an unresolved comment, which a human is still waiting on, and
+   * to a carried-forward line, which a human already read.
+   */
+  readonly exclusions?: ReadonlyMap<string, ExclusionMark>;
 }
 
 export function computeReviewDelta(
@@ -42,17 +49,14 @@ export function computeReviewDelta(
 ): ReviewDelta {
   assertUniqueFileChanges(snapshot);
   const current = listChangedLines(snapshot);
+  const exclusions = options.exclusions ?? new Map<string, ExclusionMark>();
 
   if (baseline === undefined) {
     return {
       currentSnapshotId: snapshot.id,
-      lines: current.map((line) => ({
-        type: "needs-review",
-        fileChangeId: line.fileChangeId,
-        side: line.side,
-        line: line.line,
-        reason: "new",
-      })),
+      lines: current.map((line) =>
+        applyExclusion(needsReview(line, "new"), exclusions),
+      ),
       removedLineCount: 0,
     };
   }
@@ -118,9 +122,27 @@ export function computeReviewDelta(
           `No review requirement was calculated for ${line.side} line ${line.line} of file change ${line.fileChangeId}.`,
         );
       }
-      return requirement;
+      return applyExclusion(requirement, exclusions);
     }),
     removedLineCount,
+  };
+}
+
+function applyExclusion(
+  requirement: ChangedLineRequirement,
+  exclusions: ReadonlyMap<string, ExclusionMark>,
+): ChangedLineRequirement {
+  if (requirement.type !== "needs-review") return requirement;
+  if (requirement.reason === "unresolved-comment") return requirement;
+  const mark = exclusions.get(changedLineKey(requirement));
+  if (mark === undefined) return requirement;
+  return {
+    type: "excluded",
+    fileChangeId: requirement.fileChangeId,
+    side: requirement.side,
+    line: requirement.line,
+    reason: mark.reason,
+    ...(mark.pattern === undefined ? {} : { pattern: mark.pattern }),
   };
 }
 
@@ -231,6 +253,8 @@ function fromRecord(
         : needsReview(line, "unresolved-comment");
     case "skipped":
       return needsReview(line, "previously-skipped");
+    case "excluded":
+      return needsReview(line, "previously-excluded");
   }
 }
 
@@ -406,6 +430,7 @@ export function isNeedsReviewReasonSkippable(
       return false;
     case "new":
     case "previously-skipped":
+    case "previously-excluded":
       return true;
   }
 }

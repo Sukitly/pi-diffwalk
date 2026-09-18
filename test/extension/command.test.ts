@@ -38,6 +38,26 @@ test("separates the discard option from a base revision", () => {
   );
 });
 
+test("combines --no-exclude with an optional base revision", () => {
+  assert.deepEqual(parseDiffWalkCommand("--no-exclude"), {
+    type: "review",
+    noExclude: true,
+  });
+  assert.deepEqual(parseDiffWalkCommand(" --no-exclude  origin/main "), {
+    type: "review",
+    targetRef: "origin/main",
+    noExclude: true,
+  });
+  assert.throws(
+    () => parseDiffWalkCommand("--no-exclude --threads"),
+    /Unknown \/diffwalk option --threads/,
+  );
+  assert.throws(
+    () => parseDiffWalkCommand("--no-excludes"),
+    /Unknown \/diffwalk option --no-excludes/,
+  );
+});
+
 test("rejects a different explicit base once the human worked in the review", async () => {
   const harness = createHarness({ markProgressOnOpen: true });
   await harness.command("", commandContext());

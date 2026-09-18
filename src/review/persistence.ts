@@ -30,6 +30,11 @@ export interface ReviewSeriesEntry {
 const LineNumber = Type.Integer({ minimum: 1 });
 const Count = Type.Integer({ minimum: 0 });
 const Side = Type.Union([Type.Literal("old"), Type.Literal("new")]);
+const ExclusionReasonSchema = Type.Union([
+  Type.Literal("excluded-path"),
+  Type.Literal("generated-attribute"),
+  Type.Literal("whitespace-only"),
+]);
 
 const ComparisonSchema = Type.Object(
   {
@@ -159,6 +164,7 @@ const ChangedLineRequirementSchema = Type.Union([
         Type.Literal("new"),
         Type.Literal("unresolved-comment"),
         Type.Literal("previously-skipped"),
+        Type.Literal("previously-excluded"),
       ]),
       fileChangeId: Type.String(),
       side: Side,
@@ -170,6 +176,17 @@ const ChangedLineRequirementSchema = Type.Union([
     {
       type: Type.Literal("carried-forward"),
       reviewedInRoundId: Type.String(),
+      fileChangeId: Type.String(),
+      side: Side,
+      line: LineNumber,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      type: Type.Literal("excluded"),
+      reason: ExclusionReasonSchema,
+      pattern: Type.Optional(Type.String()),
       fileChangeId: Type.String(),
       side: Side,
       line: LineNumber,
@@ -220,6 +237,17 @@ const ChangedLineRecordSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
+  Type.Object(
+    {
+      side: Side,
+      line: LineNumber,
+      text: Type.String(),
+      disposition: Type.Literal("excluded"),
+      excludedInRoundId: Type.String(),
+      exclusionReason: ExclusionReasonSchema,
+    },
+    { additionalProperties: false },
+  ),
 ]);
 
 const FileCoverageSchema = Type.Object(
@@ -239,6 +267,22 @@ const ReviewCoverageSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const ReviewRoundUnitSchema = Type.Object(
+  {
+    id: Type.String(),
+    title: Type.String(),
+    routine: Type.Boolean(),
+    outcome: Type.Union([
+      Type.Literal("reviewed"),
+      Type.Literal("glanced"),
+      Type.Literal("expanded"),
+    ]),
+    routineCandidate: Type.Boolean(),
+    commented: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
 const ReviewRoundSchema = Type.Object(
   {
     id: Type.String(),
@@ -247,6 +291,8 @@ const ReviewRoundSchema = Type.Object(
     snapshot: SnapshotSchema,
     delta: ReviewDeltaSchema,
     coverage: ReviewCoverageSchema,
+    /** Absent in rounds persisted before unit outcomes were recorded. */
+    units: Type.Optional(Type.Array(ReviewRoundUnitSchema)),
   },
   { additionalProperties: false },
 );
@@ -283,6 +329,14 @@ export function parseReviewSeriesEntry(
     return undefined;
   }
   // The schema mirrors the JSON shape exactly; the branded identifier types
-  // exist only at compile time, so the checked value is a valid ReviewSeries.
-  return (data as unknown as ReviewSeriesEntry).series;
+  // exist only at compile time, so the checked value is a valid ReviewSeries
+  // once rounds persisted without unit outcomes receive an empty list.
+  const series = (data as unknown as ReviewSeriesEntry).series;
+  return {
+    ...series,
+    rounds: series.rounds.map((round) => ({
+      ...round,
+      units: round.units ?? [],
+    })),
+  };
 }

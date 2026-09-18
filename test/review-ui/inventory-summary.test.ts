@@ -7,6 +7,7 @@ import type { ReviewRouteCandidate } from "../../src/review/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 import {
   createHarness,
+  makeExcludedFixture,
   press,
   renderText,
   type UiFixture,
@@ -154,4 +155,19 @@ test("uses the current summary viewport after a terminal resize", () => {
   press(harness.component, "\u001b[6~");
 
   assert.match(renderText(harness), /No comments were added/);
+});
+
+test("lists excluded lines and their rules in the inventory", () => {
+  const harness = createHarness(120, 40, makeExcludedFixture());
+
+  press(harness.component, "i");
+  const output = renderText(harness);
+  assert.match(output, /planned\+excluded:.*excluded-inside\.ts/);
+  assert.match(output, /2 planned, 0 skipped, 0 carried forward, 2 excluded/);
+  assert.match(output, /Excluded by rule: whitespace-only change/);
+  assert.match(output, /excluded:.*package-lock\.json/);
+  assert.match(
+    output,
+    /Excluded by rule: matches exclude pattern\s+"\*-lock\.json"/,
+  );
 });

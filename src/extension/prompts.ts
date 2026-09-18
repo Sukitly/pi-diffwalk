@@ -3,6 +3,7 @@ import {
   isNeedsReviewReasonSkippable,
 } from "../review/delta.ts";
 import { detectExactMoves, type MoveSideRange } from "../review/moves.ts";
+import { ROUTINE_MAX_CHANGED_LINES } from "../review/route-validation.ts";
 import {
   type ChangedLine,
   changedLineKey,
@@ -11,6 +12,7 @@ import {
 } from "../review/span.ts";
 import type {
   ChangedLineRequirement,
+  ExclusionReason,
   FileChangeId,
   FileChangeSource,
   FileChangeStatus,
@@ -58,6 +60,7 @@ export interface ReviewPromptInventory {
     readonly changedLineCount: number;
     readonly needsReviewLineCount: number;
     readonly carriedForwardLineCount: number;
+    readonly excludedLineCount: number;
     readonly unreviewableChangeCount: number;
   };
   readonly notices: readonly ReviewPromptNotice[];
@@ -95,7 +98,14 @@ export interface ReviewPromptFile {
   readonly needsReview?: ReviewPromptSideRanges;
   readonly carriedForward?: ReviewPromptSideRanges;
   readonly unresolvedComment?: ReviewPromptSideRanges;
+  /** Lines a mechanical rule removed from this review, grouped by rule. */
+  readonly excluded?: readonly ReviewPromptExclusion[];
   readonly suggestedSpans?: readonly ReviewSpan[];
+}
+
+export interface ReviewPromptExclusion extends ReviewPromptSideRanges {
+  readonly reason: ExclusionReason;
+  readonly pattern?: string;
 }
 
 export interface ReviewPromptSideRanges {
@@ -151,6 +161,7 @@ export function buildReviewPromptInventory(
       requirements,
       (requirement) => requirement.type === "carried-forward",
     );
+    const excluded = selectExclusions(changed, requirements);
 
     return {
       ...base,
@@ -160,6 +171,7 @@ export function buildReviewPromptInventory(
       ...(isEmpty(needsReview) ? {} : { needsReview }),
       ...(isEmpty(unresolved) ? {} : { unresolvedComment: unresolved }),
       ...(isEmpty(carried) ? {} : { carriedForward: carried }),
+      ...(excluded.length === 0 ? {} : { excluded }),
       ...(change.content.suggestedSpans.length === 0
         ? {}
         : { suggestedSpans: change.content.suggestedSpans }),
@@ -181,6 +193,9 @@ export function buildReviewPromptInventory(
       ).length,
       carriedForwardLineCount: delta.lines.filter(
         (requirement) => requirement.type === "carried-forward",
+      ).length,
+      excludedLineCount: delta.lines.filter(
+        (requirement) => requirement.type === "excluded",
       ).length,
       unreviewableChangeCount: snapshot.changes.filter(
         (change) => change.content.type !== "text",
@@ -242,6 +257,7 @@ export function buildReviewKickoffPrompt(
     "- Cover every line listed under `needsReview` and `unresolvedComment` exactly once, either inside a review unit or in `skippedSpans` with a specific visible reason.",
     "- Lines listed under `unresolvedComment` carry an unanswered comment from an earlier round and cannot be skipped.",
     "- Do not cover lines listed under `carriedForward`. They were reviewed in an earlier round and stay available outside the planned route.",
+    "- Do not cover lines listed under `excluded`. A mechanical rule removed them from this review; each entry names the rule.",
     "- `suggestedSpans` mirrors Git hunk boundaries. Use it only as a starting point; redraw it whenever a semantic region disagrees with it.",
     ...(inventory.moves.length === 0
       ? []
@@ -255,6 +271,8 @@ export function buildReviewKickoffPrompt(
     "- `changeSummary`: one or two direct behavior sentences; no patch text.",
     "- `reviewFocus`: one to three distinct failure questions; do not restate the summary. Set `anchor` (path, side, line inside this unit's spans) to the changed line each question is about; the walkthrough shows the question beneath that line. Omit `anchor` only for a question about the whole unit.",
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
+    "- `routine`: set it only when the unit repeats a pattern that already exists in the repository and a reviewer would learn nothing from reading it. `reference` names the existing code it mirrors as a path, optionally with :start-end line numbers; it must be a real file. `reason` states what makes the unit a repetition. A routine unit may cover at most " +
+      `${ROUTINE_MAX_CHANGED_LINES} changed lines and may not contain a line with an unresolved comment. Do not mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine. The walkthrough folds routine units; the reviewer can expand any of them.`,
     ...(rules === undefined
       ? []
       : [
@@ -301,6 +319,40 @@ function selectRanges(
     ...(old.length === 0 ? {} : { old }),
     ...(next.length === 0 ? {} : { new: next }),
   };
+}
+
+/** One entry per distinct rule, so the agent sees why each region is gone. */
+function selectExclusions(
+  changed: readonly ChangedLine[],
+  requirements: ReadonlyMap<string, ChangedLineRequirement>,
+): readonly ReviewPromptExclusion[] {
+  const groups = new Map<
+    string,
+    { reason: ExclusionReason; pattern?: string }
+  >();
+  for (const line of changed) {
+    const requirement = requirements.get(changedLineKey(line));
+    if (requirement?.type !== "excluded") continue;
+    const key = `${requirement.reason}\u0000${requirement.pattern ?? ""}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        reason: requirement.reason,
+        ...(requirement.pattern === undefined
+          ? {}
+          : { pattern: requirement.pattern }),
+      });
+    }
+  }
+  return [...groups.entries()].map(([key, group]) => ({
+    ...group,
+    ...selectRanges(
+      changed,
+      requirements,
+      (requirement) =>
+        requirement.type === "excluded" &&
+        `${requirement.reason}\u0000${requirement.pattern ?? ""}` === key,
+    ),
+  }));
 }
 
 function isEmpty(ranges: ReviewPromptSideRanges): boolean {

@@ -27,6 +27,15 @@ const HELP_SECTIONS: readonly HelpSection[] = [
       { keys: "c", action: "Add or edit a comment on the selected line." },
       { keys: "d", action: "Delete the comment on the selected line." },
       { keys: "n", action: "Mark the current unit reviewed and continue." },
+      {
+        keys: "o",
+        action:
+          "Expand or fold a routine unit. A fold accepted with n counts as glanced.",
+      },
+      {
+        keys: "r",
+        action: "Mark a walked unit as one that could have been routine.",
+      },
       { keys: "e", action: "Open the complete unit details." },
       { keys: "i", action: "Open the frozen snapshot inventory." },
       { keys: "s", action: "Open the submission summary." },

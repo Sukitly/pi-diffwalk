@@ -4,12 +4,20 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { ReviewSnapshotDriftError } from "../git/errors.ts";
+import { resolvePathExclusionFacts } from "../git/exclusion.ts";
 import {
   assertReviewSnapshotUnchanged,
   captureRepositoryState,
   captureReviewSnapshot,
 } from "../git/snapshot.ts";
 import { computeReviewDelta } from "../review/delta.ts";
+import {
+  computeExclusions,
+  EMPTY_PATH_EXCLUSION_FACTS,
+  type ExclusionMark,
+  exclusionPath,
+  type PathExclusionFacts,
+} from "../review/exclusion.ts";
 import {
   attachReviewRoute,
   createInProgressReview,
@@ -58,6 +66,11 @@ import type {
 import { openGuidedReview } from "../review-ui/index.ts";
 import { openReviewThreads } from "../thread-ui/index.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
+import {
+  decideExclusionSources,
+  locateGlobalDiffWalkExcludeFile,
+  locateProjectDiffWalkExcludeFile,
+} from "./exclusions.ts";
 import { createPiGitRunner } from "./git-runner.ts";
 import {
   formatGuidedReviewResult,
@@ -65,6 +78,7 @@ import {
   shouldSendReviewToAgent,
 } from "./model-payloads.ts";
 import { buildReviewKickoffPrompt } from "./prompts.ts";
+import { assertRoutineReferences, routineReferenceExists } from "./routine.ts";
 import {
   DIFFWALK_RULES_SOURCE,
   type DiffWalkRulesLoadResult,
@@ -85,6 +99,12 @@ import {
 export const DEFAULT_REVIEW_TARGET = "HEAD";
 export const DISCARD_OPTION = "--discard";
 export const THREADS_OPTION = "--threads";
+export const NO_EXCLUDE_OPTION = "--no-exclude";
+
+export interface ReviewCommandOptions {
+  /** Skip every mechanical exclusion rule and route all changed lines. */
+  readonly noExclude?: boolean;
+}
 
 export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
@@ -92,6 +112,10 @@ export interface DiffWalkDependencies {
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
   readonly loadGlobalDiffWalkRules: typeof loadGlobalDiffWalkRules;
   readonly loadProjectDiffWalkRules: typeof loadProjectDiffWalkRules;
+  readonly locateGlobalDiffWalkExcludeFile: typeof locateGlobalDiffWalkExcludeFile;
+  readonly locateProjectDiffWalkExcludeFile: typeof locateProjectDiffWalkExcludeFile;
+  readonly resolvePathExclusionFacts: typeof resolvePathExclusionFacts;
+  readonly routineReferenceExists: typeof routineReferenceExists;
   readonly openGuidedReview: typeof openGuidedReview;
   readonly openReviewThreads: typeof openReviewThreads;
 }
@@ -102,6 +126,10 @@ export const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   assertReviewSnapshotUnchanged,
   loadGlobalDiffWalkRules,
   loadProjectDiffWalkRules,
+  locateGlobalDiffWalkExcludeFile,
+  locateProjectDiffWalkExcludeFile,
+  resolvePathExclusionFacts,
+  routineReferenceExists,
   openGuidedReview,
   openReviewThreads,
 };
@@ -296,12 +324,17 @@ export class DiffWalkSession {
   private async startReview(
     ctx: CommandContext,
     targetRef: string,
+    options: ReviewCommandOptions,
   ): Promise<void> {
     const snapshot = await this.dependencies.captureReviewSnapshot(
       createPiGitRunner(this.pi),
       ctx.cwd,
       targetRef,
     );
+    const exclusions =
+      options.noExclude === true
+        ? new Map<string, ExclusionMark>()
+        : await this.captureExclusions(ctx, snapshot);
     const sourceBranch =
       snapshot.comparison.sourceBranch ??
       `detached:${snapshot.comparison.sourceHeadOid}`;
@@ -335,6 +368,7 @@ export class DiffWalkSession {
         baselineThreads === undefined
           ? []
           : resolvedCommentLines(baselineThreads),
+      exclusions,
     });
     if (
       !delta.lines.some((requirement) => requirement.type === "needs-review")
@@ -394,17 +428,83 @@ export class DiffWalkSession {
   async reviewCommand(
     ctx: CommandContext & ReviewUiContext,
     requestedTarget: string | undefined,
+    options: ReviewCommandOptions = {},
   ): Promise<void> {
     const existing = this.pendingReview;
     if (existing?.review.lifecycle === "ready") {
-      await this.resumeReadyReview(ctx, existing, requestedTarget);
+      await this.resumeReadyReview(ctx, existing, requestedTarget, options);
       return;
     }
     if (existing?.review.lifecycle === "preparing-route") {
-      await this.resumeRoutePreparation(ctx, existing, requestedTarget);
+      await this.resumeRoutePreparation(
+        ctx,
+        existing,
+        requestedTarget,
+        options,
+      );
       return;
     }
-    await this.startReview(ctx, requestedTarget ?? DEFAULT_REVIEW_TARGET);
+    await this.startReview(
+      ctx,
+      requestedTarget ?? DEFAULT_REVIEW_TARGET,
+      options,
+    );
+  }
+
+  /**
+   * Mechanical exclusion never blocks a review. A source that cannot be
+   * evaluated is reported and dropped, and a Git failure while matching
+   * paths falls back to routing every changed line. As with project review
+   * rules, a project exclude file is read after the snapshot was frozen, so
+   * drift is checked once it has been used.
+   */
+  private async captureExclusions(
+    ctx: CommandContext,
+    snapshot: ReviewSnapshot,
+  ): Promise<ReadonlyMap<string, ExclusionMark>> {
+    const decision = await decideExclusionSources(
+      snapshot,
+      ctx.isProjectTrusted(),
+      {
+        locateGlobalExcludeFile: () =>
+          this.dependencies.locateGlobalDiffWalkExcludeFile(),
+        locateProjectExcludeFile: (repositoryRoot) =>
+          this.dependencies.locateProjectDiffWalkExcludeFile(repositoryRoot),
+      },
+    );
+    for (const warning of decision.warnings) {
+      ctx.ui.notify(warning, "warning");
+    }
+    const paths: string[] = [];
+    for (const change of snapshot.changes) {
+      if (change.content.type !== "text") continue;
+      const path = exclusionPath(change);
+      if (path !== undefined) paths.push(path);
+    }
+    const needsGit =
+      paths.length > 0 &&
+      (decision.sources.excludeFile !== undefined ||
+        decision.sources.generatedAttribute);
+    let facts: PathExclusionFacts = EMPTY_PATH_EXCLUSION_FACTS;
+    if (needsGit) {
+      try {
+        facts = await this.dependencies.resolvePathExclusionFacts(
+          createPiGitRunner(this.pi),
+          snapshot.repositoryRoot,
+          paths,
+          decision.sources,
+        );
+      } catch (error: unknown) {
+        ctx.ui.notify(
+          `Cannot evaluate path exclusions: ${errorMessage(error)} Routing every changed line.`,
+          "warning",
+        );
+      }
+      if (decision.excludeScope === "project") {
+        await this.verifySnapshot(snapshot);
+      }
+    }
+    return computeExclusions(snapshot, facts);
   }
 
   /**
@@ -443,6 +543,11 @@ export class DiffWalkSession {
       pending.review.snapshot,
       pending.review.delta,
       routeCandidate,
+    );
+    await assertRoutineReferences(
+      route,
+      pending.review.snapshot.repositoryRoot,
+      this.dependencies.routineReferenceExists,
     );
     if (!pending.advisoryNudged) {
       const advisories = assessRouteQuality(
@@ -501,6 +606,7 @@ export class DiffWalkSession {
     ctx: CommandContext & ReviewUiContext,
     existing: PendingReview,
     requestedTarget: string | undefined,
+    options: ReviewCommandOptions,
   ): Promise<void> {
     if (existing.inProgress) {
       throw new Error(`Review ${existing.review.id} is already open.`);
@@ -518,7 +624,7 @@ export class DiffWalkSession {
         `Replacing the untouched review against ${pendingTarget} with a review against ${requestedTarget}.`,
         "info",
       );
-      await this.startReview(ctx, requestedTarget);
+      await this.startReview(ctx, requestedTarget, options);
       return;
     }
     try {
@@ -531,7 +637,7 @@ export class DiffWalkSession {
           `Discarded the stale review and ${describeDrafts(existing.review)}. Starting a new review against ${requestedTarget ?? pendingTarget}.`,
         "warning",
       );
-      await this.startReview(ctx, requestedTarget ?? pendingTarget);
+      await this.startReview(ctx, requestedTarget ?? pendingTarget, options);
       return;
     }
     const result = await this.runPendingReview(ctx, existing);
@@ -555,6 +661,7 @@ export class DiffWalkSession {
     ctx: CommandContext,
     existing: PendingReview,
     requestedTarget: string | undefined,
+    options: ReviewCommandOptions,
   ): Promise<void> {
     const pendingTarget = existing.series.targetRef;
     let drifted = false;
@@ -575,7 +682,7 @@ export class DiffWalkSession {
           : `Replacing the pending review against ${pendingTarget} with a review against ${requestedTarget}.`,
         "info",
       );
-      await this.startReview(ctx, requestedTarget ?? pendingTarget);
+      await this.startReview(ctx, requestedTarget ?? pendingTarget, options);
       return;
     }
     this.sendKickoffPrompt(existing);
@@ -761,6 +868,14 @@ function describeNothingToReview(
       `${carriedForward} changed line${carriedForward === 1 ? "" : "s"} already reviewed in round ${series.rounds.length}.`,
     );
   }
+  const excluded = delta.lines.filter(
+    (requirement) => requirement.type === "excluded",
+  ).length;
+  if (excluded > 0) {
+    parts.push(
+      `${excluded} changed line${excluded === 1 ? "" : "s"} excluded by mechanical rules; run /diffwalk ${NO_EXCLUDE_OPTION} to review them.`,
+    );
+  }
   let unreviewableCount = 0;
   for (const change of snapshot.changes) {
     const content = change.content;
@@ -774,7 +889,7 @@ function describeNothingToReview(
   for (const notice of snapshot.notices) {
     parts.push(notice.message);
   }
-  if (carriedForward === 0 && unreviewableCount === 0) {
+  if (carriedForward === 0 && excluded === 0 && unreviewableCount === 0) {
     parts.push("The worktree matches the comparison.");
   }
   return parts.join(" ");

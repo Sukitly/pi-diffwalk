@@ -9,11 +9,13 @@ import {
   getNextReviewRoundIdentity,
   ReviewSeriesError,
 } from "../../src/review/series.ts";
+import { changedLineKey } from "../../src/review/span.ts";
 import type {
   ChangedLineRecord,
   ReviewCoverage,
   ReviewDelta,
   ReviewRound,
+  ReviewRoundUnit,
   ReviewSeries,
   ReviewSnapshot,
 } from "../../src/review/types.ts";
@@ -384,4 +386,129 @@ test("rejects malformed existing series history", () => {
       ),
     ReviewSeriesError,
   );
+});
+
+test("requires excluded requirements and excluded records to agree", () => {
+  const base = series();
+  const snapshot = snapshotOf("snapshot-1");
+  const change = snapshot.changes[0];
+  assert.ok(change);
+  const key = changedLineKey({ fileChangeId: change.id, side: "new", line: 2 });
+  const excludedDelta = computeReviewDelta(snapshot, undefined, {
+    exclusions: new Map([[key, { reason: "whitespace-only" as const }]]),
+  });
+  const plainDelta = computeReviewDelta(snapshot);
+  const identity = getNextReviewRoundIdentity(base, snapshot);
+
+  const excludedCoverage = computeReviewCoverage(
+    identity.id,
+    snapshot,
+    excludedDelta,
+    { commentedLines: [], skippedSpans: [] },
+  );
+  const round = createReviewRound(
+    base,
+    snapshot,
+    excludedDelta,
+    excludedCoverage,
+  );
+  assert.equal(round.coverage.files[0]?.lines[0]?.disposition, "excluded");
+
+  assert.throws(
+    () => createReviewRound(base, snapshot, plainDelta, excludedCoverage),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewSeriesError);
+      assert.match(error.message, /must correspond to an excluded/);
+      return true;
+    },
+  );
+
+  const plainCoverage = computeReviewCoverage(
+    identity.id,
+    snapshot,
+    plainDelta,
+    { commentedLines: [], skippedSpans: [] },
+  );
+  assert.throws(
+    () => createReviewRound(base, snapshot, excludedDelta, plainCoverage),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewSeriesError);
+      assert.match(error.message, /must be recorded as excluded/);
+      return true;
+    },
+  );
+
+  assert.throws(
+    () =>
+      createReviewRound(
+        base,
+        snapshot,
+        excludedDelta,
+        withRecords(excludedCoverage, (record) => ({
+          side: record.side,
+          line: record.line,
+          text: record.text,
+          disposition: "excluded",
+          excludedInRoundId: roundId("round-other"),
+          exclusionReason: "whitespace-only",
+        })),
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewSeriesError);
+      assert.match(error.message, /must reference current round/);
+      return true;
+    },
+  );
+});
+
+test("validates round unit outcomes against their routine flag", () => {
+  const base = series();
+  const snapshot = snapshotOf("snapshot-1");
+  const delta = computeReviewDelta(snapshot);
+  const identity = getNextReviewRoundIdentity(base, snapshot);
+  const coverage = computeReviewCoverage(identity.id, snapshot, delta, {
+    commentedLines: [],
+    skippedSpans: [],
+  });
+  const unit = (overrides: Partial<ReviewRoundUnit>): ReviewRoundUnit => ({
+    id: "review-unit:1" as ReviewRoundUnit["id"],
+    title: "Unit",
+    routine: false,
+    outcome: "reviewed",
+    routineCandidate: false,
+    commented: false,
+    ...overrides,
+  });
+
+  const round = createReviewRound(base, snapshot, delta, coverage, [
+    unit({}),
+    unit({
+      id: "review-unit:2" as ReviewRoundUnit["id"],
+      routine: true,
+      outcome: "glanced",
+    }),
+  ]);
+  assert.equal(round.units.length, 2);
+  assert.equal(appendReviewRound(base, round).rounds[0]?.units.length, 2);
+
+  const cases: readonly [Partial<ReviewRoundUnit>[], RegExp][] = [
+    [[{}, {}], /more than once/],
+    [[{ title: " " }], /requires a title/],
+    [[{ outcome: "glanced" }], /not routine but has outcome/],
+    [[{ routine: true }], /must be glanced or expanded/],
+    [
+      [{ routine: true, outcome: "expanded", routineCandidate: true }],
+      /cannot also be a routine candidate/,
+    ],
+  ];
+  for (const [units, pattern] of cases) {
+    assert.throws(
+      () => createReviewRound(base, snapshot, delta, coverage, units.map(unit)),
+      (error: unknown) => {
+        assert.ok(error instanceof ReviewSeriesError);
+        assert.match(error.message, pattern);
+        return true;
+      },
+    );
+  }
 });

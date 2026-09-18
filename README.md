@@ -72,9 +72,9 @@ The npm examples require a published `latest` dist-tag. Preparing the release sc
    /diffwalk
    ```
 
-   The default compares staged, unstaged, and untracked changes against `HEAD`. Use `/diffwalk main` to include your branch changes relative to local `main`, or `/diffwalk origin/main` after fetching that remote ref yourself. The base is a direct comparison, not an automatic merge-base calculation.
+   The default compares staged, unstaged, and untracked changes against `HEAD`. Use `/diffwalk main` to include your branch changes relative to local `main`, or `/diffwalk origin/main` after fetching that remote ref yourself. The base is a direct comparison, not an automatic merge-base calculation. Changed lines that match a mechanical exclusion rule are left out of the route; `/diffwalk --no-exclude` routes them too. See [Mechanical Exclusion](#mechanical-exclusion).
 
-3. Read the agent-planned walkthrough. Use `j`/`k` to select a line, `c` to comment, and `n` to mark a unit reviewed and continue. Press `?` for controls.
+3. Read the agent-planned walkthrough. Use `j`/`k` to select a line, `c` to comment, and `n` to mark a unit reviewed and continue. A unit the agent claims is routine appears folded with its claim; press `o` to expand it or `n` to accept the fold. Press `?` for controls.
 4. On the submission page, choose **Discuss first** or **Apply change requests**. Review the agent's replies and resolve answered threads when satisfied.
 
 Use `/diffwalk --threads` to reopen comment conversations. Run `/diffwalk` again after changes to review the remaining work. An empty comparison starts no walkthrough.
@@ -85,6 +85,7 @@ Use `/diffwalk --threads` to reopen comment conversations. Run `/diffwalk` again
 |---|---|
 | `/diffwalk` | Review the current worktree against `HEAD`, including untracked files |
 | `/diffwalk <base>` | Review the current worktree against a Git revision |
+| `/diffwalk --no-exclude [base]` | Review with every mechanical exclusion rule disabled |
 | `/diffwalk --threads` | Reopen the most recently viewed comment threads |
 | `/diffwalk --discard` | Drop a pending review without opening it |
 
@@ -93,12 +94,13 @@ A Git revision cannot start with `-`, so an option never shadows a base. When th
 ## How a Review Works
 
 1. DiffWalk freezes a snapshot of the current Git changes. Every changed line receives a stable address: a file, a side, and a line number.
-2. The agent reads the change with its own tools and plans a review route: semantic units ordered by behavior, contracts, and data flow instead of file order. A unit may span several files, so an implementation and the test that proves it are read together.
-3. DiffWalk validates the route. Every changed line must be covered by exactly one review unit or explicitly skipped with a visible reason.
-4. The TUI walks you through the route one unit at a time. A one or two sentence change summary sits under the header. The agent's review questions sit beneath the diff lines they are about, sharing one background block with the line; a question about the unit as a whole appears above the diff. The reasons the unit comes next and the contract to keep in mind stay on the details page. You attach comments to exact diff lines.
-5. Submission returns all comments to the agent as one batch, in one of two modes: **Discuss first** (the agent investigates without editing code) or **Apply change requests**.
-6. The agent answers every comment with a structured response. A follow-up view shows each conversation under its diff anchor. You can reply to continue a thread and resolve it when satisfied. Only the reviewer can resolve a thread.
-7. Running `/diffwalk` again against the same base carries forward already-reviewed lines and resolved comments, and routes only what still needs review. Completed rounds and comment threads persist in the pi session across restarts.
+2. Mechanical exclusion rules remove changed lines that need no judgment, such as lockfiles or whitespace-only edits. The inventory lists every excluded line with the rule that removed it.
+3. The agent reads the change with its own tools and plans a review route: semantic units ordered by behavior, contracts, and data flow instead of file order. A unit may span several files, so an implementation and the test that proves it are read together. A small unit that repeats an existing pattern may be marked routine, naming the code it mirrors.
+4. DiffWalk validates the route. Every changed line that needs review must be covered by exactly one review unit or explicitly skipped with a visible reason. Excluded lines must stay outside the route.
+5. The TUI walks you through the route one unit at a time. A one or two sentence change summary sits under the header. The agent's review questions sit beneath the diff lines they are about, sharing one background block with the line; a question about the unit as a whole appears above the diff. The reasons the unit comes next and the contract to keep in mind stay on the details page. You attach comments to exact diff lines.
+6. Submission returns all comments to the agent as one batch, in one of two modes: **Discuss first** (the agent investigates without editing code) or **Apply change requests**.
+7. The agent answers every comment with a structured response. A follow-up view shows each conversation under its diff anchor. You can reply to continue a thread and resolve it when satisfied. Only the reviewer can resolve a thread.
+8. Running `/diffwalk` again against the same base carries forward already-reviewed lines and resolved comments, and routes only what still needs review. Completed rounds and comment threads persist in the pi session across restarts.
 
 ```text
 DiffWalk / Review                                  Unit 3/12
@@ -136,7 +138,9 @@ Walkthrough:
 | `1`-`9` | Start a count prefix that repeats the next movement, for example `5j` |
 | `Ctrl+d`, `Ctrl+u` | Move by half a viewport |
 | `PageUp`, `PageDown`, `Ctrl+f`, `Ctrl+b` | Move by a viewport |
-| `n` | Mark the current review unit as reviewed and continue; the last unit opens the submission page |
+| `n` | Mark the current review unit as reviewed and continue; the last unit opens the submission page. Accepting a folded routine unit records it as glanced |
+| `o` | Expand or fold the current routine unit. Comments require the unit to be expanded |
+| `r` | Mark a walked unit as one that could have been routine, or clear that mark |
 | `p`, `h`, `Left` | Move to the previous review unit |
 | `l`, `Right` | Move to the next review unit |
 | `c` | Add or edit a comment on the selected line |
@@ -172,11 +176,49 @@ The global path follows pi's agent configuration directory and honors `PI_CODING
 
 Rules customize how the agent presents the review. They cannot change the frozen snapshot, the coverage requirements, or the route validation contract.
 
+## Mechanical Exclusion
+
+Some changed lines need no human judgment. DiffWalk removes them from the route before the agent plans it, using rules that are deterministic and explainable. No model is involved.
+
+| Rule | What it matches | Source |
+|---|---|---|
+| Exclude patterns | Files matching a pattern in a DiffWalk exclude file | `~/.pi/agent/diffwalk/exclude` (global) or `<repositoryRoot>/.pi/diffwalk/exclude` (project) |
+| Generated attribute | Files whose `linguist-generated` Git attribute is set | `.gitattributes`, the same convention GitHub uses to collapse generated files |
+| Whitespace-only | Runs of changed lines that differ only in non-leading whitespace or blank lines, the lines `git diff -w` would hide | Always on |
+
+Exclude files use gitignore syntax and are evaluated by Git itself, so negation, directory patterns, and anchoring behave exactly as in `.gitignore`. A usable project file replaces the global file completely. DiffWalk ships no default patterns; a typical global file looks like this:
+
+```gitignore
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+Cargo.lock
+go.sum
+*.snap
+```
+
+Whitespace-only detection keeps leading whitespace significant. A reindented block always reaches the reviewer, because indentation carries meaning in some languages.
+
+Exclusion hides code, so every project-owned source follows the same trust rule as project review rules. The project exclude file and `linguist-generated` attributes are ignored with a warning when the project is not trusted, or when the exclude file or any `.gitattributes` file is itself part of the change under review. The global exclude file is always honored. A path exclusion that Git cannot evaluate is reported, and the review continues with every changed line routed.
+
+Excluded lines are visible in the inventory (`i`) with the rule that removed them, and appear as unselectable gaps inside a unit's span. They cannot be commented on during that review. To review them, run `/diffwalk --no-exclude`. Exclusion is recomputed on every round from the current snapshot; a line whose rule stops matching returns to review as a new line.
+
+## Routine Units
+
+Some units repeat a pattern the reviewer already trusts: a third route registration shaped like the first two, a test fixture mirroring its neighbors. The agent may mark such a unit `routine`, naming the existing code it mirrors as `reference` (a repository path, optionally with `:start-end` line numbers) and stating in `reason` what makes the unit a repetition.
+
+DiffWalk accepts the claim only when the reference names a file that exists in the repository, the unit covers at most 40 changed lines, and no line in it carries an unresolved comment. Routineness is a claim about shape, never about safety; the kickoff prompt tells the agent not to mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine.
+
+In the walkthrough a routine unit is folded. The reviewer sees the change summary, the claim, the reference, and how many lines are folded, but no diff. `o` expands it into the ordinary unit view, where lines can be selected and commented; `o` again folds it. `n` on a folded unit accepts the claim and records the unit as glanced; `n` on an expanded unit records it as reviewed. Lines of a glanced unit count as reviewed and carry forward in later rounds. `r` on a walked unit records the reviewer's opinion that it could have been routine.
+
+Each completed round keeps a per-unit record: whether the agent claimed routine, whether the reviewer glanced, expanded, or walked it, whether the reviewer marked it as a routine candidate, and whether it received comments. DiffWalk does not act on these records yet; they exist so that routine proposals can be tuned against real reviews.
+
 ## Guarantees
 
 - Git output is the source of truth for every displayed change. The model never generates or rewrites the patch.
 - The snapshot is immutable for the duration of a review.
-- Every changed line that needs review is covered by exactly one review unit or explicitly skipped with a visible reason. A line carrying an unresolved comment cannot be skipped.
+- Every changed line is covered by exactly one review unit, explicitly skipped with a visible reason, or excluded by a mechanical rule that the inventory names. A line carrying an unresolved comment cannot be skipped, excluded, or placed in a routine unit.
+- A routine claim never removes code from the route. A folded unit keeps its position, shows its claim and reference, and expands with one key.
 - Worktree drift is detected before comments are submitted. Comments and agent responses keep stable snapshot anchors even if the worktree changes later.
 - Agent responses cannot resolve comments. Resolution is an explicit reviewer action.
 - Binary files, renames, deletions, and other changes that cannot be reviewed line by line are represented or explicitly reported as unsupported.
@@ -194,6 +236,9 @@ A paused review does not lock the repository. If the worktree changes while a re
 - A paused walkthrough lives in extension memory only. It does not survive `/reload` or a pi restart. Completed rounds and comment threads do persist in the session.
 - Detected code moves are reported to the agent for route planning but are not yet marked in the walkthrough screen.
 - There is no GitHub pull request integration; DiffWalk reviews local Git state only.
+- Mechanical exclusion is all or nothing per review. Excluded lines cannot be pulled back into the walkthrough one at a time or commented on; `/diffwalk --no-exclude` is the only override.
+- A routine reference is checked for an existing file only. Line numbers in the reference are shown to the reviewer and not verified, and the referenced code is not compared with the unit.
+- Per-unit round outcomes are recorded and persisted but not yet surfaced or used.
 
 ## Development
 

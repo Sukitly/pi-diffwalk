@@ -34,6 +34,7 @@ export interface KickoffMessageDetails {
   readonly changedFileCount: number;
   readonly needsReviewLineCount: number;
   readonly carriedForwardLineCount: number;
+  readonly excludedLineCount?: number;
   readonly additionalChanges?: readonly KickoffAdditionalChangeDetails[];
 }
 
@@ -60,6 +61,9 @@ export function buildKickoffMessageDetails(
     ).length,
     carriedForwardLineCount: delta.lines.filter(
       (requirement) => requirement.type === "carried-forward",
+    ).length,
+    excludedLineCount: delta.lines.filter(
+      (requirement) => requirement.type === "excluded",
     ).length,
     additionalChanges: snapshot.changes
       .filter((change) => change.content.type !== "text")
@@ -95,6 +99,11 @@ export const renderKickoffMessage: MessageRenderer<KickoffMessageDetails> = (
     if (details.carriedForwardLineCount > 0) {
       lines.push(
         `Previously reviewed: ${countNoun(details.carriedForwardLineCount, "line")}`,
+      );
+    }
+    if ((details.excludedLineCount ?? 0) > 0) {
+      lines.push(
+        `Excluded by rule: ${countNoun(details.excludedLineCount ?? 0, "line")}`,
       );
     }
     const additionalChanges = details.additionalChanges ?? [];

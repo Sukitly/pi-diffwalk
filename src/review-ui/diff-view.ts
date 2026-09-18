@@ -1,5 +1,6 @@
 import { diffWords } from "diff";
 import type { ReviewCommentTarget } from "../review/comments.ts";
+import { describeExclusion } from "../review/exclusion.ts";
 import type {
   DiffLine,
   FileChange,
@@ -284,12 +285,13 @@ export function omissionDetail(omission: PlannedDiffOmission): string {
     case "distant":
       return `${lines} not shown`;
     case "gap": {
-      const { carriedForward, skipped, otherUnit, shownLater } =
+      const { carriedForward, excluded, skipped, otherUnit, shownLater } =
         omission.reason;
       const parts = [
         carriedForward > 0
           ? `${carriedForward} reviewed in an earlier round`
           : undefined,
+        excluded > 0 ? `${excluded} excluded by rule` : undefined,
         skipped > 0 ? `${skipped} skipped` : undefined,
         otherUnit > 0 ? `${otherUnit} routed to other units` : undefined,
         shownLater > 0 ? `${shownLater} shown later in this unit` : undefined,
@@ -302,6 +304,8 @@ export function omissionDetail(omission: PlannedDiffOmission): string {
       return "routed region continues elsewhere in this file";
     case "carried-forward":
       return `${lines} not shown; reviewed in an earlier round`;
+    case "excluded":
+      return `${lines} not shown; excluded by rule: ${describeExclusion(omission.reason)}`;
     case "skipped":
       return `${lines} not shown; skipped: ${omission.reason.reason}`;
     case "other-unit":

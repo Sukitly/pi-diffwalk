@@ -171,6 +171,23 @@ export interface ReviewRound {
   readonly snapshot: ReviewSnapshot;
   readonly delta: ReviewDelta;
   readonly coverage: ReviewCoverage;
+  /** How the reviewer handled each unit, kept for tuning routine proposals. */
+  readonly units: readonly ReviewRoundUnit[];
+}
+
+/**
+ * `glanced`: a routine unit accepted without expanding it. `expanded`: a
+ * routine unit the reviewer opened before completing. `reviewed`: a walked
+ * unit. `routineCandidate` is the reviewer saying a walked unit could have
+ * been routine.
+ */
+export interface ReviewRoundUnit {
+  readonly id: ReviewUnitId;
+  readonly title: string;
+  readonly routine: boolean;
+  readonly outcome: "reviewed" | "glanced" | "expanded";
+  readonly routineCandidate: boolean;
+  readonly commented: boolean;
 }
 
 export type InProgressReviewLifecycle =
@@ -196,7 +213,11 @@ export interface InProgressReview {
 
 export interface ReviewUnitProgress {
   readonly reviewUnitId: ReviewUnitId;
-  readonly disposition: "pending" | "reviewed";
+  readonly disposition: "pending" | "reviewed" | "glanced";
+  /** The reviewer expanded this routine unit at least once. */
+  readonly expanded?: true;
+  /** The reviewer marked this walked unit as one that could have been routine. */
+  readonly routineCandidate?: true;
 }
 
 export interface ReviewDelta {
@@ -207,12 +228,16 @@ export interface ReviewDelta {
   readonly removedLineCount: number;
 }
 
-export type ChangedLineRequirement = NeedsReviewLine | CarriedForwardLine;
+export type ChangedLineRequirement =
+  | NeedsReviewLine
+  | CarriedForwardLine
+  | ExcludedLine;
 
 export type NeedsReviewReason =
   | "new"
   | "unresolved-comment"
-  | "previously-skipped";
+  | "previously-skipped"
+  | "previously-excluded";
 
 export interface NeedsReviewLine extends ChangedLineRef {
   readonly type: "needs-review";
@@ -224,10 +249,28 @@ export interface CarriedForwardLine extends ChangedLineRef {
   readonly reviewedInRoundId: ReviewRoundId;
 }
 
+/**
+ * Why a mechanical rule removed a changed line from the review. Exclusion is
+ * recomputed for every round from the current snapshot and never carried
+ * forward, so a rule that stops matching returns the line to review.
+ */
+export type ExclusionReason =
+  | "excluded-path"
+  | "generated-attribute"
+  | "whitespace-only";
+
+export interface ExcludedLine extends ChangedLineRef {
+  readonly type: "excluded";
+  readonly reason: ExclusionReason;
+  /** The matching pattern for `excluded-path`; absent for the other reasons. */
+  readonly pattern?: string;
+}
+
 export type ChangedLineDisposition =
   | "reviewed-without-comment"
   | "commented"
-  | "skipped";
+  | "skipped"
+  | "excluded";
 
 interface ChangedLineRecordBase {
   readonly side: ChangeSide;
@@ -248,6 +291,11 @@ export type ChangedLineRecord =
       readonly disposition: "skipped";
       readonly skippedInRoundId: ReviewRoundId;
       readonly skipReason: string;
+    })
+  | (ChangedLineRecordBase & {
+      readonly disposition: "excluded";
+      readonly excludedInRoundId: ReviewRoundId;
+      readonly exclusionReason: ExclusionReason;
     });
 
 /**
@@ -338,6 +386,24 @@ const ReviewCheckCandidateSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const ReviewUnitRoutineCandidateSchema = Type.Object(
+  {
+    reference: Type.String({
+      description:
+        "Existing code this unit mirrors, as a repository path optionally followed by :start-end line numbers",
+    }),
+    reason: Type.String({
+      description:
+        "One sentence stating what makes the unit a repetition of the reference",
+    }),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "Present only when the unit repeats an existing pattern and needs no judgment. The walkthrough folds it; the reviewer can expand it or override the claim.",
+  },
+);
+
 const ReviewUnitCandidateSchema = Type.Object(
   {
     title: Type.String({
@@ -366,6 +432,7 @@ const ReviewUnitCandidateSchema = Type.Object(
         "File regions covered by this unit; a unit may span several files",
       minItems: 1,
     }),
+    routine: Type.Optional(ReviewUnitRoutineCandidateSchema),
   },
   { additionalProperties: false },
 );
@@ -426,6 +493,11 @@ export interface ReviewRoute {
   readonly skippedSpans: readonly ReviewRouteSkip[];
 }
 
+export interface ReviewUnitRoutine {
+  readonly reference: string;
+  readonly reason: string;
+}
+
 export interface ReviewUnit {
   readonly id: ReviewUnitId;
   readonly title: string;
@@ -434,6 +506,7 @@ export interface ReviewUnit {
   readonly changeSummary: string;
   readonly reviewFocus: readonly ReviewCheck[];
   readonly spans: readonly ResolvedSpan[];
+  readonly routine?: ReviewUnitRoutine;
 }
 
 export interface ReviewRouteSkip {

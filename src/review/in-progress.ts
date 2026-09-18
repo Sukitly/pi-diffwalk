@@ -16,6 +16,7 @@ import type {
   InProgressReviewId,
   InProgressReviewLifecycle,
   RepositoryState,
+  ReviewRoundUnit,
   ReviewRoute,
   ReviewSeries,
   ReviewSubmissionMode,
@@ -124,12 +125,75 @@ export function attachReviewRoute(
   });
 }
 
+/**
+ * Completes a unit. A routine unit completed without ever being expanded is
+ * `glanced`; everything else is `reviewed`. Completing again is a no-op, so
+ * pressing through an already complete unit never rewrites its outcome.
+ */
 export function markReviewUnitReviewed(
   review: InProgressReview,
   reviewUnitId: ReviewUnitId,
   mutation: ReviewMutation,
 ): InProgressReview {
   assertReadyMutation(review, mutation);
+  const progressIndex = requireProgressIndex(review, reviewUnitId);
+  const progress = review.unitProgress[progressIndex];
+  if (progress === undefined || progress.disposition !== "pending") {
+    return review;
+  }
+  const unit = requireRoute(review).units.find(
+    (candidate) => candidate.id === reviewUnitId,
+  );
+  const disposition =
+    unit?.routine !== undefined && progress.expanded === undefined
+      ? "glanced"
+      : "reviewed";
+  return nextVersion(review, mutation.timestamp, {
+    unitProgress: review.unitProgress.map((entry, index) =>
+      index === progressIndex ? { ...entry, disposition } : entry,
+    ),
+  });
+}
+
+/** Records that the reviewer opened a routine unit's diff. Idempotent. */
+export function markReviewUnitExpanded(
+  review: InProgressReview,
+  reviewUnitId: ReviewUnitId,
+  mutation: ReviewMutation,
+): InProgressReview {
+  assertReadyMutation(review, mutation);
+  const progressIndex = requireProgressIndex(review, reviewUnitId);
+  if (review.unitProgress[progressIndex]?.expanded === true) return review;
+  return nextVersion(review, mutation.timestamp, {
+    unitProgress: review.unitProgress.map((entry, index) =>
+      index === progressIndex ? { ...entry, expanded: true } : entry,
+    ),
+  });
+}
+
+/** Toggles the reviewer's claim that a walked unit could have been routine. */
+export function toggleReviewUnitRoutineCandidate(
+  review: InProgressReview,
+  reviewUnitId: ReviewUnitId,
+  mutation: ReviewMutation,
+): InProgressReview {
+  assertReadyMutation(review, mutation);
+  const progressIndex = requireProgressIndex(review, reviewUnitId);
+  return nextVersion(review, mutation.timestamp, {
+    unitProgress: review.unitProgress.map((entry, index) => {
+      if (index !== progressIndex) return entry;
+      const { routineCandidate, ...rest } = entry;
+      return routineCandidate === true
+        ? rest
+        : { ...rest, routineCandidate: true };
+    }),
+  });
+}
+
+function requireProgressIndex(
+  review: InProgressReview,
+  reviewUnitId: ReviewUnitId,
+): number {
   const progressIndex = review.unitProgress.findIndex(
     (progress) => progress.reviewUnitId === reviewUnitId,
   );
@@ -139,15 +203,35 @@ export function markReviewUnitReviewed(
       `Review ${review.id} has no review unit ${reviewUnitId}.`,
     );
   }
-  if (review.unitProgress[progressIndex]?.disposition === "reviewed") {
-    return review;
-  }
-  return nextVersion(review, mutation.timestamp, {
-    unitProgress: review.unitProgress.map((progress, index) =>
-      index === progressIndex
-        ? { ...progress, disposition: "reviewed" }
-        : progress,
-    ),
+  return progressIndex;
+}
+
+/** The per-unit outcomes a completed round keeps. */
+export function buildReviewRoundUnits(
+  review: InProgressReview,
+): readonly ReviewRoundUnit[] {
+  const route = requireRoute(review);
+  const commentedUnits = new Set(
+    review.comments.map((comment) => comment.reviewUnitId),
+  );
+  return route.units.map((unit) => {
+    const progress = review.unitProgress.find(
+      (entry) => entry.reviewUnitId === unit.id,
+    );
+    const routine = unit.routine !== undefined;
+    return {
+      id: unit.id,
+      title: unit.title,
+      routine,
+      outcome:
+        progress?.disposition === "glanced"
+          ? "glanced"
+          : routine
+            ? "expanded"
+            : "reviewed",
+      routineCandidate: progress?.routineCandidate === true,
+      commented: commentedUnits.has(unit.id),
+    };
   });
 }
 
@@ -258,6 +342,7 @@ export function submitInProgressReview(
     review.snapshot,
     review.delta,
     coverage,
+    buildReviewRoundUnits(review),
   );
   return {
     review: nextVersion(review, mutation.timestamp, {

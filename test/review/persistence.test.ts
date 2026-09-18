@@ -13,7 +13,8 @@ import {
   createReviewSeries,
   getNextReviewRoundIdentity,
 } from "../../src/review/series.ts";
-import type { ReviewSeries } from "../../src/review/types.ts";
+import { changedLineKey } from "../../src/review/span.ts";
+import type { ReviewRoundUnit, ReviewSeries } from "../../src/review/types.ts";
 import { makeSnapshot } from "../support/domain-fixtures.ts";
 
 /** A domain-consistent one-round series built through the real pipeline. */
@@ -86,4 +87,92 @@ test("rejects non-object and structurally broken entries", () => {
   assert.ok(requirementLine);
   requirementLine.type = "bogus";
   assert.equal(parseReviewSeriesEntry(badRequirement), undefined);
+});
+
+test("round-trips excluded requirements and records", () => {
+  const snapshot = makeSnapshot("snapshot-excluded", [
+    { path: "a.lock", lines: [" head", "+changed", " tail"] },
+    { path: "src/file.ts", lines: [" head", "-x  ", "+x", " tail"] },
+  ]);
+  const series = createReviewSeries({
+    repositoryRoot: snapshot.repositoryRoot,
+    sourceBranch: "main",
+    targetRef: "main",
+  });
+  const lock = snapshot.changes[0];
+  const file = snapshot.changes[1];
+  assert.ok(lock && file);
+  const delta = computeReviewDelta(snapshot, undefined, {
+    exclusions: new Map([
+      [
+        changedLineKey({ fileChangeId: lock.id, side: "new", line: 2 }),
+        { reason: "excluded-path", pattern: "*.lock" },
+      ],
+      [
+        changedLineKey({ fileChangeId: file.id, side: "old", line: 2 }),
+        { reason: "whitespace-only" },
+      ],
+      [
+        changedLineKey({ fileChangeId: file.id, side: "new", line: 2 }),
+        { reason: "whitespace-only" },
+      ],
+    ]),
+  });
+  const identity = getNextReviewRoundIdentity(series, snapshot);
+  const coverage = computeReviewCoverage(identity.id, snapshot, delta, {
+    commentedLines: [],
+    skippedSpans: [],
+  });
+  const submitted = appendReviewRound(
+    series,
+    createReviewRound(series, snapshot, delta, coverage),
+  );
+
+  const revived = parseReviewSeriesEntry(
+    JSON.parse(
+      JSON.stringify(serializeReviewSeriesEntry(submitted)),
+    ) as unknown,
+  );
+  assert.deepEqual(revived, submitted);
+  assert.deepEqual(
+    revived.rounds[0]?.delta.lines.map((line) => line.type),
+    ["excluded", "excluded", "excluded"],
+  );
+});
+
+test("round-trips unit outcomes and defaults them for rounds persisted without any", () => {
+  const series = makeSubmittedSeries();
+  const round = series.rounds[0];
+  assert.ok(round);
+  const withUnits: ReviewSeries = {
+    ...series,
+    rounds: [
+      {
+        ...round,
+        units: [
+          {
+            id: "review-unit:1" as ReviewRoundUnit["id"],
+            title: "Unit",
+            routine: true,
+            outcome: "expanded",
+            routineCandidate: false,
+            commented: true,
+          },
+        ],
+      },
+    ],
+  };
+  const revived = parseReviewSeriesEntry(
+    JSON.parse(
+      JSON.stringify(serializeReviewSeriesEntry(withUnits)),
+    ) as unknown,
+  );
+  assert.deepEqual(revived, withUnits);
+
+  const legacy = JSON.parse(
+    JSON.stringify(serializeReviewSeriesEntry(series)),
+  ) as { series: { rounds: Record<string, unknown>[] } };
+  for (const entry of legacy.series.rounds) delete entry.units;
+  const revivedLegacy = parseReviewSeriesEntry(legacy);
+  assert.deepEqual(revivedLegacy?.rounds[0]?.units, []);
 });

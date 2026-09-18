@@ -20,6 +20,7 @@ import {
   brand,
   createHarness,
   makeContextGapFixture,
+  makeExcludedFixture,
   makeInterleavedFileRouteFixture,
   makeLongExplanationFixture,
   makeMixedSideOverlapFixture,
@@ -615,4 +616,15 @@ test("navigates the inventory with vim keys", () => {
   assert.match(renderText(harness), /Review inventory/);
   press(harness.component, "h");
   assert.match(renderText(harness), /DiffWalk \/ Review/);
+});
+
+test("classifies excluded lines as unselectable gaps with their rule", () => {
+  const harness = createHarness(120, 30, makeExcludedFixture());
+  const output = renderText(harness);
+
+  assert.match(
+    output,
+    /\+target start[\s\S]*2 frozen diff lines not shown; excluded by rule: whitespace-only change[\s\S]*\+target end/,
+  );
+  assert.doesNotMatch(output, /spaced {2}out/);
 });

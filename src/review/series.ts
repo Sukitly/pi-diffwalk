@@ -13,6 +13,7 @@ import type {
   ReviewDelta,
   ReviewRound,
   ReviewRoundId,
+  ReviewRoundUnit,
   ReviewSeries,
   ReviewSeriesId,
   ReviewSnapshot,
@@ -78,6 +79,7 @@ export function createReviewRound(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
   coverage: ReviewCoverage,
+  units: readonly ReviewRoundUnit[] = [],
 ): ReviewRound {
   const identity = getNextReviewRoundIdentity(series, snapshot);
   validateRoundData(
@@ -88,6 +90,7 @@ export function createReviewRound(
     series.rounds.at(-1)?.id,
     new Set(series.rounds.map((round) => round.id)),
   );
+  validateRoundUnits(units);
   return {
     id: identity.id,
     seriesId: series.id,
@@ -95,7 +98,38 @@ export function createReviewRound(
     snapshot,
     delta,
     coverage,
+    units: [...units],
   };
+}
+
+function validateRoundUnits(units: readonly ReviewRoundUnit[]): void {
+  const seen = new Set<string>();
+  for (const unit of units) {
+    if (seen.has(unit.id)) {
+      throw new ReviewSeriesError(
+        `Round unit ${unit.id} appears more than once.`,
+      );
+    }
+    seen.add(unit.id);
+    if (unit.title.trim().length === 0) {
+      throw new ReviewSeriesError(`Round unit ${unit.id} requires a title.`);
+    }
+    if (!unit.routine && unit.outcome !== "reviewed") {
+      throw new ReviewSeriesError(
+        `Round unit ${unit.id} is not routine but has outcome ${unit.outcome}.`,
+      );
+    }
+    if (unit.routine && unit.outcome === "reviewed") {
+      throw new ReviewSeriesError(
+        `Round unit ${unit.id} is routine and must be glanced or expanded.`,
+      );
+    }
+    if (unit.routine && unit.routineCandidate) {
+      throw new ReviewSeriesError(
+        `Round unit ${unit.id} is routine and cannot also be a routine candidate.`,
+      );
+    }
+  }
 }
 
 export function appendReviewRound(
@@ -107,6 +141,7 @@ export function appendReviewRound(
     round.snapshot,
     round.delta,
     round.coverage,
+    round.units,
   );
   if (round.id !== expected.id) {
     throw new ReviewSeriesError(
@@ -251,6 +286,24 @@ function validateRecordProvenance(
       );
     }
     return;
+  }
+  if (record.disposition === "excluded") {
+    if (requirement.type !== "excluded") {
+      throw new ReviewSeriesError(
+        `Excluded ${label} must correspond to an excluded review requirement.`,
+      );
+    }
+    if (record.excludedInRoundId !== currentRoundId) {
+      throw new ReviewSeriesError(
+        `Excluded ${label} must reference current round ${currentRoundId}.`,
+      );
+    }
+    return;
+  }
+  if (requirement.type === "excluded") {
+    throw new ReviewSeriesError(
+      `Excluded ${label} must be recorded as excluded, not ${record.disposition}.`,
+    );
   }
 
   if (

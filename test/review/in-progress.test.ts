@@ -8,9 +8,11 @@ import {
   discardInProgressReview,
   getReviewSubmissionBlockers,
   InProgressReviewError,
+  markReviewUnitExpanded,
   markReviewUnitReviewed,
   setInProgressReviewSubmissionMode,
   submitInProgressReview,
+  toggleReviewUnitRoutineCandidate,
   upsertInProgressReviewComment,
 } from "../../src/review/in-progress.ts";
 import { validateReviewRoute } from "../../src/review/route-validation.ts";
@@ -368,3 +370,169 @@ function hasCode(error: unknown, code: string): boolean {
   assert.equal(error.code, code);
   return true;
 }
+
+function routineReviewFixture(): ReviewFixture {
+  const base = makeReviewFixture();
+  const snapshot = base.review.snapshot;
+  const delta = base.review.delta;
+  const route = validateReviewRoute(snapshot, delta, {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Entry",
+        whyHere: "The behavior starts here.",
+        context: "entry -> contract",
+        changeSummary: "Changes the entry behavior.",
+        reviewFocus: [{ question: "Is the entry behavior correct?" }],
+        spans: [span("src/entry.ts", { new: [2, 2] })],
+      },
+      {
+        title: "Contract",
+        whyHere: "The entry depends on this contract.",
+        context: "entry -> contract",
+        changeSummary: "Changes the contract.",
+        reviewFocus: [{ question: "Is the contract compatible?" }],
+        spans: [span("src/contract.ts", { new: [2, 2] })],
+        routine: { reference: "src/other.ts", reason: "Mirrors other." },
+      },
+    ],
+    skippedSpans: [],
+  });
+  return {
+    ...base,
+    route,
+    review: attachReviewRoute(
+      base.review,
+      route,
+      mutate(base.review, "2026-01-01T00:01:00.000Z"),
+    ),
+  };
+}
+
+test("a routine unit completed without expanding is glanced; expanded first is reviewed", () => {
+  const fixture = routineReviewFixture();
+  const [walked, routine] = fixture.route.units;
+  assert.ok(walked && routine);
+
+  const glanced = markReviewUnitReviewed(
+    fixture.review,
+    routine.id,
+    mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
+  );
+  assert.equal(
+    glanced.unitProgress.find((p) => p.reviewUnitId === routine.id)
+      ?.disposition,
+    "glanced",
+  );
+  assert.equal(
+    markReviewUnitReviewed(
+      glanced,
+      routine.id,
+      mutate(glanced, "2026-01-01T00:03:00.000Z"),
+    ),
+    glanced,
+    "Completing again never rewrites the outcome.",
+  );
+
+  const expanded = markReviewUnitExpanded(
+    fixture.review,
+    routine.id,
+    mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
+  );
+  assert.equal(
+    markReviewUnitExpanded(
+      expanded,
+      routine.id,
+      mutate(expanded, "2026-01-01T00:02:30.000Z"),
+    ),
+    expanded,
+  );
+  const reviewed = markReviewUnitReviewed(
+    expanded,
+    routine.id,
+    mutate(expanded, "2026-01-01T00:03:00.000Z"),
+  );
+  assert.deepEqual(
+    reviewed.unitProgress.find((p) => p.reviewUnitId === routine.id),
+    { reviewUnitId: routine.id, disposition: "reviewed", expanded: true },
+  );
+});
+
+test("routine candidate toggles on walked units and lands in the round", () => {
+  const fixture = routineReviewFixture();
+  const [walked, routine] = fixture.route.units;
+  assert.ok(walked && routine);
+
+  const marked = toggleReviewUnitRoutineCandidate(
+    fixture.review,
+    walked.id,
+    mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
+  );
+  assert.equal(
+    marked.unitProgress.find((p) => p.reviewUnitId === walked.id)
+      ?.routineCandidate,
+    true,
+  );
+  const cleared = toggleReviewUnitRoutineCandidate(
+    marked,
+    walked.id,
+    mutate(marked, "2026-01-01T00:02:30.000Z"),
+  );
+  assert.equal(
+    "routineCandidate" in
+      (cleared.unitProgress.find((p) => p.reviewUnitId === walked.id) ?? {}),
+    false,
+  );
+
+  let review = toggleReviewUnitRoutineCandidate(
+    cleared,
+    walked.id,
+    mutate(cleared, "2026-01-01T00:03:00.000Z"),
+  );
+  review = upsertInProgressReviewComment(
+    review,
+    { reviewUnitId: walked.id, ...anchor("src/entry.ts", 2), body: "Why?" },
+    mutate(review, "2026-01-01T00:03:30.000Z"),
+  );
+  review = markReviewUnitReviewed(
+    review,
+    walked.id,
+    mutate(review, "2026-01-01T00:04:00.000Z"),
+  );
+  review = markReviewUnitReviewed(
+    review,
+    routine.id,
+    mutate(review, "2026-01-01T00:05:00.000Z"),
+  );
+  const submitted = submitInProgressReview(
+    review,
+    fixture.series,
+    review.snapshot.repositoryState,
+    mutate(review, "2026-01-01T00:06:00.000Z"),
+  );
+  assert.deepEqual(submitted.round.units, [
+    {
+      id: walked.id,
+      title: "Entry",
+      routine: false,
+      outcome: "reviewed",
+      routineCandidate: true,
+      commented: true,
+    },
+    {
+      id: routine.id,
+      title: "Contract",
+      routine: true,
+      outcome: "glanced",
+      routineCandidate: false,
+      commented: false,
+    },
+  ]);
+  assert.deepEqual(
+    submitted.round.coverage.files.flatMap((file) =>
+      file.lines.map((record) => record.disposition),
+    ),
+    ["commented", "reviewed-without-comment"],
+    "A glanced unit's lines are recorded as reviewed and carry forward.",
+  );
+});

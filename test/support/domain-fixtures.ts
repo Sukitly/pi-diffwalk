@@ -1,5 +1,6 @@
 import type {
   ChangedLineRecord,
+  ChangedLineRequirement,
   DiffLine,
   FileChange,
   FileChangeId,
@@ -162,7 +163,10 @@ export interface RoundFixtureInput {
    * reviewed without comment in this round.
    */
   readonly dispositions?: Readonly<
-    Record<string, "commented" | "skipped" | "reviewed-without-comment">
+    Record<
+      string,
+      "commented" | "skipped" | "excluded" | "reviewed-without-comment"
+    >
   >;
   readonly skipReason?: string;
 }
@@ -202,13 +206,22 @@ export function makeRound(input: RoundFixtureInput): ReviewRound {
                 skippedInRoundId: roundIdValue,
                 skipReason,
               }
-            : {
-                side,
-                line: number,
-                text: line.text,
-                disposition,
-                reviewedInRoundId: roundIdValue,
-              },
+            : disposition === "excluded"
+              ? {
+                  side,
+                  line: number,
+                  text: line.text,
+                  disposition,
+                  excludedInRoundId: roundIdValue,
+                  exclusionReason: "whitespace-only",
+                }
+              : {
+                  side,
+                  line: number,
+                  text: line.text,
+                  disposition,
+                  reviewedInRoundId: roundIdValue,
+                },
       );
     }
     if (records.length === 0) continue;
@@ -234,17 +247,29 @@ export function makeRound(input: RoundFixtureInput): ReviewRound {
             candidate.newPath === file.newPath,
         );
         if (change === undefined) return [];
-        return file.lines.map((record) => ({
-          type: "needs-review" as const,
-          fileChangeId: change.id,
-          side: record.side,
-          line: record.line,
-          reason: "new" as const,
-        }));
+        return file.lines.map(
+          (record): ChangedLineRequirement =>
+            record.disposition === "excluded"
+              ? {
+                  type: "excluded",
+                  fileChangeId: change.id,
+                  side: record.side,
+                  line: record.line,
+                  reason: record.exclusionReason,
+                }
+              : {
+                  type: "needs-review",
+                  fileChangeId: change.id,
+                  side: record.side,
+                  line: record.line,
+                  reason: "new",
+                },
+        );
       }),
       removedLineCount: 0,
     },
     coverage: { snapshotId: input.snapshot.id, files },
+    units: [],
   };
 }
 

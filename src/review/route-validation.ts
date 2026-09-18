@@ -37,12 +37,22 @@ export type ReviewRouteValidationIssueCode =
   | "empty-unit"
   | "invalid-span"
   | "carried-forward-reference"
+  | "excluded-reference"
   | "duplicate-coverage"
   | "missing-coverage"
   | "empty-skip-reason"
   | "unresolved-comment-skip"
   | "skip-coverage-conflict"
-  | "missing-review-unit";
+  | "missing-review-unit"
+  | "routine-too-large"
+  | "routine-unresolved-comment";
+
+/**
+ * A routine claim is only accepted for a small unit. Size is the one thing
+ * about routineness that code can check without judgment: a large change is
+ * never a repetition of a pattern the reviewer already trusts.
+ */
+export const ROUTINE_MAX_CHANGED_LINES = 40;
 
 export interface ReviewRouteValidationIssue {
   readonly code: ReviewRouteValidationIssueCode;
@@ -117,6 +127,18 @@ export function validateReviewRoute(
         message: `Review unit ${unitNumber} must reference at least one span.`,
       });
     }
+    if (unit.routine !== undefined) {
+      validateNonBlank(
+        unit.routine.reference,
+        `Review unit ${unitNumber} routine.reference`,
+        issues,
+      );
+      validateNonBlank(
+        unit.routine.reason,
+        `Review unit ${unitNumber} routine.reason`,
+        issues,
+      );
+    }
 
     const spans = unit.spans.flatMap((span, spanIndex) => {
       const result = resolveSpan(
@@ -148,6 +170,14 @@ export function validateReviewRoute(
       changeSummary: unit.changeSummary,
       reviewFocus,
       spans,
+      ...(unit.routine === undefined
+        ? {}
+        : {
+            routine: {
+              reference: unit.routine.reference,
+              reason: unit.routine.reason,
+            },
+          }),
     };
   });
 
@@ -196,11 +226,31 @@ export function validateReviewRoute(
   }
 
   const carriedForward: ChangedLine[] = [];
+  const excluded: ChangedLine[] = [];
   const unskippable: ChangedLine[] = [];
-  for (const lines of coverage.coveredByUnit) {
+  for (const [unitIndex, lines] of coverage.coveredByUnit.entries()) {
+    const routine = units[unitIndex]?.routine !== undefined;
+    if (routine && lines.length > ROUTINE_MAX_CHANGED_LINES) {
+      issues.push({
+        code: "routine-too-large",
+        message: `Review unit ${unitIndex + 1} claims to be routine but covers ${lines.length} changed lines; at most ${ROUTINE_MAX_CHANGED_LINES} are allowed. Remove the routine claim or split the unit.`,
+      });
+    }
     for (const line of lines) {
-      if (requirementOf(requirements, line)?.type === "carried-forward") {
+      const requirement = requirementOf(requirements, line);
+      if (requirement?.type === "carried-forward") {
         carriedForward.push(line);
+      } else if (requirement?.type === "excluded") {
+        excluded.push(line);
+      } else if (
+        routine &&
+        requirement?.type === "needs-review" &&
+        !isNeedsReviewReasonSkippable(requirement.reason)
+      ) {
+        issues.push({
+          code: "routine-unresolved-comment",
+          message: `${describeChangedLines(snapshot, [line])[0]} has an unresolved comment, so review unit ${unitIndex + 1} cannot be routine.`,
+        });
       }
     }
   }
@@ -209,6 +259,10 @@ export function validateReviewRoute(
     if (requirement === undefined) continue;
     if (requirement.type === "carried-forward") {
       carriedForward.push(line);
+      continue;
+    }
+    if (requirement.type === "excluded") {
+      excluded.push(line);
       continue;
     }
     if (!isNeedsReviewReasonSkippable(requirement.reason)) {
@@ -220,6 +274,12 @@ export function validateReviewRoute(
     issues.push({
       code: "carried-forward-reference",
       message: `${description} was reviewed in an earlier round and must stay outside the planned route.`,
+    });
+  }
+  for (const description of describeChangedLines(snapshot, excluded)) {
+    issues.push({
+      code: "excluded-reference",
+      message: `${description} is excluded by a mechanical rule and must stay outside the planned route.`,
     });
   }
   for (const description of describeChangedLines(snapshot, unskippable)) {

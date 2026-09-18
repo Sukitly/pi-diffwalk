@@ -160,6 +160,7 @@ test("builds user-facing kickoff details with concrete additional changes", () =
       changedFileCount: 3,
       needsReviewLineCount: 1,
       carriedForwardLineCount: 0,
+      excludedLineCount: 0,
       additionalChanges: [
         { path: "assets/logo.png", description: "binary file" },
         {
@@ -183,6 +184,7 @@ test("renders kickoff facts on separate lines without protocol details", () => {
       changedFileCount: 3,
       needsReviewLineCount: 5,
       carriedForwardLineCount: 1,
+      excludedLineCount: 2,
       additionalChanges: [
         { path: "assets/logo.png", description: "binary file" },
         {
@@ -209,6 +211,7 @@ test("renders kickoff facts on separate lines without protocol details", () => {
       "Changed files: 3",
       "Lines to review: 5",
       "Previously reviewed: 1 line",
+      "Excluded by rule: 2 lines",
       "Additional changes:",
       "  assets/logo.png: binary file",
       "  scripts/deploy.sh: file permissions changed",
