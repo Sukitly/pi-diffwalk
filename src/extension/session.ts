@@ -24,16 +24,11 @@ import {
   discardInProgressReview,
   submitInProgressReview,
 } from "../review/in-progress.ts";
-import { detectExactMoves } from "../review/moves.ts";
 import {
   DIFFWALK_SERIES_ENTRY_TYPE,
   parseReviewSeriesEntry,
   serializeReviewSeriesEntry,
 } from "../review/persistence.ts";
-import {
-  assessRouteQuality,
-  ReviewRouteAdvisoryNudge,
-} from "../review/route-advisory.ts";
 import {
   appendReviewRouteUnit,
   createReviewRouteDraft,
@@ -154,8 +149,6 @@ interface PendingReview {
   inProgress: boolean;
   /** The selected rules file is captured once so repeated kickoffs stay deterministic. */
   routeRules?: LoadedDiffWalkRules;
-  /** Advisory route-quality signals are returned at most once per review. */
-  advisoryNudged: boolean;
   /** Units accepted so far while the agent assembles the route one at a time. */
   routeDraft: ReviewRouteDraft;
 }
@@ -401,7 +394,6 @@ export class DiffWalkSession {
       series,
       inProgress: false,
       ...(routeRules === undefined ? {} : { routeRules }),
-      advisoryNudged: false,
       routeDraft: createReviewRouteDraft(snapshot.id),
     };
     this.pendingReview = pending;
@@ -518,9 +510,9 @@ export class DiffWalkSession {
   }
 
   /**
-   * The guided_review tool workflow: validate the route against the pending
-   * snapshot, return advisory signals once, confirm the repository still
-   * matches, attach the route, and open the walkthrough.
+   * The route-finish tool workflow: validate the completed route against the
+   * pending snapshot, confirm the repository still matches, attach the
+   * route, and open the walkthrough.
    */
   /**
    * Accepts one route unit. Validation runs against the whole draft, so a
@@ -559,20 +551,6 @@ export class DiffWalkSession {
       pending.routeDraft,
       candidate.skippedSpans,
     );
-    if (!pending.advisoryNudged) {
-      const advisories = assessRouteQuality(
-        pending.review.snapshot,
-        route,
-        detectExactMoves(pending.review.snapshot),
-      );
-      if (advisories.length > 0) {
-        pending.advisoryNudged = true;
-        // The advisory asks for a different route, so the accepted units are
-        // dropped and the agent appends the reordered route from the start.
-        pending.routeDraft = createReviewRouteDraft(pending.review.snapshot.id);
-        throw new ReviewRouteAdvisoryNudge(advisories);
-      }
-    }
     try {
       await this.verifySnapshot(pending.review.snapshot, signal);
     } catch (error: unknown) {

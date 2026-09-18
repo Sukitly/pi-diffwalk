@@ -427,7 +427,7 @@ test("starts an Agent turn for a follow-up submitted from /diffwalk --threads", 
   assert.match(second.sentMessages.at(-1) ?? "", /Explain that answer further/);
 });
 
-test("returns advisory signals once, then accepts the resubmitted route", async () => {
+test("lists detected moves in the kickoff and accepts a route that splits one", async () => {
   const movedBlock = [
     "const total = computeTotalAmount(items);",
     "const tax = totalAmount * currentTaxRate;",
@@ -474,40 +474,8 @@ test("returns advisory signals once, then accepts the resubmitted route", async 
     skippedSpans: [],
   };
 
-  let advisoryMessage: string | undefined;
-  await assert.rejects(
-    harness.submitRoute(
-      "call-1",
-      splitRoute,
-      undefined,
-      undefined,
-      toolContext(),
-    ),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      advisoryMessage = error.message;
-      assert.equal(error.name, "ReviewRouteAdvisoryNudge");
-      assert.match(error.message, /exact relocation/);
-      assert.match(error.message, /advisory signals, not validation failures/);
-      return true;
-    },
-  );
-  assert.ok(advisoryMessage);
-  const renderedAdvisory = renderedToolResult(
-    harness.tool,
-    toolResultWithoutDetails(advisoryMessage),
-    true,
-  );
-  assert.doesNotMatch(renderedAdvisory, /needs attention/);
-  assert.match(renderedAdvisory, /advisory signals, not validation failures/);
-  assert.doesNotMatch(
-    renderedAdvisory,
-    /snapshotId|submissionMode|instruction/,
-  );
-  assert.deepEqual(harness.openedSnapshots, []);
-
   const completed = await harness.submitRoute(
-    "call-2",
+    "call-1",
     splitRoute,
     undefined,
     undefined,
