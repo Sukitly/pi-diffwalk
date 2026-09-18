@@ -161,7 +161,7 @@ test("encodes the selected review preferences without replacing the fixed protoc
   const prompt = buildReviewKickoffPrompt(
     snapshot,
     computeReviewDelta(snapshot),
-    { scope: "project", content: instructions },
+    { rules: { scope: "project", content: instructions } },
   );
   const lines = prompt.split("\n");
   const begin = lines.indexOf("BEGIN_DIFFWALK_REVIEW_RULES_JSON");
@@ -292,5 +292,28 @@ test("rejects a malformed review delta before creating model-facing input", () =
   assert.throws(
     () => buildReviewPromptInventory(snapshot, computeReviewDelta(other)),
     ReviewDeltaError,
+  );
+});
+
+test("a judged review asks the agent to keep foldable material in its own units", () => {
+  const snapshot = makeSnapshot("snapshot-judged", [
+    { path: "src/a.ts", lines: [" head", "+one", " tail"] },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const plain = buildReviewKickoffPrompt(snapshot, delta);
+  const judged = buildReviewKickoffPrompt(snapshot, delta, { judged: true });
+
+  assert.match(
+    plain,
+    /Put an implementation and the test that proves it in the same unit/,
+  );
+  assert.doesNotMatch(plain, /judged on its own text/);
+  assert.match(
+    judged,
+    /Keep tests, fixtures, documentation, configuration, and generated content in units of their own/,
+  );
+  assert.doesNotMatch(
+    judged,
+    /Put an implementation and the test that proves it in the same unit/,
   );
 });

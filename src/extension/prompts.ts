@@ -222,11 +222,22 @@ function formatMoveLines(range: MoveSideRange): string {
     : `${range.start}-${range.end}`;
 }
 
+export interface ReviewKickoffOptions {
+  readonly rules?: LoadedDiffWalkRules;
+  /**
+   * A decision model will judge each unit on its own text. Mixed units are
+   * judged by their riskiest part, so the agent is asked to keep foldable
+   * material apart from behavior code.
+   */
+  readonly judged?: boolean;
+}
+
 export function buildReviewKickoffPrompt(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
-  rules?: LoadedDiffWalkRules,
+  options: ReviewKickoffOptions = {},
 ): string {
+  const { rules, judged = false } = options;
   const inventory = buildReviewPromptInventory(snapshot, delta);
   const comparison = snapshot.comparison;
 
@@ -246,7 +257,13 @@ export function buildReviewKickoffPrompt(
     "Construct the route according to these rules:",
     "- Order review units by behavior, contracts, data flow, and failure paths instead of alphabetical file order.",
     "- A review unit is a semantic region. Draw its spans around what a reviewer must understand together, not around Git hunk boundaries.",
-    "- One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.",
+    ...(judged
+      ? [
+          "- One unit may span several files. Keep tests, fixtures, documentation, configuration, and generated content in units of their own, placed right after the implementation they belong to. Each unit is judged on its own text and a unit that mixes such material with behavior code is judged as behavior code, so the reviewer would have to read the tests too.",
+        ]
+      : [
+          "- One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.",
+        ]),
     "- Each file lists `regions`: the smallest parts of the change a unit can take. A region is contiguous and has one status, so build a unit by taking whole regions instead of computing line numbers.",
     "- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each. Split a region only when its lines truly belong to different units.",
     "- A span may include unchanged lines for context. Unchanged lines may appear in several units; every changed line must belong to exactly one unit.",

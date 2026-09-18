@@ -344,7 +344,12 @@ export class DiffWalkSession {
     this.pi.sendMessage(
       {
         customType: DIFFWALK_KICKOFF_MESSAGE_TYPE,
-        content: buildReviewKickoffPrompt(snapshot, delta, pending.routeRules),
+        content: buildReviewKickoffPrompt(snapshot, delta, {
+          ...(pending.routeRules === undefined
+            ? {}
+            : { rules: pending.routeRules }),
+          judged: pending.foldJudge !== undefined,
+        }),
         display: true,
         details: buildKickoffMessageDetails(snapshot, delta),
       },

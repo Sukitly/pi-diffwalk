@@ -32,6 +32,12 @@ export const ATTENTION_THRESHOLDS = {
   changesBehavior: 0.75,
   /** At or above this, a behavior or interface unit adds control flow. */
   newControlFlow: 0.75,
+  /**
+   * A choice below this confidence is no reason for attention. Folding is
+   * the default, so a boundary or kind the model barely leans toward must
+   * not pull the reviewer in.
+   */
+  choiceConfidence: 0.6,
 } as const;
 
 /** Kinds where a behavior or control-flow change is worth the reviewer's time. */
@@ -68,14 +74,14 @@ export function decideAttention(
   gates: AttentionGates,
 ): AttentionDecision {
   const reasons: string[] = [...gateReasons(gates)];
-  const boundary = features.touchesBoundary.choice;
+  const boundary = confidentChoice(features.touchesBoundary, "none");
   if (boundary !== "none") {
     reasons.push(
       `touches ${describeBoundary(boundary)} (${formatProbability(features.touchesBoundary.confidence)})`,
     );
   }
   const kind = features.kind.choice;
-  if (ATTENTION_KINDS.has(kind)) {
+  if (ATTENTION_KINDS.has(kind) && isConfident(features.kind)) {
     if (features.changesBehavior >= ATTENTION_THRESHOLDS.changesBehavior) {
       reasons.push(
         `${kind} code changes runtime behavior (${formatProbability(features.changesBehavior)})`,
@@ -113,6 +119,18 @@ export function foldFromRoutineClaim(
   return unit.routine === undefined
     ? undefined
     : { source: "agent", reasons: [unit.routine.reason] };
+}
+
+function isConfident(answer: { readonly confidence: number }): boolean {
+  return answer.confidence >= ATTENTION_THRESHOLDS.choiceConfidence;
+}
+
+/** Below the confidence threshold a choice reads as `fallback`. */
+function confidentChoice<T extends string>(
+  answer: { readonly choice: T; readonly confidence: number },
+  fallback: T,
+): T {
+  return isConfident(answer) ? answer.choice : fallback;
 }
 
 function describeBoundary(boundary: ReviewUnitBoundary): string {

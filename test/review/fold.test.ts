@@ -117,17 +117,41 @@ test("the same changes in test, config, docs, refactor, or generated code fold",
   }
 });
 
-test("an uncertain choice is taken at its word rather than escalated", () => {
-  const decision = decideAttention(
+test("an uncertain boundary or kind is no reason for attention", () => {
+  const weakBoundary = decideAttention(
     {
       ...quiet,
-      kind: { choice: "docs", confidence: 0.2 },
-      touchesBoundary: { choice: "none", confidence: 0.3 },
-      changesBehavior: 0.99,
+      touchesBoundary: {
+        choice: "public-api",
+        confidence: ATTENTION_THRESHOLDS.choiceConfidence - 0.01,
+      },
     },
     gates,
   );
-  assert.equal(decision.attention, false);
+  assert.equal(weakBoundary.attention, false);
+
+  const weakKind = decideAttention(
+    {
+      ...quiet,
+      kind: { choice: "behavior", confidence: 0.25 },
+      changesBehavior: 0.99,
+      newControlFlow: 0.99,
+    },
+    gates,
+  );
+  assert.equal(weakKind.attention, false);
+
+  const confidentBoundary = decideAttention(
+    {
+      ...quiet,
+      touchesBoundary: {
+        choice: "public-api",
+        confidence: ATTENTION_THRESHOLDS.choiceConfidence,
+      },
+    },
+    gates,
+  );
+  assert.equal(confidentBoundary.attention, true);
 });
 
 test("an unresolved comment earns attention before any feature is read", () => {
