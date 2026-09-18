@@ -223,16 +223,18 @@ The fold policy lives in DiffWalk, not in the model. A unit folds only when beha
 The key lives where pi keeps every other API key: `~/.pi/agent/auth.json`, under the provider id `typesafe`. pi creates the file with owner-only permissions. Add the entry with pi stopped:
 
 ```bash
-python3 - <<'EOF'
-import json, os
+python3 -c '
+import json, os, sys
 path = os.path.expanduser("~/.pi/agent/auth.json")
 data = json.load(open(path)) if os.path.exists(path) else {}
-data["typesafe"] = {"type": "api_key", "key": input("TypeSafe API key: ").strip()}
+data["typesafe"] = {"type": "api_key", "key": sys.argv[1].strip()}
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f:
     json.dump(data, f, indent=2)
-EOF
+' "$(cat)"
 ```
+
+Paste the key, then press Ctrl+D. The key is read from standard input so it stays out of the shell history.
 
 `TYPESAFE_API_KEY` in the environment is accepted as a fallback when `auth.json` has no `typesafe` entry. A stored key does not enable folding by itself; the `settings.json` entry is the consent.
 
