@@ -17,13 +17,16 @@ import {
   RESPOND_TOOL_DESCRIPTION,
   RESPOND_TOOL_NAME,
   RESPOND_TOOL_PROMPT_SNIPPET,
+  SKIP_TOOL_DESCRIPTION,
+  SKIP_TOOL_NAME,
+  SKIP_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/prompts.ts";
+import { ReviewRespondToolSchema } from "../../src/extension/tools.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {
   appendReviewThreadTurn,
   attachReviewThreadResponses,
   createReviewThreadBatch,
-  ReviewResponseCandidateSchema,
 } from "../../src/review/threads.ts";
 import type {
   FileChange,
@@ -35,8 +38,9 @@ import type {
   SnapshotId,
 } from "../../src/review/types.ts";
 import {
-  ReviewRouteFinishCandidateSchema,
-  ReviewRouteUnitCandidateSchema,
+  ReviewOpenToolSchema,
+  ReviewSkipCandidateToolSchema,
+  ReviewUnitCandidateToolSchema,
 } from "../../src/review/types.ts";
 import { makeRound, makeSnapshot } from "../support/domain-fixtures.ts";
 
@@ -140,12 +144,17 @@ function toolSurface(): string {
     `name: ${ADD_UNIT_TOOL_NAME}`,
     `description: ${ADD_UNIT_TOOL_DESCRIPTION}`,
     `promptSnippet: ${ADD_UNIT_TOOL_PROMPT_SNIPPET}`,
-    `parameters: ${JSON.stringify(ReviewRouteUnitCandidateSchema)}`,
+    `parameters: ${JSON.stringify(ReviewUnitCandidateToolSchema)}`,
+    "",
+    `name: ${SKIP_TOOL_NAME}`,
+    `description: ${SKIP_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${SKIP_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewSkipCandidateToolSchema)}`,
     "",
     `name: ${OPEN_TOOL_NAME}`,
     `description: ${OPEN_TOOL_DESCRIPTION}`,
     `promptSnippet: ${OPEN_TOOL_PROMPT_SNIPPET}`,
-    `parameters: ${JSON.stringify(ReviewRouteFinishCandidateSchema)}`,
+    `parameters: ${JSON.stringify(ReviewOpenToolSchema)}`,
   ].join("\n");
 }
 
@@ -154,7 +163,7 @@ function responseToolSurface(): string {
     `name: ${RESPOND_TOOL_NAME}`,
     `description: ${RESPOND_TOOL_DESCRIPTION}`,
     `promptSnippet: ${RESPOND_TOOL_PROMPT_SNIPPET}`,
-    `parameters: ${JSON.stringify(ReviewResponseCandidateSchema)}`,
+    `parameters: ${JSON.stringify(ReviewRespondToolSchema)}`,
   ].join("\n");
 }
 

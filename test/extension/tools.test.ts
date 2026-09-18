@@ -20,7 +20,7 @@ import {
   validRoute,
 } from "./harness.ts";
 
-test("requires /diffwalk and binds the tool route to the pending snapshot", async () => {
+test("requires /diffwalk before any route tool and validates the route", async () => {
   const harness = createHarness();
   await assert.rejects(
     harness.submitRoute(
@@ -42,17 +42,6 @@ test("requires /diffwalk and binds the tool route to the pending snapshot", asyn
     display: true,
     triggerTurn: true,
   });
-
-  await assert.rejects(
-    harness.submitRoute(
-      "call-2",
-      validRoute("other-snapshot"),
-      undefined,
-      undefined,
-      toolContext(),
-    ),
-    /does not match pending snapshot snapshot-index/,
-  );
 
   await assert.rejects(
     harness.submitRoute(
@@ -164,8 +153,6 @@ test("accepts complete structured responses and opens anchored threads", async (
       responses: [{ commentId: "C1", body: "Legacy response." }],
     }),
     {
-      batchId: result.commentBatchId,
-      turnId: "T1",
       responses: [{ threadId: "C1", body: "Legacy response." }],
     },
   );
@@ -173,8 +160,6 @@ test("accepts complete structured responses and opens anchored threads", async (
   const responses = await harness.responseTool.execute(
     "call-responses",
     {
-      batchId: result.commentBatchId,
-      turnId: result.commentTurnId ?? "T1",
       responses: [{ threadId: "C1", body: "The behavior is intentional." }],
     },
     undefined,
@@ -222,8 +207,6 @@ test("continues the Agent turn when the reviewer submits an inline follow-up", a
   const firstResponse = await harness.responseTool.execute(
     "call-responses-1",
     {
-      batchId: result.commentBatchId,
-      turnId: result.commentTurnId,
       responses: [{ threadId: "C1", body: "Initial answer." }],
     },
     undefined,
@@ -252,8 +235,6 @@ test("continues the Agent turn when the reviewer submits an inline follow-up", a
   const secondResponse = await harness.responseTool.execute(
     "call-responses-2",
     {
-      batchId: result.commentBatchId,
-      turnId: "T2",
       responses: [{ threadId: "C1", body: "Further explanation." }],
     },
     undefined,
@@ -290,8 +271,6 @@ test("carries a reviewer-resolved comment forward in the next round", async () =
   await harness.responseTool.execute(
     "call-responses",
     {
-      batchId: result.commentBatchId,
-      turnId: result.commentTurnId ?? "T1",
       responses: [{ threadId: "C1", body: "Answered." }],
     },
     undefined,
@@ -344,8 +323,6 @@ test("finishes thread turns before freezing a later review delta", async () => {
   await harness.responseTool.execute(
     "call-responses",
     {
-      batchId: result.commentBatchId,
-      turnId: result.commentTurnId,
       responses: [{ threadId: "C1", body: "Answered." }],
     },
     undefined,
@@ -404,8 +381,6 @@ test("starts an Agent turn for a follow-up submitted from /diffwalk --threads", 
   await first.responseTool.execute(
     "call-response",
     {
-      batchId: result.commentBatchId,
-      turnId: result.commentTurnId,
       responses: [{ threadId: "C1", body: "Initial answer." }],
     },
     undefined,
@@ -602,15 +577,12 @@ test("appends units one at a time and keeps accepted ones after a rejection", as
   });
   await harness.command("", commandContext());
   const unitCall = (title: string, path: string) => ({
-    snapshotId: "snapshot-index",
-    unit: {
-      title,
-      whyHere: "Behavior starts here.",
-      context: "entry -> implementation",
-      changeSummary: "Updates behavior.",
-      reviewFocus: [{ question: "Is the behavior correct?" }],
-      spans: [span(path, { new: [2, 2] })],
-    },
+    title,
+    whyHere: "Behavior starts here.",
+    context: "entry -> implementation",
+    changeSummary: "Updates behavior.",
+    reviewFocus: [{ question: "Is the behavior correct?" }],
+    spans: [span(path, { new: [2, 2] })],
   });
 
   const first = await harness.unitTool.execute(
@@ -638,7 +610,7 @@ test("appends units one at a time and keeps accepted ones after a rejection", as
   await assert.rejects(
     harness.tool.execute(
       "finish-early",
-      { snapshotId: "snapshot-index", skippedSpans: [] },
+      {},
       undefined,
       undefined,
       toolContext(),
@@ -659,7 +631,7 @@ test("appends units one at a time and keeps accepted ones after a rejection", as
   harness.behavior.submitOnOpen = true;
   const finished = await harness.tool.execute(
     "finish",
-    { snapshotId: "snapshot-index", skippedSpans: [] },
+    {},
     undefined,
     undefined,
     toolContext(),

@@ -468,41 +468,24 @@ export type ReviewRouteCandidate = Type.Static<
 >;
 
 /**
- * One unit at a time. A route is assembled by repeated calls so that a
- * rejected unit costs one unit of work instead of the whole route, and so
- * that the reviewer sees progress while the route is being built.
+ * A route is assembled one call at a time, so that a rejected unit or skip
+ * costs one item of work instead of the whole route. Only one review can be
+ * pending, so the tools carry no snapshot identifier: the pending snapshot is
+ * the one being routed.
  */
-export const ReviewRouteUnitCandidateSchema = Type.Object(
-  {
-    snapshotId: Type.String({
-      description: "Identifier of the frozen snapshot being routed",
-    }),
-    unit: ReviewUnitCandidateSchema,
-  },
-  { additionalProperties: false },
-);
+export const ReviewUnitCandidateToolSchema = ReviewUnitCandidateSchema;
 
-export const ReviewRouteFinishCandidateSchema = Type.Object(
-  {
-    snapshotId: Type.String({
-      description: "Identifier of the frozen snapshot being routed",
-    }),
-    skippedSpans: Type.Array(ReviewRouteSkipCandidateSchema, {
-      description:
-        "Regions whose changed lines are explicitly skipped with visible reasons; lines with unresolved comments cannot be skipped",
-    }),
-  },
+export const ReviewSkipCandidateToolSchema = ReviewRouteSkipCandidateSchema;
+
+export const ReviewOpenToolSchema = Type.Object(
+  {},
   { additionalProperties: false },
 );
 
 export type ReviewUnitCandidate = Type.Static<typeof ReviewUnitCandidateSchema>;
 
-export type ReviewRouteUnitCandidate = Type.Static<
-  typeof ReviewRouteUnitCandidateSchema
->;
-
-export type ReviewRouteFinishCandidate = Type.Static<
-  typeof ReviewRouteFinishCandidateSchema
+export type ReviewSkipCandidate = Type.Static<
+  typeof ReviewRouteSkipCandidateSchema
 >;
 
 export type ReviewSpanCandidate = Type.Static<typeof ReviewSpanCandidateSchema>;

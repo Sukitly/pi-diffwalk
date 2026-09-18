@@ -11,9 +11,11 @@ import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.t
 import {
   ADD_UNIT_TOOL_NAME,
   RESPOND_TOOL_NAME,
+  SKIP_TOOL_NAME,
 } from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
+import type { ReviewRespondToolSchema } from "../../src/extension/tools.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
 import type { PathExclusionSources } from "../../src/git/exclusion.ts";
 import { registerDiffWalk } from "../../src/index.ts";
@@ -22,10 +24,12 @@ import {
   markReviewUnitReviewed,
   upsertInProgressReviewComment,
 } from "../../src/review/in-progress.ts";
-import type { ReviewRouteDraftProgress } from "../../src/review/route-draft.ts";
+import type {
+  ReviewRouteDraftProgress,
+  ReviewRouteSkipProgress,
+} from "../../src/review/route-draft.ts";
 import {
   appendReviewThreadTurn,
-  type ReviewResponseCandidateSchema,
   setReviewThreadResolved,
 } from "../../src/review/threads.ts";
 import type {
@@ -33,27 +37,33 @@ import type {
   FileChangeId,
   GuidedReviewResult,
   ReviewComment,
+  ReviewOpenToolSchema,
   ReviewRouteCandidate,
-  ReviewRouteFinishCandidateSchema,
-  ReviewRouteUnitCandidateSchema,
+  ReviewSkipCandidateToolSchema,
   ReviewSnapshot,
+  ReviewUnitCandidateToolSchema,
   SnapshotId,
 } from "../../src/review/types.ts";
 import type { ReviewThreadUiResult } from "../../src/thread-ui/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 
 export type GuidedToolDefinition = ToolDefinition<
-  typeof ReviewRouteFinishCandidateSchema,
+  typeof ReviewOpenToolSchema,
   GuidedReviewResult
 >;
 
 export type RouteUnitToolDefinition = ToolDefinition<
-  typeof ReviewRouteUnitCandidateSchema,
+  typeof ReviewUnitCandidateToolSchema,
   ReviewRouteDraftProgress
 >;
 
+export type RouteSkipToolDefinition = ToolDefinition<
+  typeof ReviewSkipCandidateToolSchema,
+  ReviewRouteSkipProgress
+>;
+
 export type ResponseToolDefinition = ToolDefinition<
-  typeof ReviewResponseCandidateSchema,
+  typeof ReviewRespondToolSchema,
   ReviewThreadUiResult
 >;
 
@@ -112,6 +122,7 @@ export interface Harness {
   /** The finishing tool, which opens the walkthrough. */
   readonly tool: GuidedToolDefinition;
   readonly unitTool: RouteUnitToolDefinition;
+  readonly skipTool: RouteSkipToolDefinition;
   /** Appends every unit, then finishes, the way an agent drives the route. */
   readonly submitRoute: (
     toolCallId: string,
@@ -161,6 +172,7 @@ export function createHarness(
     | undefined;
   let tool: GuidedToolDefinition | undefined;
   let unitTool: RouteUnitToolDefinition | undefined;
+  let skipTool: RouteSkipToolDefinition | undefined;
   let responseTool: ResponseToolDefinition | undefined;
   const sentMessages: string[] = [];
   const sentMessageMeta: SentMessageMeta[] = [];
@@ -195,12 +207,15 @@ export function createHarness(
       definition:
         | GuidedToolDefinition
         | RouteUnitToolDefinition
+        | RouteSkipToolDefinition
         | ResponseToolDefinition,
     ) {
       if (definition.name === RESPOND_TOOL_NAME) {
         responseTool = definition as ResponseToolDefinition;
       } else if (definition.name === ADD_UNIT_TOOL_NAME) {
         unitTool = definition as RouteUnitToolDefinition;
+      } else if (definition.name === SKIP_TOOL_NAME) {
+        skipTool = definition as RouteSkipToolDefinition;
       } else {
         tool = definition as GuidedToolDefinition;
       }
@@ -371,9 +386,11 @@ export function createHarness(
   assert.ok(command);
   assert.ok(tool);
   assert.ok(unitTool);
+  assert.ok(skipTool);
   assert.ok(responseTool);
   const finishTool = tool;
   const appendTool = unitTool;
+  const skipRegionTool = skipTool;
   const submitRoute = async (
     toolCallId: string,
     route: ReviewRouteCandidate,
@@ -384,19 +401,22 @@ export function createHarness(
     for (const [index, unit] of route.units.entries()) {
       await appendTool.execute(
         `${toolCallId}-unit-${index + 1}`,
-        { snapshotId: route.snapshotId, unit },
+        unit,
         signal,
         undefined,
         ctx,
       );
     }
-    return finishTool.execute(
-      toolCallId,
-      { snapshotId: route.snapshotId, skippedSpans: route.skippedSpans },
-      signal,
-      undefined,
-      ctx,
-    );
+    for (const [index, skip] of route.skippedSpans.entries()) {
+      await skipRegionTool.execute(
+        `${toolCallId}-skip-${index + 1}`,
+        skip,
+        signal,
+        undefined,
+        ctx,
+      );
+    }
+    return finishTool.execute(toolCallId, {}, signal, undefined, ctx);
   };
   assert.ok(sessionStartHandler);
   const restoreSession = async (
@@ -431,6 +451,7 @@ export function createHarness(
     behavior,
     restoreSession,
     unitTool: appendTool,
+    skipTool,
     submitRoute,
   };
 }

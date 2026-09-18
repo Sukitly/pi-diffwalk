@@ -183,7 +183,7 @@ test("encodes the selected review preferences without replacing the fixed protoc
   assert.ok(
     end <
       lines.findIndex((line) =>
-        line.startsWith(`Submit the route one unit at a time`),
+        line.startsWith(`Submit the route one item at a time`),
       ),
   );
 });

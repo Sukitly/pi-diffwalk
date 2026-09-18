@@ -8,21 +8,23 @@ import type {
   ReviewRoute,
   ReviewRouteCandidate,
   ReviewRouteSkip,
+  ReviewSkipCandidate,
   ReviewSnapshot,
   ReviewUnit,
   ReviewUnitCandidate,
 } from "./types.ts";
 
 /**
- * A route under construction. Units arrive one at a time and each one is
- * validated against the whole draft immediately, so an error is reported
- * while it is still cheap to fix. Only the completeness rules wait for the
- * final call.
+ * A route under construction. Units and skips arrive one at a time and each
+ * one is validated against the whole draft immediately, so an error is
+ * reported while it is still cheap to fix. Only the completeness rules wait
+ * for the final call.
  */
 
 export interface ReviewRouteDraft {
   readonly snapshotId: string;
   readonly units: readonly ReviewUnitCandidate[];
+  readonly skippedSpans: readonly ReviewSkipCandidate[];
 }
 
 export interface ReviewRouteDraftProgress {
@@ -35,6 +37,15 @@ export interface ReviewRouteDraftProgress {
   readonly remaining: readonly ReviewRouteRemainingFile[];
 }
 
+export interface ReviewRouteSkipProgress {
+  readonly draft: ReviewRouteDraft;
+  readonly acceptedSkip: ReviewRouteSkip;
+  /** Changed lines the skip removed from the remaining work. */
+  readonly skippedLineCount: number;
+  readonly coveredLineCount: number;
+  readonly remaining: readonly ReviewRouteRemainingFile[];
+}
+
 export interface ReviewRouteRemainingFile {
   readonly path: string;
   /** Contiguous ranges still needing review, as `old 3-7` or `new 12`. */
@@ -43,7 +54,7 @@ export interface ReviewRouteRemainingFile {
 }
 
 export function createReviewRouteDraft(snapshotId: string): ReviewRouteDraft {
-  return { snapshotId, units: [] };
+  return { snapshotId, units: [], skippedSpans: [] };
 }
 
 export function appendReviewRouteUnit(
@@ -52,18 +63,15 @@ export function appendReviewRouteUnit(
   draft: ReviewRouteDraft,
   unit: ReviewUnitCandidate,
 ): ReviewRouteDraftProgress {
-  const units = [...draft.units, unit];
-  const route = validateDraft(snapshot, delta, draft.snapshotId, units, {
-    stage: "draft",
-  });
-  const next: ReviewRouteDraft = { snapshotId: draft.snapshotId, units };
+  const next: ReviewRouteDraft = { ...draft, units: [...draft.units, unit] };
+  const route = validateDraft(snapshot, delta, next, { stage: "draft" });
   const acceptedUnit = route.units.at(-1);
   if (acceptedUnit === undefined) {
     throw new Error("Route validation dropped the appended review unit.");
   }
   return {
     draft: next,
-    unitCount: units.length,
+    unitCount: next.units.length,
     acceptedUnit,
     coveredLineCount: coveredKeys(snapshot, route).size,
     remaining: remainingFiles(snapshot, delta, route),
@@ -71,37 +79,53 @@ export function appendReviewRouteUnit(
 }
 
 /**
- * Completes the route. Skipped spans arrive here rather than with the units
- * because a skip is a statement about what the finished route leaves out.
+ * A skip is the agent's decision that a region needs no unit. It is checked
+ * as it arrives, like a unit, so the remaining-work report stays honest.
  */
+export function appendReviewRouteSkip(
+  snapshot: ReviewSnapshot,
+  delta: ReviewDelta,
+  draft: ReviewRouteDraft,
+  skip: ReviewSkipCandidate,
+): ReviewRouteSkipProgress {
+  const next: ReviewRouteDraft = {
+    ...draft,
+    skippedSpans: [...draft.skippedSpans, skip],
+  };
+  const route = validateDraft(snapshot, delta, next, { stage: "draft" });
+  const acceptedSkip = route.skippedSpans.at(-1);
+  if (acceptedSkip === undefined) {
+    throw new Error("Route validation dropped the appended skip.");
+  }
+  return {
+    draft: next,
+    acceptedSkip,
+    skippedLineCount: resolvedSpanChangedLines(snapshot, acceptedSkip.span)
+      .length,
+    coveredLineCount: coveredKeys(snapshot, route).size,
+    remaining: remainingFiles(snapshot, delta, route),
+  };
+}
+
+/** Completes the route: every remaining rule is a completeness rule. */
 export function finishReviewRouteDraft(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
   draft: ReviewRouteDraft,
-  skippedSpans: ReviewRouteCandidate["skippedSpans"],
 ): ReviewRoute {
-  return validateDraft(
-    snapshot,
-    delta,
-    draft.snapshotId,
-    draft.units,
-    {},
-    skippedSpans,
-  );
+  return validateDraft(snapshot, delta, draft, {});
 }
 
 function validateDraft(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
-  snapshotId: string,
-  units: readonly ReviewUnitCandidate[],
+  draft: ReviewRouteDraft,
   options: ReviewRouteValidationOptions,
-  skippedSpans: ReviewRouteCandidate["skippedSpans"] = [],
 ): ReviewRoute {
   const candidate = {
-    snapshotId,
-    units: [...units],
-    skippedSpans: [...skippedSpans],
+    snapshotId: draft.snapshotId,
+    units: [...draft.units],
+    skippedSpans: [...draft.skippedSpans],
   } as ReviewRouteCandidate;
   return validateReviewRoute(snapshot, delta, candidate, options);
 }

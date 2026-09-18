@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {
+  appendReviewRouteSkip,
   appendReviewRouteUnit,
   createReviewRouteDraft,
   finishReviewRouteDraft,
@@ -80,7 +81,7 @@ test("accepts units one at a time and reports what is still unrouted", () => {
   assert.equal(second.unitCount, 2);
   assert.deepEqual(second.remaining, []);
 
-  const route = finishReviewRouteDraft(snapshot, delta, second.draft, []);
+  const route = finishReviewRouteDraft(snapshot, delta, second.draft);
   assert.deepEqual(
     route.units.map((routed) => routed.title),
     ["Entry point", "Contract field"],
@@ -141,14 +142,52 @@ test("an incomplete draft is rejected only when it is finished", () => {
   );
 
   assert.throws(
-    () => finishReviewRouteDraft(snapshot, delta, partial.draft, []),
+    () => finishReviewRouteDraft(snapshot, delta, partial.draft),
     (error: unknown) => codesOf(error).includes("missing-coverage"),
   );
 
-  const route = finishReviewRouteDraft(snapshot, delta, partial.draft, [
-    { span: span("src/contract.ts", { new: [2, 2] }), reason: "Type only." },
-  ]);
+  const skipped = appendReviewRouteSkip(snapshot, delta, partial.draft, {
+    span: span("src/contract.ts", { new: [2, 2] }),
+    reason: "Type only.",
+  });
+  assert.equal(skipped.skippedLineCount, 1);
+  assert.deepEqual(skipped.remaining, []);
+  const route = finishReviewRouteDraft(snapshot, delta, skipped.draft);
   assert.equal(route.skippedSpans.length, 1);
+});
+
+test("a skip is checked on arrival and reported as covered", () => {
+  const snapshot = fixture();
+  const delta = computeReviewDelta(snapshot);
+  const draft = createReviewRouteDraft(snapshot.id);
+
+  assert.throws(
+    () =>
+      appendReviewRouteSkip(snapshot, delta, draft, {
+        span: span("src/contract.ts", { new: [2, 2] }),
+        reason: "  ",
+      }),
+    (error: unknown) => codesOf(error).includes("empty-skip-reason"),
+  );
+
+  const skipped = appendReviewRouteSkip(snapshot, delta, draft, {
+    span: span("src/contract.ts", { new: [2, 2] }),
+    reason: "Type only.",
+  });
+  assert.deepEqual(skipped.remaining, [
+    { path: "src/entry.ts", ranges: ["old 2", "new 2"], lineCount: 2 },
+  ]);
+
+  assert.throws(
+    () =>
+      appendReviewRouteUnit(
+        snapshot,
+        delta,
+        skipped.draft,
+        unit("Contract again", [span("src/contract.ts", { new: [2, 2] })]),
+      ),
+    (error: unknown) => codesOf(error).includes("skip-coverage-conflict"),
+  );
 });
 
 test("an empty draft cannot be finished while lines still need review", () => {
@@ -161,7 +200,6 @@ test("an empty draft cannot be finished while lines still need review", () => {
         snapshot,
         delta,
         createReviewRouteDraft(snapshot.id),
-        [],
       ),
     (error: unknown) => codesOf(error).includes("missing-review-unit"),
   );

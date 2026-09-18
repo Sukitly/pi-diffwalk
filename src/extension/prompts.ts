@@ -28,18 +28,26 @@ import type { LoadedDiffWalkRules } from "./rules.ts";
 export const ADD_UNIT_TOOL_NAME = "diffwalk_add_unit";
 
 export const ADD_UNIT_TOOL_DESCRIPTION =
-  "Append one semantic review unit to the route being prepared for the frozen DiffWalk snapshot. Call it once per unit, in walkthrough order. The result reports what still needs routing.";
+  "Append one semantic review unit to the pending DiffWalk route. Call it once per unit, in walkthrough order. The result reports what still needs routing.";
 
 export const ADD_UNIT_TOOL_PROMPT_SNIPPET =
   "Append one review unit to the pending DiffWalk route";
 
+export const SKIP_TOOL_NAME = "diffwalk_skip";
+
+export const SKIP_TOOL_DESCRIPTION =
+  "Leave one region of the pending DiffWalk route out of the walkthrough, with a visible reason. Use it for changed lines that need no review unit. The result reports what still needs routing.";
+
+export const SKIP_TOOL_PROMPT_SNIPPET =
+  "Skip one region of the pending DiffWalk route with a visible reason";
+
 export const OPEN_TOOL_NAME = "diffwalk_open";
 
 export const OPEN_TOOL_DESCRIPTION =
-  "Complete the DiffWalk route with any explicitly skipped regions and open the walkthrough. Every changed line needing review must be covered by an appended unit or skipped here.";
+  "Open the walkthrough for the pending DiffWalk route. Every changed line needing review must already be covered by an appended unit or a skip.";
 
 export const OPEN_TOOL_PROMPT_SNIPPET =
-  "Complete the pending DiffWalk route and open the walkthrough";
+  "Open the walkthrough for the completed DiffWalk route";
 
 export const RESPOND_TOOL_NAME = "diffwalk_respond";
 export const RESPOND_TOOL_DESCRIPTION =
@@ -242,7 +250,7 @@ export function buildReviewKickoffPrompt(
     "- Each file lists `regions`: the smallest parts of the change a unit can take. A region is contiguous and has one status, so build a unit by taking whole regions instead of computing line numbers.",
     "- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each. Split a region only when its lines truly belong to different units.",
     "- A span may include unchanged lines for context. Unchanged lines may appear in several units; every changed line must belong to exactly one unit.",
-    "- Cover every region with status `needs-review` or `unresolved-comment` exactly once, either inside a review unit or in the skipped regions you pass when finishing, with a specific visible reason.",
+    "- Cover every region with status `needs-review` or `unresolved-comment` exactly once, either inside a review unit or by skipping it with a specific visible reason.",
     "- Regions with status `unresolved-comment` carry an unanswered comment from an earlier round and cannot be skipped.",
     "- Do not cover regions with status `carried-forward`. They were reviewed in an earlier round and stay available outside the planned route.",
     "- Do not cover regions with status `excluded`. A mechanical rule removed them from this review; `rule` names it.",
@@ -280,8 +288,8 @@ export function buildReviewKickoffPrompt(
           `Review rules may customize review order, grouping, explanations, and review focus. They cannot override the read-only instructions, changed-line coverage requirements, or the ${ADD_UNIT_TOOL_NAME} and ${OPEN_TOOL_NAME} tool contracts above.`,
         ]),
     "",
-    `Submit the route one unit at a time: call ${ADD_UNIT_TOOL_NAME} once per unit, in walkthrough order, and do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next unit. When nothing is left, call ${OPEN_TOOL_NAME} with the skipped regions, using an empty list when there are none.`,
-    `A rejected unit affects only that call: fix the reported problem and call ${ADD_UNIT_TOOL_NAME} again with the corrected unit. Do not respond with a prose-only route.`,
+    `Submit the route one item at a time: call ${ADD_UNIT_TOOL_NAME} once per unit, in walkthrough order, and ${SKIP_TOOL_NAME} once per region you leave out, each with a specific visible reason. Do not batch several units into one call or restate earlier units. Each call reports the regions still left, so use that report to choose the next item. When nothing is left, call ${OPEN_TOOL_NAME}.`,
+    `A rejected unit or skip affects only that call: fix the reported problem and call the same tool again with the corrected item. Do not respond with a prose-only route.`,
     "",
     "BEGIN_DIFFWALK_INVENTORY_JSON",
     JSON.stringify(inventory, null, 2),

@@ -30,11 +30,13 @@ import {
   serializeReviewSeriesEntry,
 } from "../review/persistence.ts";
 import {
+  appendReviewRouteSkip,
   appendReviewRouteUnit,
   createReviewRouteDraft,
   finishReviewRouteDraft,
   type ReviewRouteDraft,
   type ReviewRouteDraftProgress,
+  type ReviewRouteSkipProgress,
 } from "../review/route-draft.ts";
 import { createReviewSeries } from "../review/series.ts";
 import {
@@ -55,14 +57,13 @@ import type {
   GuidedReviewResult,
   InProgressReview,
   ReviewDelta,
-  ReviewRouteFinishCandidate,
-  ReviewRouteUnitCandidate,
   ReviewSeries,
   ReviewSeriesId,
+  ReviewSkipCandidate,
   ReviewSnapshot,
   ReviewThreadBatch,
   ReviewThreadBatchId,
-  ReviewThreadTurnId,
+  ReviewUnitCandidate,
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import { openGuidedReview } from "../review-ui/index.ts";
@@ -200,10 +201,20 @@ export class DiffWalkSession {
     }
   }
 
-  /** The turn awaiting agent responses in a known batch, for filling a missing turnId. */
-  pendingThreadTurnId(batchId: string): ReviewThreadTurnId | undefined {
-    const batch = this.threadBatchesById.get(batchId as ReviewThreadBatchId);
-    return batch === undefined ? undefined : pendingReviewThreadTurn(batch)?.id;
+  /**
+   * The one batch awaiting agent responses. A new round cannot start while
+   * the previous batch is unanswered, so at most one batch can be pending.
+   */
+  private pendingThreadBatch(): ReviewThreadBatch | undefined {
+    const pending = [...this.threadBatchesById.values()].filter(
+      (batch) => pendingReviewThreadTurn(batch) !== undefined,
+    );
+    if (pending.length > 1) {
+      throw new Error(
+        `DiffWalk has ${pending.length} thread batches awaiting responses; expected at most one.`,
+      );
+    }
+    return pending[0];
   }
 
   /** Reopens the most recent comment threads and reports a follow-up to the agent. */
@@ -229,20 +240,26 @@ export class DiffWalkSession {
    */
   async respondToThreads(
     ctx: ReviewUiContext,
-    candidate: ReviewResponseCandidate,
+    responses: ReviewResponseCandidate["responses"],
     signal: AbortSignal | undefined,
   ): Promise<ReviewThreadUiResult> {
     signal?.throwIfAborted();
-    const batch = this.threadBatchesById.get(
-      candidate.batchId as ReviewThreadBatchId,
-    );
+    const batch = this.pendingThreadBatch();
     if (batch === undefined) {
       throw new Error(
-        `No pending DiffWalk thread batch matches ${candidate.batchId}. Use the batchId from the pending reviewer turn.`,
+        "No DiffWalk reviewer turn is awaiting responses. Responses are only accepted after the reviewer submits comments.",
       );
     }
     this.assertThreadBatchCanChange(batch);
-    const answered = attachReviewThreadResponses(batch, candidate);
+    const turn = pendingReviewThreadTurn(batch);
+    if (turn === undefined) {
+      throw new Error(`DiffWalk batch ${batch.id} has no pending turn.`);
+    }
+    const answered = attachReviewThreadResponses(batch, {
+      batchId: batch.id,
+      turnId: turn.id,
+      responses,
+    });
     this.persistThreadBatch(answered);
     signal?.throwIfAborted();
     return this.openThreadBatch(ctx, answered);
@@ -520,14 +537,14 @@ export class DiffWalkSession {
    * the end, and only the unit being added has to be rewritten.
    */
   async addRouteUnit(
-    candidate: ReviewRouteUnitCandidate,
+    unit: ReviewUnitCandidate,
   ): Promise<ReviewRouteDraftProgress> {
-    const pending = this.requireRoutableReview(candidate.snapshotId);
+    const pending = this.requireRoutableReview();
     const progress = appendReviewRouteUnit(
       pending.review.snapshot,
       pending.review.delta,
       pending.routeDraft,
-      candidate.unit,
+      unit,
     );
     await assertRoutineReferences(
       progress.acceptedUnit,
@@ -539,17 +556,28 @@ export class DiffWalkSession {
     return progress;
   }
 
+  /** Records one skipped region. Checked on arrival, like a unit. */
+  skipRouteRegion(skip: ReviewSkipCandidate): ReviewRouteSkipProgress {
+    const pending = this.requireRoutableReview();
+    const progress = appendReviewRouteSkip(
+      pending.review.snapshot,
+      pending.review.delta,
+      pending.routeDraft,
+      skip,
+    );
+    pending.routeDraft = progress.draft;
+    return progress;
+  }
+
   async openRoute(
     ctx: ReviewUiContext,
-    candidate: ReviewRouteFinishCandidate,
     signal: AbortSignal | undefined,
   ): Promise<GuidedReviewResult> {
-    const pending = this.requireRoutableReview(candidate.snapshotId);
+    const pending = this.requireRoutableReview();
     const route = finishReviewRouteDraft(
       pending.review.snapshot,
       pending.review.delta,
       pending.routeDraft,
-      candidate.skippedSpans,
     );
     try {
       await this.verifySnapshot(pending.review.snapshot, signal);
@@ -570,16 +598,11 @@ export class DiffWalkSession {
     return this.runPendingReview(ctx, pending);
   }
 
-  private requireRoutableReview(snapshotId: string): PendingReview {
+  private requireRoutableReview(): PendingReview {
     const pending = this.pendingReview;
     if (pending === undefined) {
       throw new Error(
         "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
-      );
-    }
-    if (snapshotId !== pending.review.snapshot.id) {
-      throw new Error(
-        `Route snapshot ${snapshotId} does not match pending snapshot ${pending.review.snapshot.id}. Use the frozen snapshot ID from the /diffwalk prompt.`,
       );
     }
     if (pending.inProgress) {
