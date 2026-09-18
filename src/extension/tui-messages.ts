@@ -171,10 +171,19 @@ export function renderAddUnitToolResult(
     remainingLines === 0
       ? "route complete"
       : `${countNoun(remainingLines, "line")} left in ${countNoun(progress.remaining.length, "file")}`;
+  const unit = progress.acceptedUnit;
+  const verdict =
+    unit.fold !== undefined
+      ? unit.fold.source === "agent"
+        ? " • folded (agent claim)"
+        : " • folded"
+      : unit.walked !== undefined
+        ? ` • walked: ${unit.walked.blockers.join("; ")}`
+        : "";
   return new Text(
     theme.fg(
       remainingLines === 0 ? "success" : "muted",
-      `Unit ${progress.unitCount} accepted, ${summary}`,
+      `Unit ${progress.unitCount} accepted, ${summary}${verdict}`,
     ),
     0,
     0,

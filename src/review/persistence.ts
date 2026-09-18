@@ -331,6 +331,17 @@ const ReviewRoundUnitSchema = Type.Object(
     title: Type.String(),
     routine: Type.Boolean(),
     fold: Type.Optional(ReviewUnitFoldSchema),
+    walked: Type.Optional(
+      Type.Object(
+        {
+          outcome: Type.Literal("walked"),
+          source: Type.Literal("typesafe"),
+          blockers: Type.Array(Type.String()),
+          features: ReviewUnitFeaturesSchema,
+        },
+        { additionalProperties: false },
+      ),
+    ),
     outcome: Type.Union([
       Type.Literal("reviewed"),
       Type.Literal("glanced"),

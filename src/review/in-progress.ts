@@ -224,6 +224,7 @@ export function buildReviewRoundUnits(
       title: unit.title,
       routine: unit.routine !== undefined,
       ...(unit.fold === undefined ? {} : { fold: unit.fold }),
+      ...(unit.walked === undefined ? {} : { walked: unit.walked }),
       outcome:
         progress?.disposition === "glanced"
           ? "glanced"

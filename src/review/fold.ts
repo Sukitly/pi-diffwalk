@@ -53,7 +53,11 @@ export interface FoldGates {
 
 export type FoldDecision =
   | { readonly fold: true; readonly result: ReviewUnitFold }
-  | { readonly fold: false; readonly blockers: readonly string[] };
+  | {
+      readonly fold: false;
+      readonly blockers: readonly string[];
+      readonly features: ReviewUnitFeatures;
+    };
 
 export function decideFold(
   features: ReviewUnitFeatures,
@@ -98,7 +102,7 @@ export function decideFold(
       );
     }
   }
-  if (blockers.length > 0) return { fold: false, blockers };
+  if (blockers.length > 0) return { fold: false, blockers, features };
 
   const reasons = [
     `No behavior change (${formatProbability(1 - features.changesBehavior)}), no new control flow (${formatProbability(1 - features.newControlFlow)}).`,

@@ -199,6 +199,16 @@ test("with a judge, every unit is folded or walked on its features", async () =>
     toolContext(),
   );
   assert.equal(walked.details?.acceptedUnit.fold, undefined);
+  assert.deepEqual(walked.details?.acceptedUnit.walked?.blockers, [
+    "changes runtime behavior (90%)",
+    "adds control flow (80%)",
+    "touches authorization",
+    "is a behavior change",
+  ]);
+  assert.match(
+    (walked.content[0] as { text: string }).text,
+    /^Accepted review unit 1 \(walked: changes runtime behavior \(90%\); adds control flow \(80%\); touches authorization; is a behavior change\)\./,
+  );
 
   const folded = await harness.unitTool.execute(
     "u2",
@@ -225,6 +235,11 @@ test("with a judge, every unit is folded or walked on its features", async () =>
     route?.units.map((unit) => unit.fold?.source),
     [undefined, "typesafe"],
     "The fold decisions reach the walkthrough.",
+  );
+  assert.equal(route?.units[0]?.walked?.source, "typesafe");
+  assert.match(
+    (folded.content[0] as { text: string }).text,
+    /^Accepted review unit 2 \(folded: No behavior change/,
   );
 });
 

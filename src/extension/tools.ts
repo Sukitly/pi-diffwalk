@@ -89,9 +89,24 @@ export function registerAddUnitTool(
 /** The remaining work is the only thing the agent needs back from an append. */
 function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
   return formatRemaining(
-    `Accepted review unit ${progress.unitCount}.`,
+    `Accepted review unit ${progress.unitCount}${describeVerdict(progress.acceptedUnit)}.`,
     progress.remaining,
   );
+}
+
+/** One clause so the agent and the transcript show what the judge did. */
+function describeVerdict(
+  unit: ReviewRouteDraftProgress["acceptedUnit"],
+): string {
+  if (unit.fold !== undefined) {
+    return unit.fold.source === "agent"
+      ? " (folded on the routine claim)"
+      : ` (folded: ${unit.fold.reasons.join(" ")})`;
+  }
+  if (unit.walked !== undefined) {
+    return ` (walked: ${unit.walked.blockers.join("; ")})`;
+  }
+  return "";
 }
 
 function formatRouteSkipProgress(progress: ReviewRouteSkipProgress): string {

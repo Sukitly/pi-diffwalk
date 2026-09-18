@@ -187,6 +187,7 @@ export interface ReviewRoundUnit {
   readonly title: string;
   readonly routine: boolean;
   readonly fold?: ReviewUnitFold;
+  readonly walked?: Extract<ReviewUnitVerdict, { outcome: "walked" }>;
   readonly outcome: "reviewed" | "glanced" | "expanded";
   readonly routineCandidate: boolean;
   readonly commented: boolean;
@@ -537,6 +538,20 @@ export type ReviewUnitFold =
       readonly features: ReviewUnitFeatures;
     };
 
+/**
+ * The judge's verdict on a unit. `fold` carries the reasons a folded unit
+ * shows; `walked` carries the blockers for a unit the judge sent to the
+ * reviewer, so a review can show that the judge ran even when nothing folds.
+ */
+export type ReviewUnitVerdict =
+  | { readonly outcome: "folded"; readonly fold: ReviewUnitFold }
+  | {
+      readonly outcome: "walked";
+      readonly source: "typesafe";
+      readonly blockers: readonly string[];
+      readonly features: ReviewUnitFeatures;
+    };
+
 /** Surface features of one unit as a decision model reports them. */
 export interface ReviewUnitFeatures {
   readonly changesBehavior: number;
@@ -580,6 +595,8 @@ export interface ReviewUnit {
   readonly spans: readonly ResolvedSpan[];
   readonly routine?: ReviewUnitRoutine;
   readonly fold?: ReviewUnitFold;
+  /** Present when a decision model judged the unit and chose to walk it. */
+  readonly walked?: Extract<ReviewUnitVerdict, { outcome: "walked" }>;
 }
 
 export interface ReviewRouteSkip {

@@ -16,7 +16,7 @@ import type {
   ReviewSnapshot,
   ReviewUnit,
   ReviewUnitFeatures,
-  ReviewUnitFold,
+  ReviewUnitVerdict,
 } from "../review/types.ts";
 import { parseRoutineReference } from "./routine.ts";
 import {
@@ -216,6 +216,13 @@ export async function foldUnit(input: FoldUnitInput): Promise<FoldDecision> {
   });
 }
 
-export function foldOf(decision: FoldDecision): ReviewUnitFold | undefined {
-  return decision.fold ? decision.result : undefined;
+export function verdictOf(decision: FoldDecision): ReviewUnitVerdict {
+  return decision.fold
+    ? { outcome: "folded", fold: decision.result }
+    : {
+        outcome: "walked",
+        source: "typesafe",
+        blockers: decision.blockers,
+        features: decision.features,
+      };
 }

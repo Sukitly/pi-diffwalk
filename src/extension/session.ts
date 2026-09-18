@@ -33,12 +33,13 @@ import {
 import {
   appendReviewRouteSkip,
   appendReviewRouteUnit,
+  applyVerdict,
   createReviewRouteDraft,
   finishReviewRouteDraft,
   type ReviewRouteDraft,
   type ReviewRouteDraftProgress,
   type ReviewRouteSkipProgress,
-  withLastUnitFold,
+  withLastUnitVerdict,
 } from "../review/route-draft.ts";
 import { createReviewSeries } from "../review/series.ts";
 import {
@@ -67,7 +68,7 @@ import type {
   ReviewThreadBatchId,
   ReviewUnit,
   ReviewUnitCandidate,
-  ReviewUnitFold,
+  ReviewUnitVerdict,
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import { openGuidedReview } from "../review-ui/index.ts";
@@ -81,11 +82,11 @@ import {
 import {
   createUnitFeatureJudge,
   type FoldConfiguration,
-  foldOf,
   foldUnit,
   readFoldConfiguration,
   readReferenceText,
   type UnitFeatureJudge,
+  verdictOf,
 } from "./fold.ts";
 import { createPiGitRunner } from "./git-runner.ts";
 import {
@@ -579,18 +580,15 @@ export class DiffWalkSession {
       pending.review.snapshot.repositoryRoot,
       this.dependencies.routineReferenceExists,
     );
-    const fold = await this.foldAcceptedUnit(
+    const verdict = await this.judgeAcceptedUnit(
       ctx,
       pending,
       progress.acceptedUnit,
     );
-    pending.routeDraft = withLastUnitFold(progress.draft, fold);
+    pending.routeDraft = withLastUnitVerdict(progress.draft, verdict);
     return {
       ...progress,
-      acceptedUnit:
-        fold === undefined
-          ? progress.acceptedUnit
-          : { ...progress.acceptedUnit, fold },
+      acceptedUnit: applyVerdict(progress.acceptedUnit, verdict),
       draft: pending.routeDraft,
     };
   }
@@ -602,14 +600,17 @@ export class DiffWalkSession {
    * to walking every remaining unit, reported once; the agent's claim does
    * not take over mid-review, because the reviewer was told folding is off.
    */
-  private async foldAcceptedUnit(
+  private async judgeAcceptedUnit(
     ctx: Pick<CommandContext, "ui">,
     pending: PendingReview,
     unit: ReviewUnit,
-  ): Promise<ReviewUnitFold | undefined> {
+  ): Promise<ReviewUnitVerdict | undefined> {
     if (pending.foldDegraded) return undefined;
     const judge = pending.foldJudge;
-    if (judge === undefined) return foldFromRoutineClaim(unit);
+    if (judge === undefined) {
+      const fold = foldFromRoutineClaim(unit);
+      return fold === undefined ? undefined : { outcome: "folded", fold };
+    }
     try {
       const decision = await foldUnit({
         snapshot: pending.review.snapshot,
@@ -618,7 +619,7 @@ export class DiffWalkSession {
         judge,
         readReference: this.dependencies.readReferenceText,
       });
-      return foldOf(decision);
+      return verdictOf(decision);
     } catch (error: unknown) {
       pending.foldJudge = undefined;
       pending.foldDegraded = true;
