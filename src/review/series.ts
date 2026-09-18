@@ -114,19 +114,20 @@ function validateRoundUnits(units: readonly ReviewRoundUnit[]): void {
     if (unit.title.trim().length === 0) {
       throw new ReviewSeriesError(`Round unit ${unit.id} requires a title.`);
     }
-    if (!unit.routine && unit.outcome !== "reviewed") {
+    const folded = unit.fold !== undefined;
+    if (!folded && unit.outcome !== "reviewed") {
       throw new ReviewSeriesError(
-        `Round unit ${unit.id} is not routine but has outcome ${unit.outcome}.`,
+        `Round unit ${unit.id} was not folded but has outcome ${unit.outcome}.`,
       );
     }
-    if (unit.routine && unit.outcome === "reviewed") {
+    if (folded && unit.outcome === "reviewed") {
       throw new ReviewSeriesError(
-        `Round unit ${unit.id} is routine and must be glanced or expanded.`,
+        `Round unit ${unit.id} was folded and must be glanced or expanded.`,
       );
     }
-    if (unit.routine && unit.routineCandidate) {
+    if (folded && unit.routineCandidate) {
       throw new ReviewSeriesError(
-        `Round unit ${unit.id} is routine and cannot also be a routine candidate.`,
+        `Round unit ${unit.id} was folded and cannot also be a routine candidate.`,
       );
     }
   }

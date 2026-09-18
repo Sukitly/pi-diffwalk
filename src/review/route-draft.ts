@@ -12,6 +12,7 @@ import type {
   ReviewSnapshot,
   ReviewUnit,
   ReviewUnitCandidate,
+  ReviewUnitFold,
 } from "./types.ts";
 
 /**
@@ -24,6 +25,8 @@ import type {
 export interface ReviewRouteDraft {
   readonly snapshotId: string;
   readonly units: readonly ReviewUnitCandidate[];
+  /** Fold decision for each unit by position; undefined means walked. */
+  readonly folds: readonly (ReviewUnitFold | undefined)[];
   readonly skippedSpans: readonly ReviewSkipCandidate[];
 }
 
@@ -54,7 +57,7 @@ export interface ReviewRouteRemainingFile {
 }
 
 export function createReviewRouteDraft(snapshotId: string): ReviewRouteDraft {
-  return { snapshotId, units: [], skippedSpans: [] };
+  return { snapshotId, units: [], folds: [], skippedSpans: [] };
 }
 
 export function appendReviewRouteUnit(
@@ -62,8 +65,13 @@ export function appendReviewRouteUnit(
   delta: ReviewDelta,
   draft: ReviewRouteDraft,
   unit: ReviewUnitCandidate,
+  fold?: ReviewUnitFold,
 ): ReviewRouteDraftProgress {
-  const next: ReviewRouteDraft = { ...draft, units: [...draft.units, unit] };
+  const next: ReviewRouteDraft = {
+    ...draft,
+    units: [...draft.units, unit],
+    folds: [...draft.folds, fold],
+  };
   const route = validateDraft(snapshot, delta, next, { stage: "draft" });
   const acceptedUnit = route.units.at(-1);
   if (acceptedUnit === undefined) {
@@ -72,10 +80,23 @@ export function appendReviewRouteUnit(
   return {
     draft: next,
     unitCount: next.units.length,
-    acceptedUnit,
+    acceptedUnit: fold === undefined ? acceptedUnit : { ...acceptedUnit, fold },
     coveredLineCount: coveredKeys(snapshot, route).size,
     remaining: remainingFiles(snapshot, delta, route),
   };
+}
+
+/** Records the fold decision for the most recently appended unit. */
+export function withLastUnitFold(
+  draft: ReviewRouteDraft,
+  fold: ReviewUnitFold | undefined,
+): ReviewRouteDraft {
+  if (draft.units.length === 0) {
+    throw new Error("Cannot fold a unit before one has been appended.");
+  }
+  const folds = [...draft.folds];
+  folds[draft.units.length - 1] = fold;
+  return { ...draft, folds };
 }
 
 /**
@@ -113,7 +134,14 @@ export function finishReviewRouteDraft(
   delta: ReviewDelta,
   draft: ReviewRouteDraft,
 ): ReviewRoute {
-  return validateDraft(snapshot, delta, draft, {});
+  const route = validateDraft(snapshot, delta, draft, {});
+  return {
+    ...route,
+    units: route.units.map((unit, index) => {
+      const fold = draft.folds[index];
+      return fold === undefined ? unit : { ...unit, fold };
+    }),
+  };
 }
 
 function validateDraft(

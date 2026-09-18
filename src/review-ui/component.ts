@@ -84,7 +84,7 @@ import {
 import {
   foldedFooterText,
   renderExplanationLines,
-  renderFoldedRoutineUnit,
+  renderFoldedUnit,
   renderTransientFeedback,
   renderWalkthroughPreview,
   walkthroughFooterText,
@@ -353,7 +353,7 @@ export class GuidedReviewComponent implements Component, Focusable {
         width,
       );
       const body = [
-        ...renderFoldedRoutineUnit(
+        ...renderFoldedUnit(
           unitView.unit,
           unitView.targets.length,
           this.theme,
@@ -713,7 +713,9 @@ export class GuidedReviewComponent implements Component, Focusable {
       case "explanation": {
         const unit = this.currentUnit()?.unit;
         if (unit === undefined) return "Review inventory";
-        if (unit.routine !== undefined) return `Routine: ${unit.title}`;
+        if (unit.fold !== undefined) {
+          return `${unit.fold.source === "agent" ? "Routine" : "Folded"}: ${unit.title}`;
+        }
         return this.isCurrentUnitRoutineCandidate()
           ? `${unit.title} (routine candidate)`
           : unit.title;
@@ -790,7 +792,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       if (this.isCurrentUnitFolded()) {
         this.setTransientFeedback(
           "warning",
-          "Expand the routine unit with o before commenting.",
+          "Expand the folded unit with o before commenting.",
         );
         return;
       }
@@ -1201,7 +1203,7 @@ export class GuidedReviewComponent implements Component, Focusable {
     const unit = this.currentUnit()?.unit;
     return (
       unit !== undefined &&
-      unit.routine !== undefined &&
+      unit.fold !== undefined &&
       !this.expandedUnitIds.has(unit.id)
     );
   }
@@ -1222,10 +1224,10 @@ export class GuidedReviewComponent implements Component, Focusable {
   private toggleCurrentUnitFold(): void {
     const unit = this.currentUnit()?.unit;
     if (unit === undefined) return;
-    if (unit.routine === undefined) {
+    if (unit.fold === undefined) {
       this.setTransientFeedback(
         "warning",
-        "This unit is not routine; there is nothing folded to expand.",
+        "This unit is not folded; there is nothing to expand.",
       );
       return;
     }
@@ -1248,10 +1250,10 @@ export class GuidedReviewComponent implements Component, Focusable {
   private toggleCurrentUnitRoutineCandidate(): void {
     const unit = this.currentUnit()?.unit;
     if (unit === undefined) return;
-    if (unit.routine !== undefined) {
+    if (unit.fold !== undefined) {
       this.setTransientFeedback(
         "warning",
-        "This unit is already routine. Expand it with o to disagree by commenting.",
+        "This unit is already folded. Expand it with o to disagree by commenting.",
       );
       return;
     }

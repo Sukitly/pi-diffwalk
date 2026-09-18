@@ -26,6 +26,7 @@ import {
   fileChangeId,
   makeSnapshot,
   span,
+  withAgentFolds,
 } from "../support/domain-fixtures.ts";
 
 const CREATED_AT = "2026-01-01T00:00:00.000Z";
@@ -375,29 +376,31 @@ function routineReviewFixture(): ReviewFixture {
   const base = makeReviewFixture();
   const snapshot = base.review.snapshot;
   const delta = base.review.delta;
-  const route = validateReviewRoute(snapshot, delta, {
-    snapshotId: snapshot.id,
-    units: [
-      {
-        title: "Entry",
-        whyHere: "The behavior starts here.",
-        context: "entry -> contract",
-        changeSummary: "Changes the entry behavior.",
-        reviewFocus: [{ question: "Is the entry behavior correct?" }],
-        spans: [span("src/entry.ts", { new: [2, 2] })],
-      },
-      {
-        title: "Contract",
-        whyHere: "The entry depends on this contract.",
-        context: "entry -> contract",
-        changeSummary: "Changes the contract.",
-        reviewFocus: [{ question: "Is the contract compatible?" }],
-        spans: [span("src/contract.ts", { new: [2, 2] })],
-        routine: { reference: "src/other.ts", reason: "Mirrors other." },
-      },
-    ],
-    skippedSpans: [],
-  });
+  const route = withAgentFolds(
+    validateReviewRoute(snapshot, delta, {
+      snapshotId: snapshot.id,
+      units: [
+        {
+          title: "Entry",
+          whyHere: "The behavior starts here.",
+          context: "entry -> contract",
+          changeSummary: "Changes the entry behavior.",
+          reviewFocus: [{ question: "Is the entry behavior correct?" }],
+          spans: [span("src/entry.ts", { new: [2, 2] })],
+        },
+        {
+          title: "Contract",
+          whyHere: "The entry depends on this contract.",
+          context: "entry -> contract",
+          changeSummary: "Changes the contract.",
+          reviewFocus: [{ question: "Is the contract compatible?" }],
+          spans: [span("src/contract.ts", { new: [2, 2] })],
+          routine: { reference: "src/other.ts", reason: "Mirrors other." },
+        },
+      ],
+      skippedSpans: [],
+    }),
+  );
   return {
     ...base,
     route,
@@ -523,6 +526,7 @@ test("routine candidate toggles on walked units and lands in the round", () => {
       id: routine.id,
       title: "Contract",
       routine: true,
+      fold: { source: "agent", reasons: ["Mirrors other."] },
       outcome: "glanced",
       routineCandidate: false,
       commented: false,

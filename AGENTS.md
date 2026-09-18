@@ -30,8 +30,8 @@ Evaluate every product and implementation decision against that purpose. Do not 
 | Directory | Contents |
 |---|---|
 | `src/git/` | Git invocation and revision resolution (`runner.ts`), pure patch parsing (`patch.ts`), frozen file reconstruction (`content.ts`), snapshot capture and drift checks (`snapshot.ts`), path facts for exclusion from `check-ignore` and `check-attr` (`exclusion.ts`) |
-| `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation, incremental route assembly (`route-draft.ts`), mechanical exclusion (`exclusion.ts`) |
-| `src/extension/` | pi integration: `DiffWalkSession` (`session.ts`) owns the pending review, series, and thread batches and runs every workflow; `command.ts` and `tools.ts` parse input and format output; `prompts.ts` and `model-payloads.ts` hold text sent to the model; `tui-messages.ts` renders messages and tool results; `rules.ts` loads rules files; `exclusions.ts` locates exclude files and applies the trust rules to exclusion sources; `routine.ts` parses and checks routine references |
+| `src/review/` | Domain model and pure logic: types, delta, moves, spans, coverage, comments, threads, series, persistence, route validation, incremental route assembly (`route-draft.ts`), mechanical exclusion (`exclusion.ts`), the fold policy and unit text (`fold.ts`) |
+| `src/extension/` | pi integration: `DiffWalkSession` (`session.ts`) owns the pending review, series, and thread batches and runs every workflow; `command.ts` and `tools.ts` parse input and format output; `prompts.ts` and `model-payloads.ts` hold text sent to the model; `tui-messages.ts` renders messages and tool results; `rules.ts` loads rules files; `exclusions.ts` locates exclude files and applies the trust rules to exclusion sources; `routine.ts` parses and checks routine references; `fold.ts` reads the fold setting and applies the fold policy to each accepted unit; `typesafe.ts` is the HTTP client for the decision model |
 | `src/ui/` | Rendering helpers shared by both UIs: theme, text escaping and wrapping, layout, path display, diff lines |
 | `src/review-ui/` | Guided walkthrough: `component.ts` holds the screen state machine; view model, diff view, viewport, and per-screen rendering are separate modules |
 | `src/thread-ui/` | Comment thread component and its rendering |
@@ -89,6 +89,7 @@ Keep coverage for these behavior categories; the existing test files are the sou
 - exact move detection: relocation across files, uniform reindentation, ambiguity from a third occurrence, size thresholds, and same-hunk suppression
 - mechanical exclusion: each whitespace-only rule branch, path facts from a real Git repository including negation and quoted paths, exclusion precedence against unresolved comments and carried-forward lines, rejection of routes that reference excluded lines, trust and self-change suppression of project-owned sources, and the `--no-exclude` override
 - routine units: validation of the size cap and unresolved-comment rule, reference parsing and existence checks including paths outside the repository, glanced versus reviewed outcomes, the routine candidate toggle, round unit records and their persistence including rounds saved without them, and the folded walkthrough with `o`, `r`, and `n`
+- folding with a decision model: every blocker in the fold policy, the uncertain-choice rule, unit text rendering with bounded context, the HTTP client against a fake fetch including timeout and malformed answers, the settings and key resolution, and the session path where a judge folds or walks each unit, a failing judge degrades once, and a misconfiguration warns
 - the pinned model-visible prompt surface matching its golden fixture, and a kickoff prompt that does not grow with the amount of changed source text
 - comment anchors on added and removed lines, rejection of context lines, and snapshot drift detection
 - pinned identifier hashes in `test/review/ids.test.ts`: series, round, and unit ids are persisted across pi sessions, so a formula change must fail a test rather than orphan stored reviews
@@ -101,7 +102,7 @@ Before considering the TUI complete, run an interactive smoke test through pi in
 - Extensions run with the user's full permissions. Minimize the command surface.
 - Treat the base revision and repository contents as untrusted input.
 - Pass arguments directly to Git. Never evaluate repository content as shell code.
-- Do not send repository contents to any model other than the model already selected by the user unless the user explicitly opts in.
+- Do not send repository contents to any model other than the model already selected by the user unless the user explicitly opts in. Folding with a decision model is the one opt-in: it is off unless `settings.json` names it, and only the unit text built by `renderUnitText` and the referenced lines are sent.
 - Do not start background processes, watchers, or servers for the first version.
 - Do not write temporary review data inside the target repository.
 - Do not log source code, comments, credentials, or full model prompts by default.

@@ -18,6 +18,7 @@ import {
   exclusionPath,
   type PathExclusionFacts,
 } from "../review/exclusion.ts";
+import { foldFromRoutineClaim } from "../review/fold.ts";
 import {
   attachReviewRoute,
   createInProgressReview,
@@ -37,6 +38,7 @@ import {
   type ReviewRouteDraft,
   type ReviewRouteDraftProgress,
   type ReviewRouteSkipProgress,
+  withLastUnitFold,
 } from "../review/route-draft.ts";
 import { createReviewSeries } from "../review/series.ts";
 import {
@@ -63,7 +65,9 @@ import type {
   ReviewSnapshot,
   ReviewThreadBatch,
   ReviewThreadBatchId,
+  ReviewUnit,
   ReviewUnitCandidate,
+  ReviewUnitFold,
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import { openGuidedReview } from "../review-ui/index.ts";
@@ -74,6 +78,15 @@ import {
   locateGlobalDiffWalkExcludeFile,
   locateProjectDiffWalkExcludeFile,
 } from "./exclusions.ts";
+import {
+  createUnitFeatureJudge,
+  type FoldConfiguration,
+  foldOf,
+  foldUnit,
+  readFoldConfiguration,
+  readReferenceText,
+  type UnitFeatureJudge,
+} from "./fold.ts";
 import { createPiGitRunner } from "./git-runner.ts";
 import {
   formatGuidedReviewResult,
@@ -119,6 +132,9 @@ export interface DiffWalkDependencies {
   readonly locateProjectDiffWalkExcludeFile: typeof locateProjectDiffWalkExcludeFile;
   readonly resolvePathExclusionFacts: typeof resolvePathExclusionFacts;
   readonly routineReferenceExists: typeof routineReferenceExists;
+  readonly readFoldConfiguration: typeof readFoldConfiguration;
+  readonly createUnitFeatureJudge: typeof createUnitFeatureJudge;
+  readonly readReferenceText: typeof readReferenceText;
   readonly openGuidedReview: typeof openGuidedReview;
   readonly openReviewThreads: typeof openReviewThreads;
 }
@@ -133,6 +149,9 @@ export const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   locateProjectDiffWalkExcludeFile,
   resolvePathExclusionFacts,
   routineReferenceExists,
+  readFoldConfiguration,
+  createUnitFeatureJudge,
+  readReferenceText,
   openGuidedReview,
   openReviewThreads,
 };
@@ -152,6 +171,10 @@ interface PendingReview {
   routeRules?: LoadedDiffWalkRules;
   /** Units accepted so far while the agent assembles the route one at a time. */
   routeDraft: ReviewRouteDraft;
+  /** The fold judge for this review, or undefined when folding is off or has failed. */
+  foldJudge?: UnitFeatureJudge;
+  /** Folding degraded during this review; reported once. */
+  foldDegraded: boolean;
 }
 
 /**
@@ -400,6 +423,7 @@ export class DiffWalkSession {
       return;
     }
     const routeRules = await this.captureRouteRules(ctx, snapshot);
+    const foldJudge = await this.captureFoldJudge(ctx);
     const review = createInProgressReview({
       series,
       snapshot,
@@ -412,6 +436,8 @@ export class DiffWalkSession {
       inProgress: false,
       ...(routeRules === undefined ? {} : { routeRules }),
       routeDraft: createReviewRouteDraft(snapshot.id),
+      ...(foldJudge === undefined ? {} : { foldJudge }),
+      foldDegraded: false,
     };
     this.pendingReview = pending;
     this.sendKickoffPrompt(pending);
@@ -537,6 +563,7 @@ export class DiffWalkSession {
    * the end, and only the unit being added has to be rewritten.
    */
   async addRouteUnit(
+    ctx: Pick<CommandContext, "ui">,
     unit: ReviewUnitCandidate,
   ): Promise<ReviewRouteDraftProgress> {
     const pending = this.requireRoutableReview();
@@ -552,8 +579,79 @@ export class DiffWalkSession {
       pending.review.snapshot.repositoryRoot,
       this.dependencies.routineReferenceExists,
     );
-    pending.routeDraft = progress.draft;
-    return progress;
+    const fold = await this.foldAcceptedUnit(
+      ctx,
+      pending,
+      progress.acceptedUnit,
+    );
+    pending.routeDraft = withLastUnitFold(progress.draft, fold);
+    return {
+      ...progress,
+      acceptedUnit:
+        fold === undefined
+          ? progress.acceptedUnit
+          : { ...progress.acceptedUnit, fold },
+      draft: pending.routeDraft,
+    };
+  }
+
+  /**
+   * With a judge, every unit is folded or walked on its surface features
+   * and the agent's routine claim only adds a reference to check. Without
+   * one, the claim folds the unit by itself. A judge that fails degrades
+   * to walking every remaining unit, reported once; the agent's claim does
+   * not take over mid-review, because the reviewer was told folding is off.
+   */
+  private async foldAcceptedUnit(
+    ctx: Pick<CommandContext, "ui">,
+    pending: PendingReview,
+    unit: ReviewUnit,
+  ): Promise<ReviewUnitFold | undefined> {
+    if (pending.foldDegraded) return undefined;
+    const judge = pending.foldJudge;
+    if (judge === undefined) return foldFromRoutineClaim(unit);
+    try {
+      const decision = await foldUnit({
+        snapshot: pending.review.snapshot,
+        delta: pending.review.delta,
+        unit,
+        judge,
+        readReference: this.dependencies.readReferenceText,
+      });
+      return foldOf(decision);
+    } catch (error: unknown) {
+      pending.foldJudge = undefined;
+      pending.foldDegraded = true;
+      ctx.ui.notify(
+        `Folding is unavailable for this review: ${errorMessage(error)} Every remaining unit will be walked.`,
+        "warning",
+      );
+      return undefined;
+    }
+  }
+
+  private async captureFoldJudge(
+    ctx: CommandContext,
+  ): Promise<UnitFeatureJudge | undefined> {
+    let configuration: FoldConfiguration;
+    try {
+      configuration = await this.dependencies.readFoldConfiguration();
+    } catch (error: unknown) {
+      ctx.ui.notify(
+        `Cannot read the DiffWalk fold setting: ${errorMessage(error)} Folding is off for this review.`,
+        "warning",
+      );
+      return undefined;
+    }
+    if (configuration.status === "disabled") return undefined;
+    if (configuration.status === "misconfigured") {
+      ctx.ui.notify(
+        `${configuration.reason} Folding is off for this review.`,
+        "warning",
+      );
+      return undefined;
+    }
+    return this.dependencies.createUnitFeatureJudge(configuration);
   }
 
   /** Records one skipped region. Checked on arrival, like a unit. */

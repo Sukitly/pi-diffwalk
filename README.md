@@ -74,7 +74,7 @@ The npm examples require a published `latest` dist-tag. Preparing the release sc
 
    The default compares staged, unstaged, and untracked changes against `HEAD`. Use `/diffwalk main` to include your branch changes relative to local `main`, or `/diffwalk origin/main` after fetching that remote ref yourself. The base is a direct comparison, not an automatic merge-base calculation. Changed lines that match a mechanical exclusion rule are left out of the route; `/diffwalk --no-exclude` routes them too. See [Mechanical Exclusion](#mechanical-exclusion).
 
-3. Read the agent-planned walkthrough. Use `j`/`k` to select a line, `c` to comment, and `n` to mark a unit reviewed and continue. A unit the agent claims is routine appears folded with its claim; press `o` to expand it or `n` to accept the fold. Press `?` for controls.
+3. Read the agent-planned walkthrough. Use `j`/`k` to select a line, `c` to comment, and `n` to mark a unit reviewed and continue. A unit judged routine appears folded with the reasons; press `o` to expand it or `n` to accept the fold. Press `?` for controls.
 4. On the submission page, choose **Discuss first** or **Apply change requests**. Review the agent's replies and resolve answered threads when satisfied.
 
 Use `/diffwalk --threads` to reopen comment conversations. Run `/diffwalk` again after changes to review the remaining work. An empty comparison starts no walkthrough.
@@ -139,9 +139,9 @@ Walkthrough:
 | `1`-`9` | Start a count prefix that repeats the next movement, for example `5j` |
 | `Ctrl+d`, `Ctrl+u` | Move by half a viewport |
 | `PageUp`, `PageDown`, `Ctrl+f`, `Ctrl+b` | Move by a viewport |
-| `n` | Mark the current review unit as reviewed and continue; the last unit opens the submission page. Accepting a folded routine unit records it as glanced |
-| `o` | Expand or fold the current routine unit. Comments require the unit to be expanded |
-| `r` | Mark a walked unit as one that could have been routine, or clear that mark |
+| `n` | Mark the current review unit as reviewed and continue; the last unit opens the submission page. Accepting a folded unit records it as glanced |
+| `o` | Expand or fold the current folded unit. Comments require the unit to be expanded |
+| `r` | Mark a walked unit as one that could have been folded, or clear that mark |
 | `p`, `h`, `Left` | Move to the previous review unit |
 | `l`, `Right` | Move to the next review unit |
 | `c` | Add or edit a comment on the selected line |
@@ -204,22 +204,34 @@ Exclusion hides code, so every project-owned source follows the same trust rule 
 
 Excluded lines are visible in the inventory (`i`) with the rule that removed them, and appear as unselectable gaps inside a unit's span. They cannot be commented on during that review. To review them, run `/diffwalk --no-exclude`. Exclusion is recomputed on every round from the current snapshot; a line whose rule stops matching returns to review as a new line.
 
-## Routine Units
+## Folded Units
 
-Some units repeat a pattern the reviewer already trusts: a third route registration shaped like the first two, a test fixture mirroring its neighbors. The agent may mark such a unit `routine`, naming the existing code it mirrors as `reference` (a repository path, optionally with `:start-end` line numbers) and stating in `reason` what makes the unit a repetition.
+Not every unit deserves the reviewer's full attention. A third route registration shaped like the first two, a test fixture mirroring its neighbors, a renamed constant: reading these costs attention and returns nothing. DiffWalk folds such units. A folded unit keeps its place in the route and shows its change summary, why it was folded, and how many lines are folded, but no diff. `o` expands it into the ordinary unit view, where lines can be selected and commented; `o` again folds it. `n` on a folded unit accepts the fold and records the unit as glanced; `n` on an expanded unit records it as reviewed. Lines of a glanced unit count as reviewed and carry forward in later rounds. `r` on a walked unit records the reviewer's opinion that it could have been folded.
 
-DiffWalk accepts the claim only when the reference names a file that exists in the repository, the unit covers at most 40 changed lines, and no line in it carries an unresolved comment. Routineness is a claim about shape, never about safety; the kickoff prompt tells the agent not to mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine.
+Who decides what folds depends on configuration.
 
-In the walkthrough a routine unit is folded. The reviewer sees the change summary, the claim, the reference, and how many lines are folded, but no diff. `o` expands it into the ordinary unit view, where lines can be selected and commented; `o` again folds it. `n` on a folded unit accepts the claim and records the unit as glanced; `n` on an expanded unit records it as reviewed. Lines of a glanced unit count as reviewed and carry forward in later rounds. `r` on a walked unit records the reviewer's opinion that it could have been routine.
+### By the agent's claim
 
-Each completed round keeps a per-unit record: whether the agent claimed routine, whether the reviewer glanced, expanded, or walked it, whether the reviewer marked it as a routine candidate, and whether it received comments. DiffWalk does not act on these records yet; they exist so that routine proposals can be tuned against real reviews.
+The agent may mark a unit `routine`, naming the existing code it mirrors as `reference` (a repository path, optionally with `:start-end` line numbers) and stating in `reason` what makes the unit a repetition. DiffWalk accepts the claim only when the reference names a file that exists in the repository, the unit covers at most 40 changed lines, and no line in it carries an unresolved comment. Without a decision model configured, an accepted claim folds the unit and the card shows the agent's reason and reference.
+
+### By a decision model
+
+With `"diffwalk": { "fold": "typesafe" }` in pi's `settings.json` and `TYPESAFE_API_KEY` in the environment, every unit is judged as it is added. DiffWalk sends the unit's changed lines with three lines of context, and the referenced lines when the agent named a reference, to [TypeSafe](https://typesafe.ai) and asks for surface features: whether the lines change runtime behavior, whether they add control flow, which boundary they touch (none, public API, persisted format, authorization, money, external process), and what kind of change they are. When the agent named a reference, it also asks whether the unit mirrors it.
+
+The fold policy lives in DiffWalk, not in the model. A unit folds only when behavior change and new control flow are both unlikely, the boundary is none, the kind is test, config, docs, refactor, or generated, the unit has at most 40 changed lines, no line carries an unresolved comment, and any named reference is mirrored. An uncertain answer is read as the unsafe one, so the model never folds by default. The card shows the reasons with the model's probabilities. The agent's routine claim no longer folds anything on its own; it adds the reference check and the Mirrors line.
+
+Folding is opt-in because it sends repository content to a second vendor. Nothing beyond the unit text and the referenced lines leaves the machine, and nothing is sent when the setting is absent. A missing key, an unknown setting value, a network failure, a timeout, or an unusable answer turns folding off for the rest of the review with one warning; every remaining unit is then walked, and the agent's claims do not take over.
+
+### What is recorded
+
+Each completed round keeps a per-unit record: whether the agent claimed routine, the fold decision with the features the model reported, whether the reviewer glanced, expanded, or walked the unit, whether the reviewer marked it as a fold candidate, and whether it received comments. DiffWalk does not act on these records yet; they exist so that the thresholds can be tuned against real reviews.
 
 ## Guarantees
 
 - Git output is the source of truth for every displayed change. The model never generates or rewrites the patch.
 - The snapshot is immutable for the duration of a review.
-- Every changed line is covered by exactly one review unit, explicitly skipped with a visible reason, or excluded by a mechanical rule that the inventory names. A line carrying an unresolved comment cannot be skipped, excluded, or placed in a routine unit.
-- A routine claim never removes code from the route. A folded unit keeps its position, shows its claim and reference, and expands with one key.
+- Every changed line is covered by exactly one review unit, explicitly skipped with a visible reason, or excluded by a mechanical rule that the inventory names. A line carrying an unresolved comment cannot be skipped, excluded, or folded.
+- A fold never removes code from the route. A folded unit keeps its position, shows why it was folded, and expands with one key.
 - A unit is accepted or rejected on its own. A rejected unit never invalidates the units already accepted, and the walkthrough opens only after the completed route passes the full coverage check.
 - Worktree drift is detected before comments are submitted. Comments and agent responses keep stable snapshot anchors even if the worktree changes later.
 - Agent responses cannot resolve comments. Resolution is an explicit reviewer action.
@@ -239,8 +251,9 @@ A paused review does not lock the repository. If the worktree changes while a re
 - Detected code moves are reported to the agent for route planning but are not yet marked in the walkthrough screen.
 - There is no GitHub pull request integration; DiffWalk reviews local Git state only.
 - Mechanical exclusion is all or nothing per review. Excluded lines cannot be pulled back into the walkthrough one at a time or commented on; `/diffwalk --no-exclude` is the only override.
-- A routine reference is checked for an existing file only. Line numbers in the reference are shown to the reviewer and not verified, and the referenced code is not compared with the unit.
-- Per-unit round outcomes are recorded and persisted but not yet surfaced or used.
+- A routine reference is checked for an existing file only. Line numbers in the reference are shown to the reviewer and not verified. Without a decision model the referenced code is not compared with the unit.
+- Fold thresholds are initial values, not calibrated ones. Per-unit round outcomes are recorded and persisted but not yet surfaced or used.
+- Folding with a decision model is judged on the unit's diff text alone. It sees no callers, no tests, and no history, so it can only tell what a change looks like, never whether it is correct.
 
 ## Development
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createHarness,
+  makeModelFoldFixture,
   makeRoutineFixture,
   press,
   renderText,
@@ -32,7 +33,7 @@ test("folds a routine unit: claim and reference shown, diff hidden, comments blo
   press(harness.component, "c");
   assert.match(
     renderText(harness),
-    /Expand the routine unit with o before commenting/,
+    /Expand the folded unit with o before commenting/,
   );
   press(harness.component, "j", "G", "d");
   assert.doesNotMatch(renderText(harness), /userHandler/);
@@ -101,11 +102,11 @@ test("r marks a walked unit as a routine candidate and refuses on routine units"
   assert.equal(progressOf(harness, 0)?.routineCandidate, undefined);
 
   press(harness.component, "l", "r");
-  assert.match(renderText(harness), /This unit is already routine/);
+  assert.match(renderText(harness), /This unit is already folded/);
   press(harness.component, "h", "o");
   assert.match(
     renderText(harness),
-    /This unit is not routine; there is nothing folded/,
+    /This unit is not folded; there is nothing to expand/,
   );
 });
 
@@ -113,6 +114,26 @@ test("help lists the fold and candidate keys", () => {
   const harness = createHarness(120, 40, makeRoutineFixture());
   press(harness.component, "?");
   const output = renderText(harness);
-  assert.match(output, /Expand or fold a routine unit/);
-  assert.match(output, /could have been routine/);
+  assert.match(output, /Expand or fold a folded unit/);
+  assert.match(output, /could have been folded/);
+});
+
+test("a model fold shows its reasons under Folded and no Mirrors line", () => {
+  const harness = createHarness(120, 30, makeModelFoldFixture());
+  press(harness.component, "l");
+  const output = renderText(harness);
+
+  assert.match(output, /Folded: User route registration/);
+  assert.match(
+    output,
+    /Folded: No behavior change \(94%\), no new control flow \(97%\)\./,
+  );
+  assert.match(output, /Config change touching no boundary\./);
+  assert.doesNotMatch(output, /Mirrors:/);
+  assert.doesNotMatch(output, /userHandler/);
+
+  press(harness.component, "e");
+  const details = renderText(harness);
+  assert.match(details, /Folded/);
+  assert.doesNotMatch(details, /Agent reference/);
 });

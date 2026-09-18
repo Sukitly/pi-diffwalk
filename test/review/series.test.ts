@@ -461,7 +461,7 @@ test("requires excluded requirements and excluded records to agree", () => {
   );
 });
 
-test("validates round unit outcomes against their routine flag", () => {
+test("validates round unit outcomes against their fold", () => {
   const base = series();
   const snapshot = snapshotOf("snapshot-1");
   const delta = computeReviewDelta(snapshot);
@@ -485,19 +485,36 @@ test("validates round unit outcomes against their routine flag", () => {
     unit({
       id: "review-unit:2" as ReviewRoundUnit["id"],
       routine: true,
+      fold: { source: "agent", reasons: ["Same shape."] },
       outcome: "glanced",
     }),
+    unit({
+      id: "review-unit:3" as ReviewRoundUnit["id"],
+      fold: {
+        source: "typesafe",
+        reasons: ["No behavior change."],
+        features: {
+          changesBehavior: 0.1,
+          newControlFlow: 0.05,
+          touchesBoundary: { choice: "none", confidence: 0.9 },
+          kind: { choice: "refactor", confidence: 0.8 },
+        },
+      },
+      outcome: "expanded",
+    }),
   ]);
-  assert.equal(round.units.length, 2);
-  assert.equal(appendReviewRound(base, round).rounds[0]?.units.length, 2);
+  assert.equal(round.units.length, 3);
+  assert.equal(appendReviewRound(base, round).rounds[0]?.units.length, 3);
 
+  const agentFold = { source: "agent" as const, reasons: ["Same shape."] };
   const cases: readonly [Partial<ReviewRoundUnit>[], RegExp][] = [
     [[{}, {}], /more than once/],
     [[{ title: " " }], /requires a title/],
-    [[{ outcome: "glanced" }], /not routine but has outcome/],
-    [[{ routine: true }], /must be glanced or expanded/],
+    [[{ outcome: "glanced" }], /was not folded but has outcome/],
+    [[{ routine: true, outcome: "glanced" }], /was not folded but has outcome/],
+    [[{ fold: agentFold }], /must be glanced or expanded/],
     [
-      [{ routine: true, outcome: "expanded", routineCandidate: true }],
+      [{ fold: agentFold, outcome: "expanded", routineCandidate: true }],
       /cannot also be a routine candidate/,
     ],
   ];

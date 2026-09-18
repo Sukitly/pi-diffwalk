@@ -126,7 +126,7 @@ export function attachReviewRoute(
 }
 
 /**
- * Completes a unit. A routine unit completed without ever being expanded is
+ * Completes a unit. A folded unit completed without ever being expanded is
  * `glanced`; everything else is `reviewed`. Completing again is a no-op, so
  * pressing through an already complete unit never rewrites its outcome.
  */
@@ -145,7 +145,7 @@ export function markReviewUnitReviewed(
     (candidate) => candidate.id === reviewUnitId,
   );
   const disposition =
-    unit?.routine !== undefined && progress.expanded === undefined
+    unit?.fold !== undefined && progress.expanded === undefined
       ? "glanced"
       : "reviewed";
   return nextVersion(review, mutation.timestamp, {
@@ -155,7 +155,7 @@ export function markReviewUnitReviewed(
   });
 }
 
-/** Records that the reviewer opened a routine unit's diff. Idempotent. */
+/** Records that the reviewer opened a folded unit's diff. Idempotent. */
 export function markReviewUnitExpanded(
   review: InProgressReview,
   reviewUnitId: ReviewUnitId,
@@ -171,7 +171,7 @@ export function markReviewUnitExpanded(
   });
 }
 
-/** Toggles the reviewer's claim that a walked unit could have been routine. */
+/** Toggles the reviewer's claim that a walked unit could have been folded. */
 export function toggleReviewUnitRoutineCandidate(
   review: InProgressReview,
   reviewUnitId: ReviewUnitId,
@@ -218,15 +218,16 @@ export function buildReviewRoundUnits(
     const progress = review.unitProgress.find(
       (entry) => entry.reviewUnitId === unit.id,
     );
-    const routine = unit.routine !== undefined;
+    const folded = unit.fold !== undefined;
     return {
       id: unit.id,
       title: unit.title,
-      routine,
+      routine: unit.routine !== undefined,
+      ...(unit.fold === undefined ? {} : { fold: unit.fold }),
       outcome:
         progress?.disposition === "glanced"
           ? "glanced"
-          : routine
+          : folded
             ? "expanded"
             : "reviewed",
       routineCandidate: progress?.routineCandidate === true,

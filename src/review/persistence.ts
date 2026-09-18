@@ -267,11 +267,70 @@ const ReviewCoverageSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const Probability = Type.Number({ minimum: 0, maximum: 1 });
+
+const ReviewUnitFeaturesSchema = Type.Object(
+  {
+    changesBehavior: Probability,
+    newControlFlow: Probability,
+    touchesBoundary: Type.Object(
+      {
+        choice: Type.Union([
+          Type.Literal("none"),
+          Type.Literal("public-api"),
+          Type.Literal("persisted-format"),
+          Type.Literal("authorization"),
+          Type.Literal("money"),
+          Type.Literal("external-process"),
+        ]),
+        confidence: Probability,
+      },
+      { additionalProperties: false },
+    ),
+    kind: Type.Object(
+      {
+        choice: Type.Union([
+          Type.Literal("behavior"),
+          Type.Literal("interface"),
+          Type.Literal("test"),
+          Type.Literal("config"),
+          Type.Literal("docs"),
+          Type.Literal("refactor"),
+          Type.Literal("generated"),
+        ]),
+        confidence: Probability,
+      },
+      { additionalProperties: false },
+    ),
+    mirrorsReference: Type.Optional(Probability),
+  },
+  { additionalProperties: false },
+);
+
+const ReviewUnitFoldSchema = Type.Union([
+  Type.Object(
+    {
+      source: Type.Literal("agent"),
+      reasons: Type.Array(Type.String()),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      source: Type.Literal("typesafe"),
+      reasons: Type.Array(Type.String()),
+      features: ReviewUnitFeaturesSchema,
+    },
+    { additionalProperties: false },
+  ),
+]);
+
 const ReviewRoundUnitSchema = Type.Object(
   {
     id: Type.String(),
     title: Type.String(),
     routine: Type.Boolean(),
+    fold: Type.Optional(ReviewUnitFoldSchema),
     outcome: Type.Union([
       Type.Literal("reviewed"),
       Type.Literal("glanced"),

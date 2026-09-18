@@ -176,15 +176,17 @@ export interface ReviewRound {
 }
 
 /**
- * `glanced`: a routine unit accepted without expanding it. `expanded`: a
- * routine unit the reviewer opened before completing. `reviewed`: a walked
+ * `glanced`: a folded unit accepted without expanding it. `expanded`: a
+ * folded unit the reviewer opened before completing. `reviewed`: a walked
  * unit. `routineCandidate` is the reviewer saying a walked unit could have
- * been routine.
+ * been folded. `routine` records the agent's claim; `fold` records what the
+ * walkthrough did with the unit and why.
  */
 export interface ReviewRoundUnit {
   readonly id: ReviewUnitId;
   readonly title: string;
   readonly routine: boolean;
+  readonly fold?: ReviewUnitFold;
   readonly outcome: "reviewed" | "glanced" | "expanded";
   readonly routineCandidate: boolean;
   readonly commented: boolean;
@@ -518,6 +520,56 @@ export interface ReviewUnitRoutine {
   readonly reason: string;
 }
 
+/**
+ * Why a unit is folded in the walkthrough. `agent`: the agent's routine
+ * claim was taken at its word. `typesafe`: a decision model judged the
+ * unit's surface features and the fold policy accepted them; `features`
+ * keeps what it saw so folds can be tuned against reviewer outcomes.
+ */
+export type ReviewUnitFold =
+  | {
+      readonly source: "agent";
+      readonly reasons: readonly string[];
+    }
+  | {
+      readonly source: "typesafe";
+      readonly reasons: readonly string[];
+      readonly features: ReviewUnitFeatures;
+    };
+
+/** Surface features of one unit as a decision model reports them. */
+export interface ReviewUnitFeatures {
+  readonly changesBehavior: number;
+  readonly newControlFlow: number;
+  readonly touchesBoundary: {
+    readonly choice: ReviewUnitBoundary;
+    readonly confidence: number;
+  };
+  readonly kind: {
+    readonly choice: ReviewUnitKind;
+    readonly confidence: number;
+  };
+  /** Present only when the agent named a reference. */
+  readonly mirrorsReference?: number;
+}
+
+export type ReviewUnitBoundary =
+  | "none"
+  | "public-api"
+  | "persisted-format"
+  | "authorization"
+  | "money"
+  | "external-process";
+
+export type ReviewUnitKind =
+  | "behavior"
+  | "interface"
+  | "test"
+  | "config"
+  | "docs"
+  | "refactor"
+  | "generated";
+
 export interface ReviewUnit {
   readonly id: ReviewUnitId;
   readonly title: string;
@@ -527,6 +579,7 @@ export interface ReviewUnit {
   readonly reviewFocus: readonly ReviewCheck[];
   readonly spans: readonly ResolvedSpan[];
   readonly routine?: ReviewUnitRoutine;
+  readonly fold?: ReviewUnitFold;
 }
 
 export interface ReviewRouteSkip {

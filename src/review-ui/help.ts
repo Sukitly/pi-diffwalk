@@ -30,11 +30,11 @@ const HELP_SECTIONS: readonly HelpSection[] = [
       {
         keys: "o",
         action:
-          "Expand or fold a routine unit. A fold accepted with n counts as glanced.",
+          "Expand or fold a folded unit. A fold accepted with n counts as glanced.",
       },
       {
         keys: "r",
-        action: "Mark a walked unit as one that could have been routine.",
+        action: "Mark a walked unit as one that could have been folded.",
       },
       { keys: "e", action: "Open the complete unit details." },
       { keys: "i", action: "Open the frozen snapshot inventory." },

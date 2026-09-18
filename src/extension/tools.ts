@@ -53,8 +53,8 @@ export function registerAddUnitTool(
     promptSnippet: ADD_UNIT_TOOL_PROMPT_SNIPPET,
     parameters: ReviewUnitCandidateToolSchema,
     executionMode: "sequential",
-    async execute(_toolCallId, unit) {
-      const progress = await session.addRouteUnit(unit);
+    async execute(_toolCallId, unit, _signal, _onUpdate, ctx) {
+      const progress = await session.addRouteUnit(ctx, unit);
       return {
         content: [{ type: "text", text: formatRouteUnitProgress(progress) }],
         details: progress,

@@ -87,36 +87,44 @@ export function renderWalkthroughPreview(
 }
 
 /**
- * A routine unit that the reviewer has not expanded. The claim, its
- * reference, and the size of what is folded are the whole display: enough to
- * decide whether to trust the fold, nothing that invites skimming code.
+ * A folded unit that the reviewer has not expanded. The reasons for the
+ * fold, the reference if one was named, and the size of what is folded are
+ * the whole display: enough to decide whether to trust the fold, nothing
+ * that invites skimming code.
  */
-export function renderFoldedRoutineUnit(
+export function renderFoldedUnit(
   unit: ReviewUnit,
   changedLineCount: number,
   theme: ReviewUiTheme,
   width: number,
 ): readonly string[] {
-  const routine = unit.routine;
-  if (routine === undefined) return [];
+  const fold = unit.fold;
+  if (fold === undefined) return [];
   const rows: string[] = [""];
   rows.push(
     ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
     "",
   );
-  rows.push(
-    ...wrapWithPrefix(
-      theme.fg("accent", "Routine: "),
-      theme.fg("text", safeText(routine.reason)),
-      width,
-    ),
-    ...wrapWithPrefix(
-      theme.fg("accent", "Mirrors: "),
-      theme.fg("text", safeText(routine.reference)),
-      width,
-    ),
-    "",
-  );
+  const label = fold.source === "agent" ? "Routine: " : "Folded: ";
+  for (const [index, reason] of fold.reasons.entries()) {
+    rows.push(
+      ...wrapWithPrefix(
+        theme.fg("accent", index === 0 ? label : " ".repeat(label.length)),
+        theme.fg("text", safeText(reason)),
+        width,
+      ),
+    );
+  }
+  if (unit.routine !== undefined) {
+    rows.push(
+      ...wrapWithPrefix(
+        theme.fg("accent", "Mirrors: "),
+        theme.fg("text", safeText(unit.routine.reference)),
+        width,
+      ),
+    );
+  }
+  rows.push("");
   const noun = changedLineCount === 1 ? "line" : "lines";
   rows.push(
     ...wrapStyled(
@@ -136,10 +144,19 @@ export function renderExplanationLines(
   width: number,
 ): string[] {
   const lines: string[] = [];
+  if (unit.fold !== undefined) {
+    addSectionText(
+      lines,
+      unit.fold.source === "agent" ? "Routine claim" : "Folded",
+      unit.fold.reasons.join(" "),
+      theme,
+      width,
+    );
+  }
   if (unit.routine !== undefined) {
     addSectionText(
       lines,
-      "Routine claim",
+      "Agent reference",
       `${unit.routine.reason} Mirrors ${unit.routine.reference}.`,
       theme,
       width,

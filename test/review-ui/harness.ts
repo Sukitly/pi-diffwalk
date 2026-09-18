@@ -41,6 +41,7 @@ import {
   fileChangeId,
   makeSnapshot,
   span,
+  withAgentFolds,
 } from "../support/domain-fixtures.ts";
 
 export interface UiFixture {
@@ -978,6 +979,39 @@ export function makeRoutineFixture(): UiFixture {
     ],
     skippedSpans: [],
   };
-  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  const route = withAgentFolds(
+    validateReviewRoute(snapshot, delta, routeCandidate),
+  );
   return { snapshot, delta, routeCandidate, route };
+}
+
+/** One walked unit, then one folded by a decision model without any agent claim. */
+export function makeModelFoldFixture(): UiFixture {
+  const base = makeRoutineFixture();
+  const [walked, folded] = base.route.units;
+  assert.ok(walked && folded);
+  const { routine: _routine, ...withoutClaim } = folded;
+  const route: ReviewRoute = {
+    ...base.route,
+    units: [
+      walked,
+      {
+        ...withoutClaim,
+        fold: {
+          source: "typesafe",
+          reasons: [
+            "No behavior change (94%), no new control flow (97%).",
+            "Config change touching no boundary.",
+          ],
+          features: {
+            changesBehavior: 0.06,
+            newControlFlow: 0.03,
+            touchesBoundary: { choice: "none", confidence: 0.9 },
+            kind: { choice: "config", confidence: 0.8 },
+          },
+        },
+      },
+    ],
+  };
+  return { ...base, route };
 }

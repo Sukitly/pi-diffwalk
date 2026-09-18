@@ -8,6 +8,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.ts";
+import type {
+  FoldConfiguration,
+  UnitFeatureJudge,
+} from "../../src/extension/fold.ts";
 import {
   ADD_UNIT_TOOL_NAME,
   RESPOND_TOOL_NAME,
@@ -38,6 +42,7 @@ import type {
   GuidedReviewResult,
   ReviewComment,
   ReviewOpenToolSchema,
+  ReviewRoute,
   ReviewRouteCandidate,
   ReviewSkipCandidateToolSchema,
   ReviewSnapshot,
@@ -86,6 +91,12 @@ export interface HarnessBehavior {
   pathExclusionError?: Error;
   /** Paths that exist for routine references; undefined accepts every path. */
   existingReferencePaths?: readonly string[];
+  foldConfiguration: FoldConfiguration;
+  foldConfigurationError?: Error;
+  /** The judge handed out when folding is enabled. */
+  unitFeatureJudge?: UnitFeatureJudge;
+  /** Text returned for any routine reference; undefined means unreadable. */
+  referenceText?: string;
   snapshot: ReviewSnapshot;
 }
 
@@ -136,6 +147,8 @@ export interface Harness {
   readonly sentMessageMeta: readonly SentMessageMeta[];
   readonly registeredRenderers: readonly string[];
   readonly openedSnapshots: readonly string[];
+  /** The route each opened walkthrough received, in open order. */
+  readonly openedRoutes: readonly ReviewRoute[];
   readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
   readonly ruleLoadCalls: readonly RuleLoadCall[];
@@ -162,6 +175,7 @@ export function createHarness(
     globalExcludeFile: { status: "absent" },
     projectExcludeFile: { status: "absent" },
     pathExclusionFacts: { excludedPaths: new Map(), generatedPaths: new Set() },
+    foldConfiguration: { status: "disabled" },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -178,6 +192,7 @@ export function createHarness(
   const sentMessageMeta: SentMessageMeta[] = [];
   const registeredRenderers: string[] = [];
   const openedSnapshots: string[] = [];
+  const openedRoutes: ReviewRoute[] = [];
   const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
   const ruleLoadCalls: RuleLoadCall[] = [];
@@ -284,6 +299,20 @@ export function createHarness(
     async locateProjectDiffWalkExcludeFile() {
       return behavior.projectExcludeFile;
     },
+    async readFoldConfiguration() {
+      if (behavior.foldConfigurationError !== undefined) {
+        throw behavior.foldConfigurationError;
+      }
+      return behavior.foldConfiguration;
+    },
+    createUnitFeatureJudge() {
+      const judge = behavior.unitFeatureJudge;
+      assert.ok(judge, "Folding was enabled without a judge in the harness.");
+      return judge;
+    },
+    async readReferenceText() {
+      return behavior.referenceText;
+    },
     async routineReferenceExists(_repositoryRoot, path) {
       return (
         behavior.existingReferencePaths === undefined ||
@@ -333,6 +362,8 @@ export function createHarness(
     },
     async openGuidedReview(_ctx, input) {
       openedSnapshots.push(input.review.snapshot.id);
+      if (input.review.route !== undefined)
+        openedRoutes.push(input.review.route);
       let review = input.review;
       if (behavior.markProgressOnOpen) {
         const first = review.unitProgress[0];
@@ -444,6 +475,7 @@ export function createHarness(
     sentMessageMeta,
     registeredRenderers,
     openedSnapshots,
+    openedRoutes,
     openedThreadBatches,
     appendedEntries,
     ruleLoadCalls,
@@ -488,8 +520,15 @@ export function commandContext(
   } as unknown as ExtensionCommandContext;
 }
 
-export function toolContext(): ExtensionContext {
-  return { mode: "tui" } as ExtensionContext;
+export function toolContext(notifications: string[] = []): ExtensionContext {
+  return {
+    mode: "tui",
+    ui: {
+      notify: (message: string) => {
+        notifications.push(message);
+      },
+    },
+  } as unknown as ExtensionContext;
 }
 
 export function binaryChange(): FileChange {
