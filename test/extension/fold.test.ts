@@ -14,10 +14,14 @@ import { commandContext, createHarness, toolContext } from "./harness.ts";
 
 async function agentDirWith(
   settings: string | undefined,
+  auth?: string,
 ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
   const dir = await mkdtemp(join(tmpdir(), "pi-diffwalk-fold-"));
   if (settings !== undefined) {
     await writeFile(join(dir, "settings.json"), settings);
+  }
+  if (auth !== undefined) {
+    await writeFile(join(dir, "auth.json"), auth);
   }
   return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
 }
@@ -56,7 +60,10 @@ test("fold configuration reports an unknown value or a missing key", async (t) =
   const noKey = await readFoldConfiguration(enabled.dir, {});
   assert.equal(noKey.status, "misconfigured");
   if (noKey.status === "misconfigured") {
-    assert.match(noKey.reason, /TYPESAFE_API_KEY is not set/);
+    assert.match(
+      noKey.reason,
+      /auth\.json has no "typesafe" api_key credential and TYPESAFE_API_KEY is not set/,
+    );
   }
 
   assert.deepEqual(
@@ -65,6 +72,47 @@ test("fold configuration reports an unknown value or a missing key", async (t) =
       TYPESAFE_BASE_URL: "https://proxy.test",
     }),
     { status: "enabled", apiKey: "sk", baseURL: "https://proxy.test" },
+  );
+});
+
+test("the key comes from pi's auth.json first and the environment second", async (t) => {
+  const stored = await agentDirWith(
+    '{"diffwalk":{"fold":"typesafe"}}',
+    '{"typesafe":{"type":"api_key","key":"sk-stored"},"openai":{"type":"api_key","key":"sk-other"}}',
+  );
+  t.after(stored.cleanup);
+  assert.deepEqual(await readFoldConfiguration(stored.dir, {}), {
+    status: "enabled",
+    apiKey: "sk-stored",
+  });
+  assert.deepEqual(
+    await readFoldConfiguration(stored.dir, { TYPESAFE_API_KEY: "sk-env" }),
+    { status: "enabled", apiKey: "sk-stored" },
+  );
+
+  const wrongType = await agentDirWith(
+    '{"diffwalk":{"fold":"typesafe"}}',
+    '{"typesafe":{"type":"oauth","access":"a","refresh":"r","expires":1}}',
+  );
+  t.after(wrongType.cleanup);
+  assert.equal(
+    (await readFoldConfiguration(wrongType.dir, { TYPESAFE_API_KEY: "sk-env" }))
+      .status,
+    "enabled",
+  );
+  assert.equal(
+    (await readFoldConfiguration(wrongType.dir, {})).status,
+    "misconfigured",
+  );
+
+  const blankKey = await agentDirWith(
+    '{"diffwalk":{"fold":"typesafe"}}',
+    '{"typesafe":{"type":"api_key","key":"  "}}',
+  );
+  t.after(blankKey.cleanup);
+  assert.equal(
+    (await readFoldConfiguration(blankKey.dir, {})).status,
+    "misconfigured",
   );
 });
 

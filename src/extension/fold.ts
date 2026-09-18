@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  readStoredCredential,
+} from "@earendil-works/pi-coding-agent";
 import {
   decideFold,
   type FoldDecision,
@@ -25,11 +28,15 @@ import {
 /**
  * Folding with a decision model is opt-in, because it sends the changed
  * lines of every unit to a second vendor. The switch lives in pi's
- * settings.json under `diffwalk.fold`; the key lives in the environment.
+ * settings.json under `diffwalk.fold`. The key lives where pi keeps every
+ * other API key, auth.json under the provider id `typesafe`, with the
+ * environment variable as a fallback. Consent and credential stay separate:
+ * a stored key does not enable folding by itself.
  */
 
 export const FOLD_SETTING_KEY = "fold";
 export const FOLD_SETTING_VALUE = "typesafe";
+export const TYPESAFE_AUTH_PROVIDER_ID = "typesafe";
 
 export type FoldConfiguration =
   | { readonly status: "disabled" }
@@ -43,6 +50,27 @@ export type FoldConfiguration =
 export async function readFoldConfiguration(
   agentDir = getAgentDir(),
   env: NodeJS.ProcessEnv = process.env,
+): Promise<FoldConfiguration> {
+  return readFoldConfigurationFrom(agentDir, env, () =>
+    readStoredApiKey(agentDir),
+  );
+}
+
+/** The `typesafe` api-key credential from pi's auth.json, if any. */
+function readStoredApiKey(agentDir: string): string | undefined {
+  const credential = readStoredCredential(
+    TYPESAFE_AUTH_PROVIDER_ID,
+    join(agentDir, "auth.json"),
+  );
+  if (credential?.type !== "api_key") return undefined;
+  const key = credential.key;
+  return key === undefined || key.trim().length === 0 ? undefined : key;
+}
+
+export async function readFoldConfigurationFrom(
+  agentDir: string,
+  env: NodeJS.ProcessEnv,
+  storedApiKey: () => string | undefined,
 ): Promise<FoldConfiguration> {
   let raw: string;
   try {
@@ -71,11 +99,14 @@ export async function readFoldConfiguration(
       reason: `settings.json diffwalk.${FOLD_SETTING_KEY} is ${JSON.stringify(fold)}; the only supported value is ${JSON.stringify(FOLD_SETTING_VALUE)}.`,
     };
   }
-  const apiKey = env[TYPESAFE_API_KEY_ENV];
-  if (apiKey === undefined || apiKey.trim().length === 0) {
+  const envKey = env[TYPESAFE_API_KEY_ENV];
+  const apiKey =
+    storedApiKey() ??
+    (envKey === undefined || envKey.trim().length === 0 ? undefined : envKey);
+  if (apiKey === undefined) {
     return {
       status: "misconfigured",
-      reason: `settings.json enables diffwalk.${FOLD_SETTING_KEY} but ${TYPESAFE_API_KEY_ENV} is not set.`,
+      reason: `settings.json enables diffwalk.${FOLD_SETTING_KEY} but auth.json has no ${JSON.stringify(TYPESAFE_AUTH_PROVIDER_ID)} api_key credential and ${TYPESAFE_API_KEY_ENV} is not set.`,
     };
   }
   const baseURL = env.TYPESAFE_BASE_URL;

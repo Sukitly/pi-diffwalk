@@ -216,9 +216,25 @@ The agent may mark a unit `routine`, naming the existing code it mirrors as `ref
 
 ### By a decision model
 
-With `"diffwalk": { "fold": "typesafe" }` in pi's `settings.json` and `TYPESAFE_API_KEY` in the environment, every unit is judged as it is added. DiffWalk sends the unit's changed lines with three lines of context, and the referenced lines when the agent named a reference, to [TypeSafe](https://typesafe.ai) and asks for surface features: whether the lines change runtime behavior, whether they add control flow, which boundary they touch (none, public API, persisted format, authorization, money, external process), and what kind of change they are. When the agent named a reference, it also asks whether the unit mirrors it.
+With `"diffwalk": { "fold": "typesafe" }` in pi's `settings.json` and a TypeSafe API key available, every unit is judged as it is added. DiffWalk sends the unit's changed lines with three lines of context, and the referenced lines when the agent named a reference, to [TypeSafe](https://typesafe.ai) and asks for surface features: whether the lines change runtime behavior, whether they add control flow, which boundary they touch (none, public API, persisted format, authorization, money, external process), and what kind of change they are. When the agent named a reference, it also asks whether the unit mirrors it.
 
 The fold policy lives in DiffWalk, not in the model. A unit folds only when behavior change and new control flow are both unlikely, the boundary is none, the kind is test, config, docs, refactor, or generated, the unit has at most 40 changed lines, no line carries an unresolved comment, and any named reference is mirrored. An uncertain answer is read as the unsafe one, so the model never folds by default. The card shows the reasons with the model's probabilities. The agent's routine claim no longer folds anything on its own; it adds the reference check and the Mirrors line.
+
+The key lives where pi keeps every other API key: `~/.pi/agent/auth.json`, under the provider id `typesafe`. pi creates the file with owner-only permissions. Add the entry with pi stopped:
+
+```bash
+python3 - <<'EOF'
+import json, os
+path = os.path.expanduser("~/.pi/agent/auth.json")
+data = json.load(open(path)) if os.path.exists(path) else {}
+data["typesafe"] = {"type": "api_key", "key": input("TypeSafe API key: ").strip()}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f, indent=2)
+EOF
+```
+
+`TYPESAFE_API_KEY` in the environment is accepted as a fallback when `auth.json` has no `typesafe` entry. A stored key does not enable folding by itself; the `settings.json` entry is the consent.
 
 Folding is opt-in because it sends repository content to a second vendor. Nothing beyond the unit text and the referenced lines leaves the machine, and nothing is sent when the setting is absent. A missing key, an unknown setting value, a network failure, a timeout, or an unusable answer turns folding off for the rest of the review with one warning; every remaining unit is then walked, and the agent's claims do not take over.
 
