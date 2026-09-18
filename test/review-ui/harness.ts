@@ -999,10 +999,7 @@ export function makeModelFoldFixture(): UiFixture {
         ...withoutClaim,
         fold: {
           source: "typesafe",
-          reasons: [
-            "No behavior change (94%), no new control flow (97%).",
-            "Config change touching no boundary.",
-          ],
+          reasons: ["Config change, no boundary."],
           features: {
             changesBehavior: 0.06,
             newControlFlow: 0.03,
@@ -1011,6 +1008,37 @@ export function makeModelFoldFixture(): UiFixture {
           },
         },
       },
+    ],
+  };
+  return { ...base, route };
+}
+
+/** The walked unit of the routine fixture marked by a decision model as needing review. */
+export function makeAttentionFixture(): UiFixture {
+  const base = makeModelFoldFixture();
+  const [walked, folded] = base.route.units;
+  assert.ok(walked && folded);
+  const route: ReviewRoute = {
+    ...base.route,
+    units: [
+      {
+        ...walked,
+        attention: {
+          outcome: "attention",
+          source: "typesafe",
+          reasons: [
+            "touches authorization (88%)",
+            "behavior code changes runtime behavior (91%)",
+          ],
+          features: {
+            changesBehavior: 0.91,
+            newControlFlow: 0.4,
+            touchesBoundary: { choice: "authorization", confidence: 0.88 },
+            kind: { choice: "behavior", confidence: 0.9 },
+          },
+        },
+      },
+      folded,
     ],
   };
   return { ...base, route };

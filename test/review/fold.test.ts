@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import {
-  decideFold,
-  FOLD_MAX_CHANGED_LINES,
-  FOLD_THRESHOLDS,
+  ATTENTION_THRESHOLDS,
+  decideAttention,
   foldFromRoutineClaim,
+  gateReasons,
   renderUnitText,
   unitChangedLineCount,
 } from "../../src/review/fold.ts";
@@ -13,123 +13,150 @@ import { validateReviewRoute } from "../../src/review/route-validation.ts";
 import type { ReviewUnit, ReviewUnitFeatures } from "../../src/review/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 
-const foldable: ReviewUnitFeatures = {
+const quiet: ReviewUnitFeatures = {
   changesBehavior: 0.1,
   newControlFlow: 0.05,
   touchesBoundary: { choice: "none", confidence: 0.9 },
   kind: { choice: "refactor", confidence: 0.85 },
 };
 
-const gates = {
-  changedLineCount: 4,
-  hasUnresolvedComment: false,
-  hasReference: false,
-};
+const gates = { hasUnresolvedComment: false };
 
-test("folds when every feature is clear and reports reasons with percentages", () => {
-  const decision = decideFold(foldable, gates);
-  assert.equal(decision.fold, true);
-  if (!decision.fold) return;
-  assert.equal(decision.result.source, "typesafe");
-  assert.deepEqual(decision.result.reasons, [
-    "No behavior change (90%), no new control flow (95%).",
-    "Refactor change touching no boundary.",
-  ]);
+test("folds by default and says why in one or two sentences", () => {
+  const decision = decideAttention(quiet, gates);
+  assert.equal(decision.attention, false);
+  if (decision.attention) return;
+  assert.equal(decision.fold.source, "typesafe");
+  assert.deepEqual(decision.fold.reasons, ["Refactor change, no boundary."]);
   assert.equal(
-    (decision.result as { features: ReviewUnitFeatures }).features,
-    foldable,
+    (decision.fold as { features: ReviewUnitFeatures }).features,
+    quiet,
   );
 });
 
-test("each blocker is named and every blocker is reported", () => {
-  const decision = decideFold(
-    {
-      changesBehavior: FOLD_THRESHOLDS.changesBehavior,
-      newControlFlow: 0.9,
-      touchesBoundary: { choice: "authorization", confidence: 0.95 },
-      kind: { choice: "behavior", confidence: 0.9 },
-    },
-    {
-      changedLineCount: FOLD_MAX_CHANGED_LINES + 1,
-      hasUnresolvedComment: true,
-      hasReference: false,
-    },
+test("a quiet behavior unit folds and reports the probabilities it was judged on", () => {
+  const decision = decideAttention(
+    { ...quiet, kind: { choice: "behavior", confidence: 0.9 } },
+    gates,
   );
-  assert.equal(decision.fold, false);
-  if (decision.fold) return;
-  assert.deepEqual(decision.blockers, [
-    `${FOLD_MAX_CHANGED_LINES + 1} changed lines exceed the fold limit of ${FOLD_MAX_CHANGED_LINES}`,
-    "a line carries an unresolved comment",
-    "changes runtime behavior (75%)",
-    "adds control flow (90%)",
-    "touches authorization",
-    "is a behavior change",
+  assert.equal(decision.attention, false);
+  if (decision.attention) return;
+  assert.deepEqual(decision.fold.reasons, [
+    "Behavior change, no boundary.",
+    "No behavior change (90%), no new control flow (95%).",
   ]);
-  const vowel = decideFold(
-    { ...foldable, kind: { choice: "interface", confidence: 0.9 } },
-    gates,
-  );
-  assert.equal(vowel.fold, false);
-  if (!vowel.fold) assert.deepEqual(vowel.blockers, ["is an interface change"]);
 });
 
-test("an uncertain choice is read as its unsafe alternative", () => {
-  const lowBoundary = decideFold(
+test("a boundary always earns attention, whatever the kind", () => {
+  const decision = decideAttention(
     {
-      ...foldable,
-      touchesBoundary: {
-        choice: "none",
-        confidence: FOLD_THRESHOLDS.choiceConfidence - 0.01,
-      },
+      ...quiet,
+      kind: { choice: "test", confidence: 0.9 },
+      touchesBoundary: { choice: "authorization", confidence: 0.82 },
     },
     gates,
   );
-  assert.equal(lowBoundary.fold, false);
-  if (!lowBoundary.fold) {
-    assert.deepEqual(lowBoundary.blockers, ["touches a public API or type"]);
-  }
+  assert.equal(decision.attention, true);
+  if (!decision.attention) return;
+  assert.deepEqual(decision.reasons, ["touches authorization (82%)"]);
+  assert.equal(decision.features?.kind.choice, "test");
+});
 
-  const lowKind = decideFold(
-    { ...foldable, kind: { choice: "docs", confidence: 0.2 } },
+test("behavior or interface code earns attention when behavior or control flow changes", () => {
+  const behavior = decideAttention(
+    {
+      ...quiet,
+      kind: { choice: "behavior", confidence: 0.9 },
+      changesBehavior: ATTENTION_THRESHOLDS.changesBehavior,
+      newControlFlow: 0.9,
+    },
     gates,
   );
-  assert.equal(lowKind.fold, false);
-  if (!lowKind.fold) {
-    assert.deepEqual(lowKind.blockers, ["is a behavior change"]);
+  assert.equal(behavior.attention, true);
+  if (behavior.attention) {
+    assert.deepEqual(behavior.reasons, [
+      "behavior code changes runtime behavior (75%)",
+      "behavior code adds control flow (90%)",
+    ]);
+  }
+
+  const iface = decideAttention(
+    {
+      ...quiet,
+      kind: { choice: "interface", confidence: 0.7 },
+      changesBehavior: 0.8,
+    },
+    gates,
+  );
+  assert.equal(iface.attention, true);
+  if (iface.attention) {
+    assert.deepEqual(iface.reasons, [
+      "interface code changes runtime behavior (80%)",
+    ]);
   }
 });
 
-test("a named reference must be checked and must mirror", () => {
-  const unchecked = decideFold(foldable, { ...gates, hasReference: true });
-  assert.equal(unchecked.fold, false);
-  if (!unchecked.fold) {
-    assert.deepEqual(unchecked.blockers, [
-      "the named reference was not checked",
+test("the same changes in test, config, docs, refactor, or generated code fold", () => {
+  for (const kind of [
+    "test",
+    "config",
+    "docs",
+    "refactor",
+    "generated",
+  ] as const) {
+    const decision = decideAttention(
+      {
+        ...quiet,
+        kind: { choice: kind, confidence: 0.9 },
+        changesBehavior: 0.95,
+        newControlFlow: 0.95,
+      },
+      gates,
+    );
+    assert.equal(decision.attention, false, kind);
+  }
+});
+
+test("an uncertain choice is taken at its word rather than escalated", () => {
+  const decision = decideAttention(
+    {
+      ...quiet,
+      kind: { choice: "docs", confidence: 0.2 },
+      touchesBoundary: { choice: "none", confidence: 0.3 },
+      changesBehavior: 0.99,
+    },
+    gates,
+  );
+  assert.equal(decision.attention, false);
+});
+
+test("an unresolved comment earns attention before any feature is read", () => {
+  assert.deepEqual(gateReasons({ hasUnresolvedComment: true }), [
+    "a line carries your unresolved comment",
+  ]);
+  const decision = decideAttention(quiet, { hasUnresolvedComment: true });
+  assert.equal(decision.attention, true);
+  if (decision.attention) {
+    assert.deepEqual(decision.reasons, [
+      "a line carries your unresolved comment",
     ]);
   }
+});
 
-  const weak = decideFold(
-    { ...foldable, mirrorsReference: 0.5 },
-    { ...gates, hasReference: true },
-  );
-  assert.equal(weak.fold, false);
-  if (!weak.fold) {
-    assert.deepEqual(weak.blockers, [
-      "does not mirror the named reference (50%)",
-    ]);
-  }
-
-  const strong = decideFold(
-    { ...foldable, mirrorsReference: 0.92 },
-    { ...gates, hasReference: true },
-  );
-  assert.equal(strong.fold, true);
-  if (strong.fold) {
+test("a mirrored reference is reported on the fold and never forces attention", () => {
+  const mirrored = decideAttention({ ...quiet, mirrorsReference: 0.92 }, gates);
+  assert.equal(mirrored.attention, false);
+  if (!mirrored.attention) {
     assert.equal(
-      strong.result.reasons.at(-1),
+      mirrored.fold.reasons.at(-1),
       "Mirrors the named reference (92%).",
     );
   }
+  const unmirrored = decideAttention(
+    { ...quiet, mirrorsReference: 0.1 },
+    gates,
+  );
+  assert.equal(unmirrored.attention, false);
 });
 
 test("without a judge the agent's routine claim is the fold", () => {

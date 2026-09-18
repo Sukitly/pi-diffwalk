@@ -98,13 +98,13 @@ function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
 function describeVerdict(
   unit: ReviewRouteDraftProgress["acceptedUnit"],
 ): string {
+  if (unit.attention !== undefined) {
+    return ` (needs review: ${unit.attention.reasons.join("; ")})`;
+  }
   if (unit.fold !== undefined) {
     return unit.fold.source === "agent"
       ? " (folded on the routine claim)"
       : ` (folded: ${unit.fold.reasons.join(" ")})`;
-  }
-  if (unit.walked !== undefined) {
-    return ` (walked: ${unit.walked.blockers.join("; ")})`;
   }
   return "";
 }

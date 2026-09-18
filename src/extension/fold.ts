@@ -5,11 +5,10 @@ import {
   readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
 import {
-  decideFold,
-  type FoldDecision,
-  gateBlockers,
+  type AttentionDecision,
+  decideAttention,
+  gateReasons,
   renderUnitText,
-  unitChangedLineCount,
 } from "../review/fold.ts";
 import { changedLineKey, resolvedSpanChangedLines } from "../review/span.ts";
 import type {
@@ -177,10 +176,12 @@ export interface FoldUnitInput {
 }
 
 /**
- * Judges one accepted unit and applies the fold policy. Throws only for
- * transport and protocol failures; the caller decides how to degrade.
+ * Judges one accepted unit and applies the attention policy. Throws only
+ * for transport and protocol failures; the caller decides how to degrade.
  */
-export async function foldUnit(input: FoldUnitInput): Promise<FoldDecision> {
+export async function judgeUnit(
+  input: FoldUnitInput,
+): Promise<AttentionDecision> {
   const { snapshot, delta, unit } = input;
   const unresolved = new Set(
     delta.lines
@@ -196,13 +197,9 @@ export async function foldUnit(input: FoldUnitInput): Promise<FoldDecision> {
       unresolved.has(changedLineKey(line)),
     ),
   );
-  const gates = {
-    changedLineCount: unitChangedLineCount(snapshot, unit),
-    hasUnresolvedComment,
-    hasReference: unit.routine !== undefined,
-  };
-  const gated = gateBlockers(gates);
-  if (gated.length > 0) return { fold: false, blockers: gated };
+  const gates = { hasUnresolvedComment };
+  const gated = gateReasons(gates);
+  if (gated.length > 0) return { attention: true, reasons: gated };
   const referenceText =
     unit.routine === undefined
       ? undefined
@@ -217,18 +214,18 @@ export async function foldUnit(input: FoldUnitInput): Promise<FoldDecision> {
     },
     input.signal,
   );
-  return decideFold(features, gates);
+  return decideAttention(features, gates);
 }
 
-export function verdictOf(decision: FoldDecision): ReviewUnitVerdict {
-  return decision.fold
-    ? { outcome: "folded", fold: decision.result }
-    : {
-        outcome: "walked",
+export function verdictOf(decision: AttentionDecision): ReviewUnitVerdict {
+  return decision.attention
+    ? {
+        outcome: "attention",
         source: "typesafe",
-        blockers: decision.blockers,
+        reasons: decision.reasons,
         ...(decision.features === undefined
           ? {}
           : { features: decision.features }),
-      };
+      }
+    : { outcome: "folded", fold: decision.fold };
 }

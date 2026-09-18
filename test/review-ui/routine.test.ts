@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createHarness,
+  makeAttentionFixture,
   makeModelFoldFixture,
   makeRoutineFixture,
   press,
@@ -118,22 +119,34 @@ test("help lists the fold and candidate keys", () => {
   assert.match(output, /could have been folded/);
 });
 
-test("a model fold shows its reasons under Folded and no Mirrors line", () => {
+test("a model fold shows why under Why and no Mirrors line", () => {
   const harness = createHarness(120, 30, makeModelFoldFixture());
   press(harness.component, "l");
   const output = renderText(harness);
 
   assert.match(output, /Folded: User route registration/);
-  assert.match(
-    output,
-    /Folded: No behavior change \(94%\), no new control flow \(97%\)\./,
-  );
-  assert.match(output, /Config change touching no boundary\./);
+  assert.match(output, /Why: Config change, no boundary\./);
   assert.doesNotMatch(output, /Mirrors:/);
   assert.doesNotMatch(output, /userHandler/);
 
   press(harness.component, "e");
   const details = renderText(harness);
-  assert.match(details, /Folded/);
+  assert.match(details, /Why this is folded/);
   assert.doesNotMatch(details, /Agent reference/);
+});
+
+test("a unit needing review is marked in the title, the header, and above the diff", () => {
+  const harness = createHarness(120, 30, makeAttentionFixture());
+  const output = renderText(harness);
+
+  assert.match(output, /Review: Token validation/);
+  assert.match(output, /1 need review/);
+  assert.match(
+    output,
+    /Review: touches authorization \(88%\); behavior code changes runtime behavior \(91%\)/,
+  );
+  assert.match(output, /validate\(token\)/);
+
+  press(harness.component, "e");
+  assert.match(renderText(harness), /Why this needs review/);
 });

@@ -691,6 +691,9 @@ export class GuidedReviewComponent implements Component, Focusable {
         unitIndex: this.unitIndex,
         reviewedCount: this.reviewedUnitCount(),
         glancedCount: this.glancedUnitCount(),
+        ...(this.judgedByModel()
+          ? { attentionCount: this.attentionUnitCount() }
+          : {}),
         commentCount: this.review.comments.length,
         skippedCount: this.skippedCount,
         unsupportedCount: this.unsupportedCount,
@@ -713,6 +716,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       case "explanation": {
         const unit = this.currentUnit()?.unit;
         if (unit === undefined) return "Review inventory";
+        if (unit.attention !== undefined) return `Review: ${unit.title}`;
         if (unit.fold !== undefined) {
           return `${unit.fold.source === "agent" ? "Routine" : "Folded"}: ${unit.title}`;
         }
@@ -1721,6 +1725,18 @@ export class GuidedReviewComponent implements Component, Focusable {
     return this.review.unitProgress.filter(
       (progress) => progress.disposition !== "pending",
     ).length;
+  }
+
+  /** True when a decision model judged this route; the count is meaningful only then. */
+  private judgedByModel(): boolean {
+    return this.units.some(
+      ({ unit }) =>
+        unit.attention !== undefined || unit.fold?.source === "typesafe",
+    );
+  }
+
+  private attentionUnitCount(): number {
+    return this.units.filter(({ unit }) => unit.attention !== undefined).length;
   }
 
   private glancedUnitCount(): number {

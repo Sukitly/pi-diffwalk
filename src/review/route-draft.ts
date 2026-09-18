@@ -106,7 +106,7 @@ export function applyVerdict(
   if (verdict === undefined) return unit;
   return verdict.outcome === "folded"
     ? { ...unit, fold: verdict.fold }
-    : { ...unit, walked: verdict };
+    : { ...unit, attention: verdict };
 }
 
 /**

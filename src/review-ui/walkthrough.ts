@@ -57,6 +57,14 @@ export function renderWalkthroughPreview(
     summary[MAXIMUM_SUMMARY_ROWS - 1] =
       `${truncateToWidth(summary[MAXIMUM_SUMMARY_ROWS - 1] ?? "", Math.max(0, width - 1), "")}${theme.fg("dim", "…")}`;
   }
+  const attention =
+    unit.attention === undefined
+      ? []
+      : wrapWithPrefix(
+          theme.fg("warning", "Review: "),
+          theme.fg("text", safeText(unit.attention.reasons.join("; "))),
+          width,
+        ).map((row) => fitLine(row, width));
   const unitChecks = unit.reviewFocus.filter(
     (check) => check.anchor === undefined,
   );
@@ -75,8 +83,9 @@ export function renderWalkthroughPreview(
           ),
         ];
   const candidates = [
-    ["", ...summary, ...checks, ""],
-    ["", ...summary, ""],
+    ["", ...attention, ...summary, ...checks, ""],
+    ["", ...attention, ...summary, ""],
+    ...(attention.length === 0 ? [] : [["", ...attention, ""]]),
     [""],
   ];
   return (
@@ -105,7 +114,7 @@ export function renderFoldedUnit(
     ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
     "",
   );
-  const label = fold.source === "agent" ? "Routine: " : "Folded: ";
+  const label = fold.source === "agent" ? "Routine: " : "Why: ";
   for (const [index, reason] of fold.reasons.entries()) {
     rows.push(
       ...wrapWithPrefix(
@@ -144,10 +153,19 @@ export function renderExplanationLines(
   width: number,
 ): string[] {
   const lines: string[] = [];
+  if (unit.attention !== undefined) {
+    addSectionText(
+      lines,
+      "Why this needs review",
+      unit.attention.reasons.join("; "),
+      theme,
+      width,
+    );
+  }
   if (unit.fold !== undefined) {
     addSectionText(
       lines,
-      unit.fold.source === "agent" ? "Routine claim" : "Folded",
+      unit.fold.source === "agent" ? "Routine claim" : "Why this is folded",
       unit.fold.reasons.join(" "),
       theme,
       width,

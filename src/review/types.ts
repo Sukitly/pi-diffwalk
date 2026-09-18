@@ -187,7 +187,7 @@ export interface ReviewRoundUnit {
   readonly title: string;
   readonly routine: boolean;
   readonly fold?: ReviewUnitFold;
-  readonly walked?: Extract<ReviewUnitVerdict, { outcome: "walked" }>;
+  readonly attention?: ReviewUnitAttention;
   readonly outcome: "reviewed" | "glanced" | "expanded";
   readonly routineCandidate: boolean;
   readonly commented: boolean;
@@ -539,19 +539,24 @@ export type ReviewUnitFold =
     };
 
 /**
- * The judge's verdict on a unit. `fold` carries the reasons a folded unit
- * shows; `walked` carries the blockers for a unit the judge sent to the
- * reviewer, so a review can show that the judge ran even when nothing folds.
+ * The judge's verdict on a unit. Folding is the default; `attention`
+ * records why a unit earned the reviewer's time, so the route shows which
+ * units matter and that the judge ran even when every unit folds.
  */
 export type ReviewUnitVerdict =
   | { readonly outcome: "folded"; readonly fold: ReviewUnitFold }
   | {
-      readonly outcome: "walked";
+      readonly outcome: "attention";
       readonly source: "typesafe";
-      readonly blockers: readonly string[];
-      /** Absent when a hard gate walked the unit before the model was asked. */
+      readonly reasons: readonly string[];
+      /** Absent when an open comment demanded attention before the model was asked. */
       readonly features?: ReviewUnitFeatures;
     };
+
+export type ReviewUnitAttention = Extract<
+  ReviewUnitVerdict,
+  { outcome: "attention" }
+>;
 
 /** Surface features of one unit as a decision model reports them. */
 export interface ReviewUnitFeatures {
@@ -596,8 +601,8 @@ export interface ReviewUnit {
   readonly spans: readonly ResolvedSpan[];
   readonly routine?: ReviewUnitRoutine;
   readonly fold?: ReviewUnitFold;
-  /** Present when a decision model judged the unit and chose to walk it. */
-  readonly walked?: Extract<ReviewUnitVerdict, { outcome: "walked" }>;
+  /** Present when a decision model judged the unit as needing the reviewer. */
+  readonly attention?: ReviewUnitAttention;
 }
 
 export interface ReviewRouteSkip {

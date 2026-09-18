@@ -13,118 +13,97 @@ import type {
 } from "./types.ts";
 
 /**
- * The fold policy. A decision model reports surface features of a unit; this
- * module turns them into a yes or no and into the reasons the reviewer sees
- * on the folded card. Every threshold lives here. The model never decides
- * alone: size and unresolved comments are hard gates the code owns.
+ * The attention policy. A decision model reports surface features of a
+ * unit; this module decides whether the unit needs the reviewer at all.
+ *
+ * The default is to fold. A unit earns attention only by showing a reason:
+ * it touches a boundary, it is behavior or interface code whose runtime
+ * behavior or control flow changes, or it carries a comment the reviewer
+ * left open. Everything else folds, whatever its size. Every threshold
+ * lives here.
  */
-
-/** A folded unit is small by definition; the same cap the routine claim uses. */
-export const FOLD_MAX_CHANGED_LINES = 40;
 
 /**
  * Initial thresholds. Each question has its own; a threshold tuned on one
  * question does not transfer to another, so none is shared.
  */
-export const FOLD_THRESHOLDS = {
-  /** Above this, the unit changes behavior and must be walked. */
+export const ATTENTION_THRESHOLDS = {
+  /** At or above this, a behavior or interface unit changes runtime behavior. */
   changesBehavior: 0.75,
-  /** Above this, the unit adds control flow and must be walked. */
+  /** At or above this, a behavior or interface unit adds control flow. */
   newControlFlow: 0.75,
-  /** Below this, a reference the agent named is not trusted. */
-  mirrorsReference: 0.75,
-  /** A choice below this confidence is treated as its unsafe alternative. */
-  choiceConfidence: 0.6,
 } as const;
 
-export const FOLDABLE_KINDS: ReadonlySet<ReviewUnitKind> = new Set([
-  "test",
-  "config",
-  "docs",
-  "refactor",
-  "generated",
+/** Kinds where a behavior or control-flow change is worth the reviewer's time. */
+export const ATTENTION_KINDS: ReadonlySet<ReviewUnitKind> = new Set([
+  "behavior",
+  "interface",
 ]);
 
-export interface FoldGates {
-  readonly changedLineCount: number;
+export interface AttentionGates {
   readonly hasUnresolvedComment: boolean;
-  readonly hasReference: boolean;
 }
 
-export type FoldDecision =
-  | { readonly fold: true; readonly result: ReviewUnitFold }
+export type AttentionDecision =
+  | { readonly attention: false; readonly fold: ReviewUnitFold }
   | {
-      readonly fold: false;
-      readonly blockers: readonly string[];
-      /** Absent when a hard gate blocked the fold before any model was asked. */
+      readonly attention: true;
+      readonly reasons: readonly string[];
+      /** Absent when an open comment demanded attention before any model was asked. */
       readonly features?: ReviewUnitFeatures;
     };
 
 /**
- * The gates code owns. A unit that fails one is walked without asking the
- * model, so nothing is sent and nothing is spent on a unit that could never
- * fold.
+ * The one gate code owns without a model: a line the reviewer commented on
+ * and has not resolved always comes back to the reviewer.
  */
-export function gateBlockers(gates: FoldGates): readonly string[] {
-  const blockers: string[] = [];
-  if (gates.changedLineCount > FOLD_MAX_CHANGED_LINES) {
-    blockers.push(
-      `${gates.changedLineCount} changed lines exceed the fold limit of ${FOLD_MAX_CHANGED_LINES}`,
-    );
-  }
-  if (gates.hasUnresolvedComment) {
-    blockers.push("a line carries an unresolved comment");
-  }
-  return blockers;
+export function gateReasons(gates: AttentionGates): readonly string[] {
+  return gates.hasUnresolvedComment
+    ? ["a line carries your unresolved comment"]
+    : [];
 }
 
-export function decideFold(
+export function decideAttention(
   features: ReviewUnitFeatures,
-  gates: FoldGates,
-): FoldDecision {
-  const blockers: string[] = [...gateBlockers(gates)];
-  if (features.changesBehavior >= FOLD_THRESHOLDS.changesBehavior) {
-    blockers.push(
-      `changes runtime behavior (${formatProbability(features.changesBehavior)})`,
-    );
-  }
-  if (features.newControlFlow >= FOLD_THRESHOLDS.newControlFlow) {
-    blockers.push(
-      `adds control flow (${formatProbability(features.newControlFlow)})`,
-    );
-  }
-  const boundary = confidentChoice(
-    features.touchesBoundary,
-    "public-api" as ReviewUnitBoundary,
-  );
+  gates: AttentionGates,
+): AttentionDecision {
+  const reasons: string[] = [...gateReasons(gates)];
+  const boundary = features.touchesBoundary.choice;
   if (boundary !== "none") {
-    blockers.push(`touches ${describeBoundary(boundary)}`);
+    reasons.push(
+      `touches ${describeBoundary(boundary)} (${formatProbability(features.touchesBoundary.confidence)})`,
+    );
   }
-  const kind = confidentChoice(features.kind, "behavior" as ReviewUnitKind);
-  if (!FOLDABLE_KINDS.has(kind)) {
-    blockers.push(`is ${article(kind)} ${kind} change`);
-  }
-  if (gates.hasReference) {
-    if (features.mirrorsReference === undefined) {
-      blockers.push("the named reference was not checked");
-    } else if (features.mirrorsReference < FOLD_THRESHOLDS.mirrorsReference) {
-      blockers.push(
-        `does not mirror the named reference (${formatProbability(features.mirrorsReference)})`,
+  const kind = features.kind.choice;
+  if (ATTENTION_KINDS.has(kind)) {
+    if (features.changesBehavior >= ATTENTION_THRESHOLDS.changesBehavior) {
+      reasons.push(
+        `${kind} code changes runtime behavior (${formatProbability(features.changesBehavior)})`,
+      );
+    }
+    if (features.newControlFlow >= ATTENTION_THRESHOLDS.newControlFlow) {
+      reasons.push(
+        `${kind} code adds control flow (${formatProbability(features.newControlFlow)})`,
       );
     }
   }
-  if (blockers.length > 0) return { fold: false, blockers, features };
+  if (reasons.length > 0) return { attention: true, reasons, features };
 
-  const reasons = [
-    `No behavior change (${formatProbability(1 - features.changesBehavior)}), no new control flow (${formatProbability(1 - features.newControlFlow)}).`,
-    `${capitalize(kind)} change touching no boundary.`,
-  ];
+  const summary: string[] = [`${capitalize(kind)} change, no boundary.`];
+  if (ATTENTION_KINDS.has(kind)) {
+    summary.push(
+      `No behavior change (${formatProbability(1 - features.changesBehavior)}), no new control flow (${formatProbability(1 - features.newControlFlow)}).`,
+    );
+  }
   if (features.mirrorsReference !== undefined) {
-    reasons.push(
+    summary.push(
       `Mirrors the named reference (${formatProbability(features.mirrorsReference)}).`,
     );
   }
-  return { fold: true, result: { source: "typesafe", reasons, features } };
+  return {
+    attention: false,
+    fold: { source: "typesafe", reasons: summary, features },
+  };
 }
 
 /** The agent's claim folds a unit when no decision model is configured. */
@@ -134,19 +113,6 @@ export function foldFromRoutineClaim(
   return unit.routine === undefined
     ? undefined
     : { source: "agent", reasons: [unit.routine.reason] };
-}
-
-/**
- * Below the confidence threshold a choice is replaced by the alternative
- * that blocks a fold, so an uncertain model never folds by default.
- */
-function confidentChoice<T extends string>(
-  answer: { readonly choice: T; readonly confidence: number },
-  unsafe: T,
-): T {
-  return answer.confidence >= FOLD_THRESHOLDS.choiceConfidence
-    ? answer.choice
-    : unsafe;
 }
 
 function describeBoundary(boundary: ReviewUnitBoundary): string {
@@ -164,10 +130,6 @@ function describeBoundary(boundary: ReviewUnitBoundary): string {
     case "external-process":
       return "an external process";
   }
-}
-
-function article(word: string): "a" | "an" {
-  return /^[aeiou]/i.test(word) ? "an" : "a";
 }
 
 function formatProbability(value: number): string {

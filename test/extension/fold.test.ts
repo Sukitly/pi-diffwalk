@@ -179,7 +179,7 @@ function unitFor(
   };
 }
 
-test("with a judge, every unit is folded or walked on its features", async () => {
+test("with a judge, every unit folds unless its features earn attention", async () => {
   const judged: string[] = [];
   const harness = createHarness({
     snapshot: twoFileSnapshot(),
@@ -191,23 +191,22 @@ test("with a judge, every unit is folded or walked on its features", async () =>
   });
   await harness.command("", commandContext());
 
-  const walked = await harness.unitTool.execute(
+  const attention = await harness.unitTool.execute(
     "u1",
     unitFor("src/file.ts"),
     undefined,
     undefined,
     toolContext(),
   );
-  assert.equal(walked.details?.acceptedUnit.fold, undefined);
-  assert.deepEqual(walked.details?.acceptedUnit.walked?.blockers, [
-    "changes runtime behavior (90%)",
-    "adds control flow (80%)",
-    "touches authorization",
-    "is a behavior change",
+  assert.equal(attention.details?.acceptedUnit.fold, undefined);
+  assert.deepEqual(attention.details?.acceptedUnit.attention?.reasons, [
+    "touches authorization (90%)",
+    "behavior code changes runtime behavior (90%)",
+    "behavior code adds control flow (80%)",
   ]);
   assert.match(
-    (walked.content[0] as { text: string }).text,
-    /^Accepted review unit 1 \(walked: changes runtime behavior \(90%\); adds control flow \(80%\); touches authorization; is a behavior change\)\./,
+    (attention.content[0] as { text: string }).text,
+    /^Accepted review unit 1 \(needs review: touches authorization \(90%\); behavior code changes runtime behavior \(90%\); behavior code adds control flow \(80%\)\)\./,
   );
 
   const folded = await harness.unitTool.execute(
@@ -219,8 +218,7 @@ test("with a judge, every unit is folded or walked on its features", async () =>
   );
   assert.equal(folded.details?.acceptedUnit.fold?.source, "typesafe");
   assert.deepEqual(folded.details?.acceptedUnit.fold?.reasons, [
-    "No behavior change (95%), no new control flow (95%).",
-    "Test change touching no boundary.",
+    "Test change, no boundary.",
   ]);
   assert.equal(judged.length, 2);
   assert.match(
@@ -236,52 +234,68 @@ test("with a judge, every unit is folded or walked on its features", async () =>
     [undefined, "typesafe"],
     "The fold decisions reach the walkthrough.",
   );
-  assert.equal(route?.units[0]?.walked?.source, "typesafe");
+  assert.equal(route?.units[0]?.attention?.source, "typesafe");
   assert.match(
     (folded.content[0] as { text: string }).text,
-    /^Accepted review unit 2 \(folded: No behavior change/,
+    /^Accepted review unit 2 \(folded: Test change, no boundary\.\)/,
   );
 });
 
-test("a unit over the size gate is walked without asking the judge", async () => {
+test("a unit carrying an unresolved comment earns attention without asking the judge", async () => {
   let calls = 0;
-  const big = makeSnapshot("snapshot-index", [
-    {
-      path: "src/big.ts",
-      lines: [
-        " head",
-        ...Array.from({ length: 41 }, (_, index) => `+line ${index}`),
-        " tail",
-      ],
-    },
-  ]);
   const harness = createHarness({
-    snapshot: big,
+    snapshot: twoFileSnapshot(),
     foldConfiguration: { status: "enabled", apiKey: "sk" },
     unitFeatureJudge: async () => {
       calls += 1;
       return clear;
     },
   });
+  harness.behavior.commentOnSubmit = true;
+  harness.behavior.submitOnOpen = true;
   await harness.command("", commandContext());
-
-  const result = await harness.unitTool.execute(
-    "u1",
-    { ...unitFor("src/big.ts"), spans: [span("src/big.ts", { new: [2, 42] })] },
+  await harness.submitRoute(
+    "round-1",
+    {
+      snapshotId: "snapshot-index",
+      units: [unitFor("src/file.ts"), unitFor("test/file.test.ts")],
+      skippedSpans: [],
+    },
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  const first = harness.appendedEntries.find(
+    (entry) => entry.customType === "diffwalk-thread-batch",
+  );
+  assert.ok(first, "The first round left an unresolved comment behind.");
+  calls = 0;
+  harness.behavior.submitOnOpen = false;
+  await harness.responseTool.execute(
+    "answer",
+    { responses: [{ threadId: "C1", body: "Answered." }] },
     undefined,
     undefined,
     toolContext(),
   );
 
+  await harness.command("", commandContext());
+  const commented = await harness.unitTool.execute(
+    "u1",
+    unitFor("src/file.ts"),
+    undefined,
+    undefined,
+    toolContext(),
+  );
   assert.equal(calls, 0);
-  assert.deepEqual(result.details?.acceptedUnit.walked, {
-    outcome: "walked",
+  assert.deepEqual(commented.details?.acceptedUnit.attention, {
+    outcome: "attention",
     source: "typesafe",
-    blockers: ["41 changed lines exceed the fold limit of 40"],
+    reasons: ["a line carries your unresolved comment"],
   });
 });
 
-test("an agent routine claim adds a reference check but does not fold by itself", async () => {
+test("an agent routine claim adds a reference to the judge's state and to the card", async () => {
   const inputs: { unitText: string; referenceText?: string }[] = [];
   const harness = createHarness({
     snapshot: twoFileSnapshot(),
@@ -309,7 +323,10 @@ test("an agent routine claim adds a reference check but does not fold by itself"
     unitText: "--- test/file.test.ts\n@@\n head\n+expect(1)\n tail",
     referenceText: "expect(0)",
   });
-  assert.equal(result.details?.acceptedUnit.fold, undefined);
+  assert.deepEqual(result.details?.acceptedUnit.fold?.reasons, [
+    "Test change, no boundary.",
+    "Mirrors the named reference (30%).",
+  ]);
 });
 
 test("without a judge the routine claim folds; a judge failure degrades once", async () => {

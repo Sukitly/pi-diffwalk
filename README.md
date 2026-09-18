@@ -206,7 +206,7 @@ Excluded lines are visible in the inventory (`i`) with the rule that removed the
 
 ## Folded Units
 
-Not every unit deserves the reviewer's full attention. A third route registration shaped like the first two, a test fixture mirroring its neighbors, a renamed constant: reading these costs attention and returns nothing. DiffWalk folds such units. A folded unit keeps its place in the route and shows its change summary, why it was folded, and how many lines are folded, but no diff. `o` expands it into the ordinary unit view, where lines can be selected and commented; `o` again folds it. `n` on a folded unit accepts the fold and records the unit as glanced; `n` on an expanded unit records it as reviewed. Lines of a glanced unit count as reviewed and carry forward in later rounds. `r` on a walked unit records the reviewer's opinion that it could have been folded.
+DiffWalk exists to spend the reviewer's attention where it matters. Most of a change does not need it: a third route registration shaped like the first two, a test fixture mirroring its neighbors, a renamed constant, a generated file. DiffWalk folds such units. A folded unit keeps its place in the route and shows its change summary, why it was folded, and how many lines are folded, but no diff. `o` expands it into the ordinary unit view, where lines can be selected and commented; `o` again folds it. `n` on a folded unit accepts the fold and records the unit as glanced; `n` on an expanded unit records it as reviewed. Lines of a glanced unit count as reviewed and carry forward in later rounds. `r` on a walked unit records the reviewer's opinion that it could have been folded.
 
 Who decides what folds depends on configuration.
 
@@ -218,7 +218,7 @@ The agent may mark a unit `routine`, naming the existing code it mirrors as `ref
 
 With `"diffwalk": { "fold": "typesafe" }` in pi's `settings.json` and a TypeSafe API key available, every unit is judged as it is added. DiffWalk sends the unit's changed lines with three lines of context, and the referenced lines when the agent named a reference, to [TypeSafe](https://typesafe.ai) and asks for surface features: whether the lines change runtime behavior, whether they add control flow, which boundary they touch (none, public API, persisted format, authorization, money, external process), and what kind of change they are. When the agent named a reference, it also asks whether the unit mirrors it.
 
-The fold policy lives in DiffWalk, not in the model. A unit folds only when behavior change and new control flow are both unlikely, the boundary is none, the kind is test, config, docs, refactor, or generated, the unit has at most 40 changed lines, no line carries an unresolved comment, and any named reference is mirrored. An uncertain answer is read as the unsafe one, so the model never folds by default. The card shows the reasons with the model's probabilities. The agent's routine claim no longer folds anything on its own; it adds the reference check and the Mirrors line.
+The attention policy lives in DiffWalk, not in the model, and its default is to fold. A unit earns the reviewer's time only for a reason: it touches a boundary; it is behavior or interface code whose runtime behavior or control flow changes; or a line in it carries the reviewer's own unresolved comment. Everything else folds, whatever its size. The model's answers are taken at their word; an uncertain answer is not escalated. A unit that needs review is titled `Review:`, states its reasons with the model's probabilities above the diff, and is counted in the header as `N need review`. A folded unit's card gives one line on why. The agent's routine claim does not fold anything on its own when a model is configured; it adds the reference check and the Mirrors line.
 
 The key lives where pi keeps every other API key: `~/.pi/agent/auth.json`, under the provider id `typesafe`. pi creates the file with owner-only permissions. Add the entry with pi stopped:
 
@@ -242,7 +242,7 @@ Folding is opt-in because it sends repository content to a second vendor. Nothin
 
 ### What is recorded
 
-Each completed round keeps a per-unit record: whether the agent claimed routine, the fold decision with the features the model reported, whether the reviewer glanced, expanded, or walked the unit, whether the reviewer marked it as a fold candidate, and whether it received comments. DiffWalk does not act on these records yet; they exist so that the thresholds can be tuned against real reviews.
+Each completed round keeps a per-unit record: whether the agent claimed routine, the verdict (folded, or needs review with its reasons) with the features the model reported, whether the reviewer glanced, expanded, or walked the unit, whether the reviewer marked it as a fold candidate, and whether it received comments. DiffWalk does not act on these records yet; they exist so that the thresholds can be tuned against real reviews.
 
 ## Guarantees
 
@@ -271,7 +271,7 @@ A paused review does not lock the repository. If the worktree changes while a re
 - Mechanical exclusion is all or nothing per review. Excluded lines cannot be pulled back into the walkthrough one at a time or commented on; `/diffwalk --no-exclude` is the only override.
 - A routine reference is checked for an existing file only. Line numbers in the reference are shown to the reviewer and not verified. Without a decision model the referenced code is not compared with the unit.
 - Fold thresholds are initial values, not calibrated ones. Per-unit round outcomes are recorded and persisted but not yet surfaced or used.
-- Folding with a decision model is judged on the unit's diff text alone. It sees no callers, no tests, and no history, so it can only tell what a change looks like, never whether it is correct.
+- Folding with a decision model is judged on the unit's diff text alone. It sees no callers, no tests, and no history, so it can only tell what a change looks like, never whether it is correct. A wrong fold hides a change the reviewer would have wanted; `o` reopens any fold, and the per-unit records exist to find such cases.
 
 ## Development
 

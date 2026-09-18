@@ -173,12 +173,12 @@ export function renderAddUnitToolResult(
       : `${countNoun(remainingLines, "line")} left in ${countNoun(progress.remaining.length, "file")}`;
   const unit = progress.acceptedUnit;
   const verdict =
-    unit.fold !== undefined
-      ? unit.fold.source === "agent"
-        ? " • folded (agent claim)"
-        : " • folded"
-      : unit.walked !== undefined
-        ? ` • walked: ${unit.walked.blockers.join("; ")}`
+    unit.attention !== undefined
+      ? ` • needs review: ${unit.attention.reasons.join("; ")}`
+      : unit.fold !== undefined
+        ? unit.fold.source === "agent"
+          ? " • folded (agent claim)"
+          : " • folded"
         : "";
   return new Text(
     theme.fg(

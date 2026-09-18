@@ -82,7 +82,7 @@ import {
 import {
   createUnitFeatureJudge,
   type FoldConfiguration,
-  foldUnit,
+  judgeUnit,
   readFoldConfiguration,
   readReferenceText,
   type UnitFeatureJudge,
@@ -612,7 +612,7 @@ export class DiffWalkSession {
       return fold === undefined ? undefined : { outcome: "folded", fold };
     }
     try {
-      const decision = await foldUnit({
+      const decision = await judgeUnit({
         snapshot: pending.review.snapshot,
         delta: pending.review.delta,
         unit,
