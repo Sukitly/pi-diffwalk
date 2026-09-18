@@ -10,8 +10,10 @@ import type {
 /**
  * Advisory quality signals for a route that already passed validation.
  *
- * Every signal is a mechanical check for a route that looks copied from Git
- * hunks instead of planned semantically. Signals never reject a route: the
+ * Each signal names one way a route can pass validation and still serve the
+ * reviewer poorly. The current signals are mechanical checks for a route that
+ * looks copied from Git hunks instead of planned semantically. Signals never
+ * reject a route: the
  * extension returns them to the agent at most once per review, and a
  * resubmitted identical route is accepted. The explanations live only in the
  * nudge message, at the moment of conflict, never in the kickoff prompt.
@@ -64,7 +66,7 @@ export function formatAdvisoryNudge(
   issues: readonly RouteAdvisoryIssue[],
 ): string {
   return [
-    "The route passed validation, but these signals suggest it was copied from Git hunks instead of planned semantically:",
+    "The route passed validation, but these signals suggest it needs another look before the walkthrough opens:",
     ...issues.map((issue) => `- ${issue.message}`),
     "These are advisory signals, not validation failures. Revise the route where a signal is right, or call the tool again with the same route to proceed.",
   ].join("\n");
