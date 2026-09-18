@@ -15,7 +15,7 @@ test("keeps completed rounds in memory as the next delta baseline", async () => 
   await harness.command("", commandContext());
   assert.match(harness.sentMessages[0] ?? "", /"needsReviewLineCount": 1/);
 
-  const submitted = await harness.tool.execute(
+  const submitted = await harness.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -41,7 +41,7 @@ test("persists submitted rounds and restores the baseline on session start", asy
   const first = createHarness();
   first.behavior.submitOnOpen = true;
   await first.command("", commandContext());
-  await first.tool.execute(
+  await first.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -72,7 +72,7 @@ test("the latest persisted entry for a series wins on restore", async () => {
   const first = createHarness();
   first.behavior.submitOnOpen = true;
   await first.command("", commandContext());
-  await first.tool.execute(
+  await first.submitRoute(
     "call-1",
     validRoute(),
     undefined,
@@ -84,7 +84,7 @@ test("the latest persisted entry for a series wins on restore", async () => {
     { path: "src/file.ts", lines: [" head", "+changed", " tail", "+appended"] },
   ]);
   await first.command("", commandContext());
-  await first.tool.execute(
+  await first.submitRoute(
     "call-2",
     {
       ...validRoute("snapshot-round-2"),

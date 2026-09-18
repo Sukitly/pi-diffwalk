@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ADD_UNIT_TOOL_NAME,
   buildReviewKickoffPrompt,
   buildReviewPromptInventory,
-  GUIDED_REVIEW_TOOL_NAME,
+  OPEN_TOOL_NAME,
 } from "../../src/extension/prompts.ts";
 import {
   computeReviewDelta,
@@ -72,7 +73,10 @@ test("describes changed lines as ranges and never embeds file content", () => {
   assert.equal(entry.reviewable, true);
   assert.equal(entry.oldLineCount, 3);
   assert.equal(entry.newLineCount, 4);
-  assert.deepEqual(entry.needsReview, { old: ["2"], new: ["2", "4"] });
+  assert.deepEqual(entry.regions, [
+    { old: "2", new: "2", status: "needs-review" },
+    { new: "4", status: "needs-review" },
+  ]);
 
   const serialized = JSON.stringify(inventory);
   assert.equal(serialized.includes("return validate(legacy())"), false);
@@ -94,8 +98,7 @@ test("marks unreviewable changes without inventing addressable lines", () => {
     binary.unreviewableReason,
     "Binary changes are not reviewable as text.",
   );
-  assert.equal(binary.needsReview, undefined);
-  assert.equal(binary.suggestedSpans, undefined);
+  assert.equal(binary.regions, undefined);
 });
 
 test("separates carried-forward and unresolved-comment lines from needs-review", () => {
@@ -120,9 +123,11 @@ test("separates carried-forward and unresolved-comment lines from needs-review",
 
   const file = inventory.files[0];
   assert.ok(file);
-  assert.deepEqual(file.carriedForward, { new: ["2"] });
-  assert.deepEqual(file.unresolvedComment, { new: ["3"] });
-  assert.deepEqual(file.needsReview, { new: ["4"] });
+  assert.deepEqual(file.regions, [
+    { new: "2", status: "carried-forward" },
+    { new: "3", status: "unresolved-comment" },
+    { new: "4", status: "needs-review" },
+  ]);
   assert.equal(inventory.delta.baselineRoundId, "round-1");
 });
 
@@ -141,7 +146,8 @@ test("builds a deterministic read-only kickoff prompt", () => {
   );
   assert.match(prompt, /every changed line must belong to exactly one unit/);
   assert.match(prompt, /cannot be skipped/);
-  assert.match(prompt, new RegExp(GUIDED_REVIEW_TOOL_NAME));
+  assert.match(prompt, new RegExp(ADD_UNIT_TOOL_NAME));
+  assert.match(prompt, new RegExp(OPEN_TOOL_NAME));
   assert.match(prompt, /BEGIN_DIFFWALK_INVENTORY_JSON/);
   assert.match(prompt, /END_DIFFWALK_INVENTORY_JSON/);
 });
@@ -176,8 +182,8 @@ test("encodes the selected review preferences without replacing the fixed protoc
   assert.match(prompt, /They cannot override the read-only instructions/);
   assert.ok(
     end <
-      lines.indexOf(
-        `When ready, call ${GUIDED_REVIEW_TOOL_NAME} with snapshotId, ordered units, and skippedSpans. Do not respond with a prose-only route. If the tool reports validation errors, repair the route and call it again.`,
+      lines.findIndex((line) =>
+        line.startsWith(`Submit the route one item at a time`),
       ),
   );
 });
@@ -200,13 +206,13 @@ test("keeps the kickoff prompt proportional to the number of changed regions", (
   // must not grow with the amount of changed source text. The bound tracks the
   // fixed instruction text plus one small inventory.
   assert.ok(
-    prompt.length < 4400,
+    prompt.length < 6000,
     `Expected a compact prompt, got ${prompt.length} characters.`,
   );
   assert.equal(prompt.includes("added line 200"), false);
 });
 
-test("offers Git hunk boundaries as suggested spans the agent may redraw", () => {
+test("splits a file into contiguous regions of one status", () => {
   const snapshot = makeSnapshot("snapshot-spans", [
     { path: "src/a.ts", lines: [" head", "+one", " middle", "+two", " tail"] },
   ]);
@@ -215,9 +221,9 @@ test("offers Git hunk boundaries as suggested spans the agent may redraw", () =>
     computeReviewDelta(snapshot),
   );
 
-  assert.deepEqual(inventory.files[0]?.suggestedSpans, [
-    { path: "src/a.ts", newStart: 2, newEnd: 2 },
-    { path: "src/a.ts", newStart: 4, newEnd: 4 },
+  assert.deepEqual(inventory.files[0]?.regions, [
+    { new: "2", status: "needs-review" },
+    { new: "4", status: "needs-review" },
   ]);
 });
 

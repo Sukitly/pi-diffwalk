@@ -7,39 +7,42 @@ import {
   formatReviewThreadFollowUp,
 } from "../../src/extension/model-payloads.ts";
 import {
+  ADD_UNIT_TOOL_DESCRIPTION,
+  ADD_UNIT_TOOL_NAME,
+  ADD_UNIT_TOOL_PROMPT_SNIPPET,
   buildReviewKickoffPrompt,
-  GUIDED_REVIEW_TOOL_DESCRIPTION,
-  GUIDED_REVIEW_TOOL_NAME,
-  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
-  REVIEW_RESPONSES_TOOL_DESCRIPTION,
-  REVIEW_RESPONSES_TOOL_NAME,
-  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  OPEN_TOOL_DESCRIPTION,
+  OPEN_TOOL_NAME,
+  OPEN_TOOL_PROMPT_SNIPPET,
+  RESPOND_TOOL_DESCRIPTION,
+  RESPOND_TOOL_NAME,
+  RESPOND_TOOL_PROMPT_SNIPPET,
+  SKIP_TOOL_DESCRIPTION,
+  SKIP_TOOL_NAME,
+  SKIP_TOOL_PROMPT_SNIPPET,
 } from "../../src/extension/prompts.ts";
+import { ReviewRespondToolSchema } from "../../src/extension/tools.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
-import { detectExactMoves } from "../../src/review/moves.ts";
-import {
-  assessRouteQuality,
-  formatAdvisoryNudge,
-} from "../../src/review/route-advisory.ts";
-import { validateReviewRoute } from "../../src/review/route-validation.ts";
 import {
   appendReviewThreadTurn,
   attachReviewThreadResponses,
   createReviewThreadBatch,
-  ReviewResponseCandidateSchema,
 } from "../../src/review/threads.ts";
 import type {
   FileChange,
   NoticeId,
   ReviewComment,
   ReviewRoundId,
-  ReviewRouteCandidate,
   ReviewSeriesId,
   ReviewThreadBatchId,
   SnapshotId,
 } from "../../src/review/types.ts";
-import { ReviewRouteCandidateSchema } from "../../src/review/types.ts";
-import { makeRound, makeSnapshot, span } from "../support/domain-fixtures.ts";
+import {
+  ReviewOpenToolSchema,
+  ReviewSkipCandidateToolSchema,
+  ReviewUnitCandidateToolSchema,
+} from "../../src/review/types.ts";
+import { makeRound, makeSnapshot } from "../support/domain-fixtures.ts";
 
 /**
  * The complete standing model-visible surface, rendered over fixed fixtures
@@ -136,67 +139,31 @@ function kickoffWithoutMoves(): string {
   );
 }
 
-/** A mechanical route over a move fixture, firing all three advisory signals. */
-function advisoryNudge(): string {
-  const snapshot = makeSnapshot("snapshot-surface-advisory", [
-    {
-      path: "src/a.ts",
-      lines: [" head", ...MOVED_BLOCK.map((line) => `-${line}`), " tail"],
-    },
-    { path: "src/b.ts", lines: [" head", "+beta", " tail"] },
-    {
-      path: "src/c.ts",
-      lines: [" top", ...MOVED_BLOCK.map((line) => `+${line}`), " bottom"],
-    },
-  ]);
-  const mechanicalUnit = (
-    title: string,
-    unitSpan: ReviewRouteCandidate["units"][number]["spans"][number],
-  ): ReviewRouteCandidate["units"][number] => ({
-    title,
-    whyHere: "Fixture ordering.",
-    context: "Fixture context.",
-    changeSummary: "Fixture change.",
-    reviewFocus: [{ question: "Fixture question?" }],
-    spans: [unitSpan],
-  });
-  const route = validateReviewRoute(snapshot, computeReviewDelta(snapshot), {
-    snapshotId: snapshot.id,
-    units: [
-      mechanicalUnit("A", span("src/a.ts", { old: [2, 4] })),
-      mechanicalUnit("B", span("src/b.ts", { new: [2, 2] })),
-      mechanicalUnit("C", span("src/c.ts", { new: [2, 4] })),
-    ],
-    skippedSpans: [],
-  });
-  const issues = assessRouteQuality(
-    snapshot,
-    route,
-    detectExactMoves(snapshot),
-  );
-  assert.deepEqual(
-    issues.map((issue) => issue.code),
-    ["hunk-mirroring", "alphabetical-order", "split-move"],
-    "The advisory fixture must fire every signal branch.",
-  );
-  return formatAdvisoryNudge(issues);
-}
-
 function toolSurface(): string {
   return [
-    `name: ${GUIDED_REVIEW_TOOL_NAME}`,
-    `description: ${GUIDED_REVIEW_TOOL_DESCRIPTION}`,
-    `promptSnippet: ${GUIDED_REVIEW_TOOL_PROMPT_SNIPPET}`,
-    `parameters: ${JSON.stringify(ReviewRouteCandidateSchema)}`,
+    `name: ${ADD_UNIT_TOOL_NAME}`,
+    `description: ${ADD_UNIT_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${ADD_UNIT_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewUnitCandidateToolSchema)}`,
+    "",
+    `name: ${SKIP_TOOL_NAME}`,
+    `description: ${SKIP_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${SKIP_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewSkipCandidateToolSchema)}`,
+    "",
+    `name: ${OPEN_TOOL_NAME}`,
+    `description: ${OPEN_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${OPEN_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewOpenToolSchema)}`,
   ].join("\n");
 }
 
 function responseToolSurface(): string {
   return [
-    `name: ${REVIEW_RESPONSES_TOOL_NAME}`,
-    `description: ${REVIEW_RESPONSES_TOOL_DESCRIPTION}`,
-    `promptSnippet: ${REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET}`,
-    `parameters: ${JSON.stringify(ReviewResponseCandidateSchema)}`,
+    `name: ${RESPOND_TOOL_NAME}`,
+    `description: ${RESPOND_TOOL_DESCRIPTION}`,
+    `promptSnippet: ${RESPOND_TOOL_PROMPT_SNIPPET}`,
+    `parameters: ${JSON.stringify(ReviewRespondToolSchema)}`,
   ].join("\n");
 }
 
@@ -281,11 +248,10 @@ function renderSurface(): string {
       "kickoff prompt: incremental review with selected project rules without moves",
       kickoffWithoutMoves(),
     ],
-    ["guided_review tool", toolSurface()],
-    ["submit_diffwalk_responses tool", responseToolSurface()],
+    ["route tools", toolSurface()],
+    ["respond tool", responseToolSurface()],
     ["tool results", resultSurface()],
     ["reviewer follow-up tool result", followUpSurface()],
-    ["advisory nudge", advisoryNudge()],
   ];
   return sections
     .map(([title, body]) => `=== ${title} ===\n${body}\n`)

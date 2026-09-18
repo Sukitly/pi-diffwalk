@@ -6,6 +6,7 @@ import {
 } from "../../src/review/coverage.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
 import { validateReviewRoute } from "../../src/review/route-validation.ts";
+import { changedLineKey } from "../../src/review/span.ts";
 import type {
   ChangedLineRecord,
   ReviewCoverage,
@@ -294,5 +295,49 @@ test("rejects a delta that does not match the snapshot", () => {
         skippedSpans: [],
       }),
     Error,
+  );
+});
+
+test("records an excluded line with its rule and rejects skipping it", () => {
+  const snapshot = fixture();
+  const contractId = fileChangeId("modified", "src/contract.ts");
+  const delta = computeReviewDelta(snapshot, undefined, {
+    exclusions: new Map([
+      [
+        changedLineKey({ fileChangeId: contractId, side: "new", line: 2 }),
+        { reason: "excluded-path", pattern: "src/contract.ts" },
+      ],
+    ]),
+  });
+
+  const coverage = computeReviewCoverage(ROUND, snapshot, delta, {
+    commentedLines: [],
+    skippedSpans: [],
+  });
+  assert.deepEqual(recordsOf(coverage, "src/contract.ts"), [
+    {
+      side: "new",
+      line: 2,
+      text: "value",
+      disposition: "excluded",
+      excludedInRoundId: ROUND,
+      exclusionReason: "excluded-path",
+    },
+  ]);
+
+  const skippedSpans = routeFor(snapshot, [
+    { path: "src/contract.ts", line: 2, reason: "Skip." },
+  ]).skippedSpans;
+  assert.throws(
+    () =>
+      computeReviewCoverage(ROUND, snapshot, delta, {
+        commentedLines: [],
+        skippedSpans,
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ReviewCoverageError);
+      assert.match(error.message, /excluded by a mechanical rule/);
+      return true;
+    },
   );
 });

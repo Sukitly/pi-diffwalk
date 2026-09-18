@@ -35,7 +35,11 @@ function summarize(delta: {
   const counts: Record<string, number> = {};
   for (const line of delta.lines) {
     const label =
-      line.type === "carried-forward" ? "carried-forward" : line.reason;
+      line.type === "carried-forward"
+        ? "carried-forward"
+        : line.type === "excluded"
+          ? "excluded"
+          : line.reason;
     counts[label] = (counts[label] ?? 0) + 1;
   }
   return counts;
@@ -335,5 +339,89 @@ test("rejects a baseline round whose coverage does not match its snapshot", () =
 test("only an unresolved comment blocks skipping", () => {
   assert.equal(isNeedsReviewReasonSkippable("new"), true);
   assert.equal(isNeedsReviewReasonSkippable("previously-skipped"), true);
+  assert.equal(isNeedsReviewReasonSkippable("previously-excluded"), true);
   assert.equal(isNeedsReviewReasonSkippable("unresolved-comment"), false);
+});
+
+function exclusionsFor(
+  snapshot: ReviewSnapshot,
+  path: string,
+  refs: readonly (readonly ["old" | "new", number])[],
+): Map<string, { reason: "whitespace-only" }> {
+  const change = snapshot.changes.find(
+    (candidate) => (candidate.newPath ?? candidate.oldPath) === path,
+  );
+  assert.ok(change);
+  return new Map(
+    refs.map(([side, line]) => [
+      changedLineKey({ fileChangeId: change.id, side, line }),
+      { reason: "whitespace-only" as const },
+    ]),
+  );
+}
+
+test("marks excluded lines in a first round", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+one", "+two", " tail"] },
+  ]);
+
+  const delta = computeReviewDelta(snapshot, undefined, {
+    exclusions: exclusionsFor(snapshot, "src/a.ts", [["new", 3]]),
+  });
+
+  assert.deepEqual(summarize(delta), { new: 1, excluded: 1 });
+  assert.deepEqual(requirementFor(delta, snapshot, "src/a.ts", "new", 3), {
+    type: "excluded",
+    fileChangeId: snapshot.changes[0]?.id,
+    side: "new",
+    line: 3,
+    reason: "whitespace-only",
+  });
+});
+
+test("exclusion yields to an unresolved comment and to a carried-forward line", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+commented", "+reviewed", " tail"] },
+  ]);
+  const baseline = makeRound({
+    id: "round-1",
+    snapshot,
+    dispositions: { "src/a.ts:new:2": "commented" },
+  });
+
+  const delta = computeReviewDelta(snapshot, baseline, {
+    exclusions: exclusionsFor(snapshot, "src/a.ts", [
+      ["new", 2],
+      ["new", 3],
+    ]),
+  });
+
+  assert.equal(
+    requirementFor(delta, snapshot, "src/a.ts", "new", 2)?.type,
+    "needs-review",
+  );
+  assert.equal(
+    requirementFor(delta, snapshot, "src/a.ts", "new", 3)?.type,
+    "carried-forward",
+  );
+});
+
+test("a line excluded in an earlier round returns to review when no rule matches", () => {
+  const snapshot = makeSnapshot("snapshot-1", [
+    { path: "src/a.ts", lines: [" keep", "+one", " tail"] },
+  ]);
+  const baseline = makeRound({
+    id: "round-1",
+    snapshot,
+    dispositions: { "src/a.ts:new:2": "excluded" },
+  });
+
+  const delta = computeReviewDelta(snapshot, baseline);
+
+  assert.deepEqual(summarize(delta), { "previously-excluded": 1 });
+
+  const again = computeReviewDelta(snapshot, baseline, {
+    exclusions: exclusionsFor(snapshot, "src/a.ts", [["new", 2]]),
+  });
+  assert.deepEqual(summarize(again), { excluded: 1 });
 });

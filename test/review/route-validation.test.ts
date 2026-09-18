@@ -6,6 +6,7 @@ import {
   ReviewRouteValidationError,
   validateReviewRoute,
 } from "../../src/review/route-validation.ts";
+import { changedLineKey } from "../../src/review/span.ts";
 import {
   type ReviewRouteCandidate,
   ReviewRouteCandidateSchema,
@@ -106,7 +107,7 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
       units: [
         {
           ...valid.units[0],
-          reviewFocus: ["One?", "Two?", "Three?", "Four?"].map((question) => ({
+          reviewFocus: ["1?", "2?", "3?", "4?", "5?", "6?"].map((question) => ({
             question,
           })),
         },
@@ -114,11 +115,29 @@ test("exports an agent schema that accepts spans and rejects patch content", () 
     }),
     false,
   );
+  assert.equal(
+    Value.Check(ReviewRouteCandidateSchema, {
+      ...valid,
+      units: [{ ...valid.units[0], reviewFocus: [] }],
+    }),
+    true,
+  );
 });
 
-test("rejects more than three review focus questions", () => {
+test("accepts a unit with no questions and rejects more than the limit", () => {
   const snapshot = fixture();
   const delta = computeReviewDelta(snapshot);
+  const spans = [
+    span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
+    span("src/contract.ts", { new: [2, 2] }),
+  ];
+
+  const silent = validateReviewRoute(
+    snapshot,
+    delta,
+    route(snapshot, [unit(spans, { reviewFocus: [] })]),
+  );
+  assert.deepEqual(silent.units[0]?.reviewFocus, []);
 
   assert.throws(
     () =>
@@ -126,17 +145,11 @@ test("rejects more than three review focus questions", () => {
         snapshot,
         delta,
         route(snapshot, [
-          unit(
-            [
-              span("src/entry.ts", { old: [2, 2], new: [2, 2] }),
-              span("src/contract.ts", { new: [2, 2] }),
-            ],
-            {
-              reviewFocus: ["One?", "Two?", "Three?", "Four?"].map(
-                (question) => ({ question }),
-              ),
-            },
-          ),
+          unit(spans, {
+            reviewFocus: ["1?", "2?", "3?", "4?", "5?", "6?"].map(
+              (question) => ({ question }),
+            ),
+          }),
         ]),
       ),
     (error: unknown) => codesOf(error).includes("review-focus-limit"),
@@ -544,5 +557,135 @@ test("rejects skipping a line whose earlier comment is unresolved", () => {
         ),
       ),
     (error: unknown) => codesOf(error).includes("unresolved-comment-skip"),
+  );
+});
+
+test("rejects routing or skipping an excluded line and does not require covering it", () => {
+  const snapshot = fixture();
+  const contract = snapshot.changes.find(
+    (change) => change.newPath === "src/contract.ts",
+  );
+  assert.ok(contract);
+  const delta = computeReviewDelta(snapshot, undefined, {
+    exclusions: new Map([
+      [
+        changedLineKey({ fileChangeId: contract.id, side: "new", line: 2 }),
+        { reason: "generated-attribute" },
+      ],
+    ]),
+  });
+
+  const withoutExcluded = validateReviewRoute(
+    snapshot,
+    delta,
+    route(snapshot, [
+      unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+    ]),
+  );
+  assert.equal(withoutExcluded.units.length, 1);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(snapshot, [
+          unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+          unit([span("src/contract.ts", { new: [2, 2] })]),
+        ]),
+      ),
+    (error: unknown) => codesOf(error).includes("excluded-reference"),
+  );
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        delta,
+        route(
+          snapshot,
+          [unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })])],
+          [
+            {
+              span: span("src/contract.ts", { new: [2, 2] }),
+              reason: "Generated.",
+            },
+          ],
+        ),
+      ),
+    (error: unknown) => codesOf(error).includes("excluded-reference"),
+  );
+});
+
+test("accepts a routine claim and rejects blank, oversized, or commented routine units", () => {
+  const snapshot = fixture();
+  const routine = { reference: "src/other.ts:1-3", reason: "Same shape." };
+
+  const accepted = validateReviewRoute(
+    snapshot,
+    computeReviewDelta(snapshot),
+    route(snapshot, [
+      unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+      unit([span("src/contract.ts", { new: [2, 2] })], { routine }),
+    ]),
+  );
+  assert.equal(accepted.units[0]?.routine, undefined);
+  assert.deepEqual(accepted.units[1]?.routine, routine);
+
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        computeReviewDelta(snapshot),
+        route(snapshot, [
+          unit([span("src/entry.ts", { old: [2, 2], new: [2, 2] })]),
+          unit([span("src/contract.ts", { new: [2, 2] })], {
+            routine: { reference: " ", reason: "" },
+          }),
+        ]),
+      ),
+    (error: unknown) => {
+      const codes = codesOf(error);
+      return codes.filter((code) => code === "empty-field").length === 2;
+    },
+  );
+
+  const large = makeSnapshot("snapshot-large", [
+    {
+      path: "src/big.ts",
+      lines: [
+        " head",
+        ...Array.from({ length: 41 }, (_, index) => `+line ${index}`),
+        " tail",
+      ],
+    },
+  ]);
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        large,
+        computeReviewDelta(large),
+        route(large, [
+          unit([span("src/big.ts", { new: [2, 42] })], { routine }),
+        ]),
+      ),
+    (error: unknown) => codesOf(error).includes("routine-too-large"),
+  );
+
+  const baseline = makeRound({
+    id: "round-1",
+    snapshot,
+    dispositions: { "src/contract.ts:new:2": "commented" },
+  });
+  assert.throws(
+    () =>
+      validateReviewRoute(
+        snapshot,
+        computeReviewDelta(snapshot, baseline),
+        route(snapshot, [
+          unit([span("src/contract.ts", { new: [2, 2] })], { routine }),
+        ]),
+      ),
+    (error: unknown) => codesOf(error).includes("routine-unresolved-comment"),
   );
 });

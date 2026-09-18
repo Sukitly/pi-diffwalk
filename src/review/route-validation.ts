@@ -37,12 +37,30 @@ export type ReviewRouteValidationIssueCode =
   | "empty-unit"
   | "invalid-span"
   | "carried-forward-reference"
+  | "excluded-reference"
   | "duplicate-coverage"
   | "missing-coverage"
   | "empty-skip-reason"
   | "unresolved-comment-skip"
   | "skip-coverage-conflict"
-  | "missing-review-unit";
+  | "missing-review-unit"
+  | "routine-too-large"
+  | "routine-unresolved-comment";
+
+/**
+ * A routine claim is only accepted for a small unit. Size is the one thing
+ * about routineness that code can check without judgment: a large change is
+ * never a repetition of a pattern the reviewer already trusts.
+ */
+export const ROUTINE_MAX_CHANGED_LINES = 40;
+
+/**
+ * How many review questions a unit may carry. A unit with nothing worth
+ * asking is allowed to carry none: a manufactured question costs the
+ * reviewer more than the empty space it fills. The cap only keeps a unit's
+ * questions from crowding the diff off the screen.
+ */
+export const REVIEW_FOCUS_LIMIT = 5;
 
 export interface ReviewRouteValidationIssue {
   readonly code: ReviewRouteValidationIssueCode;
@@ -61,10 +79,20 @@ export class ReviewRouteValidationError extends Error {
   }
 }
 
+export interface ReviewRouteValidationOptions {
+  /**
+   * A draft route is still being assembled one unit at a time, so gaps in
+   * coverage are expected. Every other rule applies at both stages: a unit
+   * that is wrong is rejected as soon as it arrives, not at the end.
+   */
+  readonly stage?: "draft" | "final";
+}
+
 export function validateReviewRoute(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
   candidate: ReviewRouteCandidate,
+  options: ReviewRouteValidationOptions = {},
 ): ReviewRoute {
   assertReviewDeltaMatchesSnapshot(snapshot, delta);
   const issues: ReviewRouteValidationIssue[] = [];
@@ -93,15 +121,10 @@ export function validateReviewRoute(
       `Review unit ${unitNumber} changeSummary`,
       issues,
     );
-    if (unit.reviewFocus.length === 0) {
-      issues.push({
-        code: "empty-field",
-        message: `Review unit ${unitNumber} requires at least one review focus question.`,
-      });
-    } else if (unit.reviewFocus.length > 3) {
+    if (unit.reviewFocus.length > REVIEW_FOCUS_LIMIT) {
       issues.push({
         code: "review-focus-limit",
-        message: `Review unit ${unitNumber} has ${unit.reviewFocus.length} review focus questions; at most three are allowed.`,
+        message: `Review unit ${unitNumber} has ${unit.reviewFocus.length} review focus questions; at most ${REVIEW_FOCUS_LIMIT} are allowed.`,
       });
     }
     for (const [focusIndex, focus] of unit.reviewFocus.entries()) {
@@ -116,6 +139,18 @@ export function validateReviewRoute(
         code: "empty-unit",
         message: `Review unit ${unitNumber} must reference at least one span.`,
       });
+    }
+    if (unit.routine !== undefined) {
+      validateNonBlank(
+        unit.routine.reference,
+        `Review unit ${unitNumber} routine.reference`,
+        issues,
+      );
+      validateNonBlank(
+        unit.routine.reason,
+        `Review unit ${unitNumber} routine.reason`,
+        issues,
+      );
     }
 
     const spans = unit.spans.flatMap((span, spanIndex) => {
@@ -148,6 +183,14 @@ export function validateReviewRoute(
       changeSummary: unit.changeSummary,
       reviewFocus,
       spans,
+      ...(unit.routine === undefined
+        ? {}
+        : {
+            routine: {
+              reference: unit.routine.reference,
+              reason: unit.routine.reason,
+            },
+          }),
     };
   });
 
@@ -196,11 +239,31 @@ export function validateReviewRoute(
   }
 
   const carriedForward: ChangedLine[] = [];
+  const excluded: ChangedLine[] = [];
   const unskippable: ChangedLine[] = [];
-  for (const lines of coverage.coveredByUnit) {
+  for (const [unitIndex, lines] of coverage.coveredByUnit.entries()) {
+    const routine = units[unitIndex]?.routine !== undefined;
+    if (routine && lines.length > ROUTINE_MAX_CHANGED_LINES) {
+      issues.push({
+        code: "routine-too-large",
+        message: `Review unit ${unitIndex + 1} claims to be routine but covers ${lines.length} changed lines; at most ${ROUTINE_MAX_CHANGED_LINES} are allowed. Remove the routine claim or split the unit.`,
+      });
+    }
     for (const line of lines) {
-      if (requirementOf(requirements, line)?.type === "carried-forward") {
+      const requirement = requirementOf(requirements, line);
+      if (requirement?.type === "carried-forward") {
         carriedForward.push(line);
+      } else if (requirement?.type === "excluded") {
+        excluded.push(line);
+      } else if (
+        routine &&
+        requirement?.type === "needs-review" &&
+        !isNeedsReviewReasonSkippable(requirement.reason)
+      ) {
+        issues.push({
+          code: "routine-unresolved-comment",
+          message: `${describeChangedLines(snapshot, [line])[0]} has an unresolved comment, so review unit ${unitIndex + 1} cannot be routine.`,
+        });
       }
     }
   }
@@ -209,6 +272,10 @@ export function validateReviewRoute(
     if (requirement === undefined) continue;
     if (requirement.type === "carried-forward") {
       carriedForward.push(line);
+      continue;
+    }
+    if (requirement.type === "excluded") {
+      excluded.push(line);
       continue;
     }
     if (!isNeedsReviewReasonSkippable(requirement.reason)) {
@@ -222,6 +289,12 @@ export function validateReviewRoute(
       message: `${description} was reviewed in an earlier round and must stay outside the planned route.`,
     });
   }
+  for (const description of describeChangedLines(snapshot, excluded)) {
+    issues.push({
+      code: "excluded-reference",
+      message: `${description} is excluded by a mechanical rule and must stay outside the planned route.`,
+    });
+  }
   for (const description of describeChangedLines(snapshot, unskippable)) {
     issues.push({
       code: "unresolved-comment-skip",
@@ -229,25 +302,27 @@ export function validateReviewRoute(
     });
   }
 
-  const uncovered = coverage.uncovered.filter(
-    (line) => requirementOf(requirements, line)?.type === "needs-review",
-  );
-  for (const description of describeChangedLines(snapshot, uncovered)) {
-    issues.push({
-      code: "missing-coverage",
-      message: `${description} needs review but no unit covers it and no skip excludes it.`,
-    });
-  }
+  if (options.stage !== "draft") {
+    const uncovered = coverage.uncovered.filter(
+      (line) => requirementOf(requirements, line)?.type === "needs-review",
+    );
+    for (const description of describeChangedLines(snapshot, uncovered)) {
+      issues.push({
+        code: "missing-coverage",
+        message: `${description} needs review but no unit covers it and no skip excludes it.`,
+      });
+    }
 
-  const needsReviewExists = delta.lines.some(
-    (requirement) => requirement.type === "needs-review",
-  );
-  if (needsReviewExists && !unitSpans.some((spans) => spans.length > 0)) {
-    issues.push({
-      code: "missing-review-unit",
-      message:
-        "A route with changed lines requiring review must contain at least one review unit with spans.",
-    });
+    const needsReviewExists = delta.lines.some(
+      (requirement) => requirement.type === "needs-review",
+    );
+    if (needsReviewExists && !unitSpans.some((spans) => spans.length > 0)) {
+      issues.push({
+        code: "missing-review-unit",
+        message:
+          "A route with changed lines requiring review must contain at least one review unit with spans.",
+      });
+    }
   }
 
   throwIfIssues(issues);

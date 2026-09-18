@@ -19,6 +19,7 @@ import {
 } from "../../src/review/in-progress.ts";
 import { validateReviewRoute } from "../../src/review/route-validation.ts";
 import { createReviewSeries } from "../../src/review/series.ts";
+import { changedLineKey } from "../../src/review/span.ts";
 import type {
   FileChange,
   FileChangeId,
@@ -872,4 +873,111 @@ export async function openWithSubmissionFailure(error: Error): Promise<{
 
 export function brand<Value extends string>(value: string): Value {
   return value as Value;
+}
+
+/** A unit whose span straddles a whitespace-only run and a lockfile sits alongside. */
+export function makeExcludedFixture(): UiFixture {
+  const path = "src/excluded-inside.ts";
+  const lockPath = "package-lock.json";
+  const snapshot = makeSnapshot("snapshot-excluded", [
+    {
+      path,
+      lines: [
+        " before",
+        "+target start",
+        " middle",
+        "-spaced  out",
+        "+spaced out",
+        " later",
+        "+target end",
+        " after",
+      ],
+    },
+    { path: lockPath, lines: [" {", '+  "a": 1', " }"] },
+  ]);
+  const changeId = fileChangeId("modified", path);
+  const lockId = fileChangeId("modified", lockPath);
+  const delta = computeReviewDelta(snapshot, undefined, {
+    exclusions: new Map([
+      [
+        changedLineKey({ fileChangeId: changeId, side: "old", line: 3 }),
+        { reason: "whitespace-only" as const },
+      ],
+      [
+        changedLineKey({ fileChangeId: changeId, side: "new", line: 4 }),
+        { reason: "whitespace-only" as const },
+      ],
+      [
+        changedLineKey({ fileChangeId: lockId, side: "new", line: 2 }),
+        { reason: "excluded-path" as const, pattern: "*-lock.json" },
+      ],
+    ]),
+  });
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Excluded inside span",
+        whyHere: "The unit reads across an excluded run.",
+        context: "start -> end",
+        changeSummary: "Adds a start and an end around unchanged behavior.",
+        reviewFocus: [{ question: "Is the end reachable from the start?" }],
+        spans: [span(path, { new: [2, 2] }), span(path, { new: [6, 6] })],
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
+}
+
+/** Two units: a walked one first, then a routine one that mirrors existing code. */
+export function makeRoutineFixture(): UiFixture {
+  const walkedPath = "src/handler.ts";
+  const routinePath = "src/routes/user.ts";
+  const snapshot = makeSnapshot("snapshot-routine", [
+    {
+      path: walkedPath,
+      lines: [" before", "+const claims = validate(token)", " after"],
+    },
+    {
+      path: routinePath,
+      lines: [
+        " export const routes = [",
+        '+  route("/user", userHandler),',
+        '+  route("/user/:id", userByIdHandler),',
+        " ]",
+      ],
+    },
+  ]);
+  const delta = computeReviewDelta(snapshot);
+  const routeCandidate: ReviewRouteCandidate = {
+    snapshotId: snapshot.id,
+    units: [
+      {
+        title: "Token validation",
+        whyHere: "Behavior starts here.",
+        context: "handler -> validate",
+        changeSummary: "Validates the token before use.",
+        reviewFocus: [{ question: "Is the missing-token path handled?" }],
+        spans: [span(walkedPath, { new: [2, 2] })],
+      },
+      {
+        title: "User route registration",
+        whyHere: "The handler is wired here.",
+        context: "routes -> handler",
+        changeSummary: "Registers two user routes.",
+        reviewFocus: [{ question: "Do the paths collide with existing ones?" }],
+        spans: [span(routinePath, { new: [2, 3] })],
+        routine: {
+          reference: "src/routes/order.ts:4-5",
+          reason:
+            "Same route() calls as the order routes, only the names differ.",
+        },
+      },
+    ],
+    skippedSpans: [],
+  };
+  const route = validateReviewRoute(snapshot, delta, routeCandidate);
+  return { snapshot, delta, routeCandidate, route };
 }

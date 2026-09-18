@@ -7,18 +7,29 @@ import type {
   ThemeColor,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
+import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.ts";
+import {
+  ADD_UNIT_TOOL_NAME,
+  RESPOND_TOOL_NAME,
+  SKIP_TOOL_NAME,
+} from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
+import type { ReviewRespondToolSchema } from "../../src/extension/tools.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
+import type { PathExclusionSources } from "../../src/git/exclusion.ts";
 import { registerDiffWalk } from "../../src/index.ts";
+import type { PathExclusionFacts } from "../../src/review/exclusion.ts";
 import {
   markReviewUnitReviewed,
   upsertInProgressReviewComment,
 } from "../../src/review/in-progress.ts";
+import type {
+  ReviewRouteDraftProgress,
+  ReviewRouteSkipProgress,
+} from "../../src/review/route-draft.ts";
 import {
   appendReviewThreadTurn,
-  type ReviewResponseCandidateSchema,
   setReviewThreadResolved,
 } from "../../src/review/threads.ts";
 import type {
@@ -26,21 +37,33 @@ import type {
   FileChangeId,
   GuidedReviewResult,
   ReviewComment,
+  ReviewOpenToolSchema,
   ReviewRouteCandidate,
-  ReviewRouteCandidateSchema,
+  ReviewSkipCandidateToolSchema,
   ReviewSnapshot,
+  ReviewUnitCandidateToolSchema,
   SnapshotId,
 } from "../../src/review/types.ts";
 import type { ReviewThreadUiResult } from "../../src/thread-ui/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 
 export type GuidedToolDefinition = ToolDefinition<
-  typeof ReviewRouteCandidateSchema,
+  typeof ReviewOpenToolSchema,
   GuidedReviewResult
 >;
 
+export type RouteUnitToolDefinition = ToolDefinition<
+  typeof ReviewUnitCandidateToolSchema,
+  ReviewRouteDraftProgress
+>;
+
+export type RouteSkipToolDefinition = ToolDefinition<
+  typeof ReviewSkipCandidateToolSchema,
+  ReviewRouteSkipProgress
+>;
+
 export type ResponseToolDefinition = ToolDefinition<
-  typeof ReviewResponseCandidateSchema,
+  typeof ReviewRespondToolSchema,
   ReviewThreadUiResult
 >;
 
@@ -57,7 +80,19 @@ export interface HarnessBehavior {
   projectRulesResult: DiffWalkRulesLoadResult;
   globalRulesError?: Error;
   projectRulesError?: Error;
+  globalExcludeFile: DiffWalkExcludeFileResult;
+  projectExcludeFile: DiffWalkExcludeFileResult;
+  pathExclusionFacts: PathExclusionFacts;
+  pathExclusionError?: Error;
+  /** Paths that exist for routine references; undefined accepts every path. */
+  existingReferencePaths?: readonly string[];
   snapshot: ReviewSnapshot;
+}
+
+export interface PathExclusionCall {
+  readonly repositoryRoot: string;
+  readonly paths: readonly string[];
+  readonly sources: PathExclusionSources;
 }
 
 export interface SentMessageMeta {
@@ -84,7 +119,18 @@ export interface Harness {
     args: string,
     ctx: ExtensionCommandContext,
   ) => Promise<void>;
+  /** The finishing tool, which opens the walkthrough. */
   readonly tool: GuidedToolDefinition;
+  readonly unitTool: RouteUnitToolDefinition;
+  readonly skipTool: RouteSkipToolDefinition;
+  /** Appends every unit, then finishes, the way an agent drives the route. */
+  readonly submitRoute: (
+    toolCallId: string,
+    route: ReviewRouteCandidate,
+    signal: AbortSignal | undefined,
+    onUpdate: undefined,
+    ctx: ExtensionContext,
+  ) => Promise<Awaited<ReturnType<GuidedToolDefinition["execute"]>>>;
   readonly responseTool: ResponseToolDefinition;
   readonly sentMessages: readonly string[];
   readonly sentMessageMeta: readonly SentMessageMeta[];
@@ -93,6 +139,7 @@ export interface Harness {
   readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
   readonly ruleLoadCalls: readonly RuleLoadCall[];
+  readonly pathExclusionCalls: readonly PathExclusionCall[];
   readonly behavior: HarnessBehavior;
   /** Replays persisted entries into a fresh harness, as session_start does. */
   readonly restoreSession: (entries: readonly AppendedEntry[]) => Promise<void>;
@@ -112,6 +159,9 @@ export function createHarness(
     submitFollowUpOnThreadOpen: false,
     globalRulesResult: { status: "absent" },
     projectRulesResult: { status: "absent" },
+    globalExcludeFile: { status: "absent" },
+    projectExcludeFile: { status: "absent" },
+    pathExclusionFacts: { excludedPaths: new Map(), generatedPaths: new Set() },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -121,6 +171,8 @@ export function createHarness(
     | ((args: string, ctx: ExtensionCommandContext) => Promise<void>)
     | undefined;
   let tool: GuidedToolDefinition | undefined;
+  let unitTool: RouteUnitToolDefinition | undefined;
+  let skipTool: RouteSkipToolDefinition | undefined;
   let responseTool: ResponseToolDefinition | undefined;
   const sentMessages: string[] = [];
   const sentMessageMeta: SentMessageMeta[] = [];
@@ -129,6 +181,7 @@ export function createHarness(
   const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
   const ruleLoadCalls: RuleLoadCall[] = [];
+  const pathExclusionCalls: PathExclusionCall[] = [];
   let sessionStartHandler:
     | ((event: unknown, ctx: unknown) => unknown)
     | undefined;
@@ -150,9 +203,19 @@ export function createHarness(
       assert.equal(name, "diffwalk");
       command = options.handler;
     },
-    registerTool(definition: GuidedToolDefinition | ResponseToolDefinition) {
-      if (definition.name === REVIEW_RESPONSES_TOOL_NAME) {
+    registerTool(
+      definition:
+        | GuidedToolDefinition
+        | RouteUnitToolDefinition
+        | RouteSkipToolDefinition
+        | ResponseToolDefinition,
+    ) {
+      if (definition.name === RESPOND_TOOL_NAME) {
         responseTool = definition as ResponseToolDefinition;
+      } else if (definition.name === ADD_UNIT_TOOL_NAME) {
+        unitTool = definition as RouteUnitToolDefinition;
+      } else if (definition.name === SKIP_TOOL_NAME) {
+        skipTool = definition as RouteSkipToolDefinition;
       } else {
         tool = definition as GuidedToolDefinition;
       }
@@ -214,6 +277,25 @@ export function createHarness(
         throw behavior.projectRulesError;
       }
       return behavior.projectRulesResult;
+    },
+    async locateGlobalDiffWalkExcludeFile() {
+      return behavior.globalExcludeFile;
+    },
+    async locateProjectDiffWalkExcludeFile() {
+      return behavior.projectExcludeFile;
+    },
+    async routineReferenceExists(_repositoryRoot, path) {
+      return (
+        behavior.existingReferencePaths === undefined ||
+        behavior.existingReferencePaths.includes(path)
+      );
+    },
+    async resolvePathExclusionFacts(_git, repositoryRoot, paths, sources) {
+      pathExclusionCalls.push({ repositoryRoot, paths, sources });
+      if (behavior.pathExclusionError !== undefined) {
+        throw behavior.pathExclusionError;
+      }
+      return behavior.pathExclusionFacts;
     },
     async openReviewThreads(_ctx, input) {
       openedThreadBatches.push(input.batch.id);
@@ -303,7 +385,39 @@ export function createHarness(
   registerDiffWalk(pi, dependencies);
   assert.ok(command);
   assert.ok(tool);
+  assert.ok(unitTool);
+  assert.ok(skipTool);
   assert.ok(responseTool);
+  const finishTool = tool;
+  const appendTool = unitTool;
+  const skipRegionTool = skipTool;
+  const submitRoute = async (
+    toolCallId: string,
+    route: ReviewRouteCandidate,
+    signal: AbortSignal | undefined,
+    _onUpdate: undefined,
+    ctx: ExtensionContext,
+  ): Promise<Awaited<ReturnType<GuidedToolDefinition["execute"]>>> => {
+    for (const [index, unit] of route.units.entries()) {
+      await appendTool.execute(
+        `${toolCallId}-unit-${index + 1}`,
+        unit,
+        signal,
+        undefined,
+        ctx,
+      );
+    }
+    for (const [index, skip] of route.skippedSpans.entries()) {
+      await skipRegionTool.execute(
+        `${toolCallId}-skip-${index + 1}`,
+        skip,
+        signal,
+        undefined,
+        ctx,
+      );
+    }
+    return finishTool.execute(toolCallId, {}, signal, undefined, ctx);
+  };
   assert.ok(sessionStartHandler);
   const restoreSession = async (
     entries: readonly AppendedEntry[],
@@ -333,8 +447,12 @@ export function createHarness(
     openedThreadBatches,
     appendedEntries,
     ruleLoadCalls,
+    pathExclusionCalls,
     behavior,
     restoreSession,
+    unitTool: appendTool,
+    skipTool,
+    submitRoute,
   };
 }
 

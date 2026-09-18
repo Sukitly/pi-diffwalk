@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatGuidedReviewResult } from "../../src/extension/model-payloads.ts";
-import { REVIEW_RESPONSES_TOOL_NAME } from "../../src/extension/prompts.ts";
+import { RESPOND_TOOL_NAME } from "../../src/extension/prompts.ts";
 import {
   buildKickoffMessageDetails,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
@@ -37,7 +37,7 @@ import {
 test("renders every successful guided-review outcome", async () => {
   const pausedHarness = createHarness();
   await pausedHarness.command("", commandContext());
-  const paused = await pausedHarness.tool.execute(
+  const paused = await pausedHarness.submitRoute(
     "call-paused",
     validRoute(),
     undefined,
@@ -68,7 +68,7 @@ test("renders every successful guided-review outcome", async () => {
 
   const discardedHarness = createHarness({ discardOnOpen: true });
   await discardedHarness.command("", commandContext());
-  const discarded = await discardedHarness.tool.execute(
+  const discarded = await discardedHarness.submitRoute(
     "call-discarded",
     validRoute(),
     undefined,
@@ -82,7 +82,7 @@ test("renders every successful guided-review outcome", async () => {
 
   const noCommentsHarness = createHarness({ submitOnOpen: true });
   await noCommentsHarness.command("", commandContext());
-  const noComments = await noCommentsHarness.tool.execute(
+  const noComments = await noCommentsHarness.submitRoute(
     "call-no-comments",
     validRoute(),
     undefined,
@@ -104,7 +104,7 @@ test("renders every successful guided-review outcome", async () => {
     commentOnSubmit: true,
   });
   await commentsHarness.command("", commandContext());
-  const comments = await commentsHarness.tool.execute(
+  const comments = await commentsHarness.submitRoute(
     "call-comments",
     validRoute(),
     undefined,
@@ -160,6 +160,7 @@ test("builds user-facing kickoff details with concrete additional changes", () =
       changedFileCount: 3,
       needsReviewLineCount: 1,
       carriedForwardLineCount: 0,
+      excludedLineCount: 0,
       additionalChanges: [
         { path: "assets/logo.png", description: "binary file" },
         {
@@ -183,6 +184,7 @@ test("renders kickoff facts on separate lines without protocol details", () => {
       changedFileCount: 3,
       needsReviewLineCount: 5,
       carriedForwardLineCount: 1,
+      excludedLineCount: 2,
       additionalChanges: [
         { path: "assets/logo.png", description: "binary file" },
         {
@@ -209,6 +211,7 @@ test("renders kickoff facts on separate lines without protocol details", () => {
       "Changed files: 3",
       "Lines to review: 5",
       "Previously reviewed: 1 line",
+      "Excluded by rule: 2 lines",
       "Additional changes:",
       "  assets/logo.png: binary file",
       "  scripts/deploy.sh: file permissions changed",
@@ -331,7 +334,7 @@ test("formats structured pause, discard, and submission instructions", () => {
   assert.equal(formatted.turnId, "T1");
   assert.equal(formatted.comments[0]?.threadId, "C1");
   assert.match(formatted.instruction, /without modifying files/);
-  assert.match(formatted.instruction, new RegExp(REVIEW_RESPONSES_TOOL_NAME));
+  assert.match(formatted.instruction, new RegExp(RESPOND_TOOL_NAME));
   assert.match(
     formatted.instruction,
     /Do not answer in ordinary assistant text/,

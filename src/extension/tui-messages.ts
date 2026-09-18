@@ -1,5 +1,6 @@
 import type { MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import type { ReviewRouteDraftProgress } from "../review/route-draft.ts";
 import { requireThreadTurn } from "../review/threads.ts";
 import type {
   FileChange,
@@ -34,6 +35,7 @@ export interface KickoffMessageDetails {
   readonly changedFileCount: number;
   readonly needsReviewLineCount: number;
   readonly carriedForwardLineCount: number;
+  readonly excludedLineCount?: number;
   readonly additionalChanges?: readonly KickoffAdditionalChangeDetails[];
 }
 
@@ -60,6 +62,9 @@ export function buildKickoffMessageDetails(
     ).length,
     carriedForwardLineCount: delta.lines.filter(
       (requirement) => requirement.type === "carried-forward",
+    ).length,
+    excludedLineCount: delta.lines.filter(
+      (requirement) => requirement.type === "excluded",
     ).length,
     additionalChanges: snapshot.changes
       .filter((change) => change.content.type !== "text")
@@ -95,6 +100,11 @@ export const renderKickoffMessage: MessageRenderer<KickoffMessageDetails> = (
     if (details.carriedForwardLineCount > 0) {
       lines.push(
         `Previously reviewed: ${countNoun(details.carriedForwardLineCount, "line")}`,
+      );
+    }
+    if ((details.excludedLineCount ?? 0) > 0) {
+      lines.push(
+        `Excluded by rule: ${countNoun(details.excludedLineCount ?? 0, "line")}`,
       );
     }
     const additionalChanges = details.additionalChanges ?? [];
@@ -146,6 +156,29 @@ export function renderGuidedReviewToolResult(
     reviewOutcomeDisplayLines(result);
   const titleColor = result.status === "submitted" ? "success" : "warning";
   return new Text([theme.fg(titleColor, title), ...body].join("\n"), 0, 0);
+}
+
+/** One line per accepted unit: what was taken, and how much is left. */
+export function renderAddUnitToolResult(
+  progress: ReviewRouteDraftProgress,
+  theme: Theme,
+): Text {
+  const remainingLines = progress.remaining.reduce(
+    (sum, file) => sum + file.lineCount,
+    0,
+  );
+  const summary =
+    remainingLines === 0
+      ? "route complete"
+      : `${countNoun(remainingLines, "line")} left in ${countNoun(progress.remaining.length, "file")}`;
+  return new Text(
+    theme.fg(
+      remainingLines === 0 ? "success" : "muted",
+      `Unit ${progress.unitCount} accepted, ${summary}`,
+    ),
+    0,
+    0,
+  );
 }
 
 export function reviewOutcomeNotification(result: GuidedReviewResult): string {

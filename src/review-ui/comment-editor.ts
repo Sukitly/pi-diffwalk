@@ -243,6 +243,14 @@ function commentOmissionReason(
   switch (ownership.type) {
     case "carried-forward":
       return { type: "carried-forward" };
+    case "excluded":
+      return {
+        type: "excluded",
+        reason: ownership.reason,
+        ...(ownership.pattern === undefined
+          ? {}
+          : { pattern: ownership.pattern }),
+      };
     case "skipped":
       return { type: "skipped", reason: ownership.reason };
     case "unit":

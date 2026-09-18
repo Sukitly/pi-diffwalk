@@ -4,6 +4,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { ReviewSnapshotDriftError } from "../git/errors.ts";
+import { resolvePathExclusionFacts } from "../git/exclusion.ts";
 import {
   assertReviewSnapshotUnchanged,
   captureRepositoryState,
@@ -11,22 +12,32 @@ import {
 } from "../git/snapshot.ts";
 import { computeReviewDelta } from "../review/delta.ts";
 import {
+  computeExclusions,
+  EMPTY_PATH_EXCLUSION_FACTS,
+  type ExclusionMark,
+  exclusionPath,
+  type PathExclusionFacts,
+} from "../review/exclusion.ts";
+import {
   attachReviewRoute,
   createInProgressReview,
   discardInProgressReview,
   submitInProgressReview,
 } from "../review/in-progress.ts";
-import { detectExactMoves } from "../review/moves.ts";
 import {
   DIFFWALK_SERIES_ENTRY_TYPE,
   parseReviewSeriesEntry,
   serializeReviewSeriesEntry,
 } from "../review/persistence.ts";
 import {
-  assessRouteQuality,
-  ReviewRouteAdvisoryNudge,
-} from "../review/route-advisory.ts";
-import { validateReviewRoute } from "../review/route-validation.ts";
+  appendReviewRouteSkip,
+  appendReviewRouteUnit,
+  createReviewRouteDraft,
+  finishReviewRouteDraft,
+  type ReviewRouteDraft,
+  type ReviewRouteDraftProgress,
+  type ReviewRouteSkipProgress,
+} from "../review/route-draft.ts";
 import { createReviewSeries } from "../review/series.ts";
 import {
   DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
@@ -46,18 +57,23 @@ import type {
   GuidedReviewResult,
   InProgressReview,
   ReviewDelta,
-  ReviewRouteCandidate,
   ReviewSeries,
   ReviewSeriesId,
+  ReviewSkipCandidate,
   ReviewSnapshot,
   ReviewThreadBatch,
   ReviewThreadBatchId,
-  ReviewThreadTurnId,
+  ReviewUnitCandidate,
   SubmittedGuidedReviewResult,
 } from "../review/types.ts";
 import { openGuidedReview } from "../review-ui/index.ts";
 import { openReviewThreads } from "../thread-ui/index.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
+import {
+  decideExclusionSources,
+  locateGlobalDiffWalkExcludeFile,
+  locateProjectDiffWalkExcludeFile,
+} from "./exclusions.ts";
 import { createPiGitRunner } from "./git-runner.ts";
 import {
   formatGuidedReviewResult,
@@ -65,6 +81,7 @@ import {
   shouldSendReviewToAgent,
 } from "./model-payloads.ts";
 import { buildReviewKickoffPrompt } from "./prompts.ts";
+import { assertRoutineReferences, routineReferenceExists } from "./routine.ts";
 import {
   DIFFWALK_RULES_SOURCE,
   type DiffWalkRulesLoadResult,
@@ -85,6 +102,12 @@ import {
 export const DEFAULT_REVIEW_TARGET = "HEAD";
 export const DISCARD_OPTION = "--discard";
 export const THREADS_OPTION = "--threads";
+export const NO_EXCLUDE_OPTION = "--no-exclude";
+
+export interface ReviewCommandOptions {
+  /** Skip every mechanical exclusion rule and route all changed lines. */
+  readonly noExclude?: boolean;
+}
 
 export interface DiffWalkDependencies {
   readonly captureReviewSnapshot: typeof captureReviewSnapshot;
@@ -92,6 +115,10 @@ export interface DiffWalkDependencies {
   readonly assertReviewSnapshotUnchanged: typeof assertReviewSnapshotUnchanged;
   readonly loadGlobalDiffWalkRules: typeof loadGlobalDiffWalkRules;
   readonly loadProjectDiffWalkRules: typeof loadProjectDiffWalkRules;
+  readonly locateGlobalDiffWalkExcludeFile: typeof locateGlobalDiffWalkExcludeFile;
+  readonly locateProjectDiffWalkExcludeFile: typeof locateProjectDiffWalkExcludeFile;
+  readonly resolvePathExclusionFacts: typeof resolvePathExclusionFacts;
+  readonly routineReferenceExists: typeof routineReferenceExists;
   readonly openGuidedReview: typeof openGuidedReview;
   readonly openReviewThreads: typeof openReviewThreads;
 }
@@ -102,6 +129,10 @@ export const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   assertReviewSnapshotUnchanged,
   loadGlobalDiffWalkRules,
   loadProjectDiffWalkRules,
+  locateGlobalDiffWalkExcludeFile,
+  locateProjectDiffWalkExcludeFile,
+  resolvePathExclusionFacts,
+  routineReferenceExists,
   openGuidedReview,
   openReviewThreads,
 };
@@ -119,8 +150,8 @@ interface PendingReview {
   inProgress: boolean;
   /** The selected rules file is captured once so repeated kickoffs stay deterministic. */
   routeRules?: LoadedDiffWalkRules;
-  /** Advisory route-quality signals are returned at most once per review. */
-  advisoryNudged: boolean;
+  /** Units accepted so far while the agent assembles the route one at a time. */
+  routeDraft: ReviewRouteDraft;
 }
 
 /**
@@ -170,10 +201,20 @@ export class DiffWalkSession {
     }
   }
 
-  /** The turn awaiting agent responses in a known batch, for filling a missing turnId. */
-  pendingThreadTurnId(batchId: string): ReviewThreadTurnId | undefined {
-    const batch = this.threadBatchesById.get(batchId as ReviewThreadBatchId);
-    return batch === undefined ? undefined : pendingReviewThreadTurn(batch)?.id;
+  /**
+   * The one batch awaiting agent responses. A new round cannot start while
+   * the previous batch is unanswered, so at most one batch can be pending.
+   */
+  private pendingThreadBatch(): ReviewThreadBatch | undefined {
+    const pending = [...this.threadBatchesById.values()].filter(
+      (batch) => pendingReviewThreadTurn(batch) !== undefined,
+    );
+    if (pending.length > 1) {
+      throw new Error(
+        `DiffWalk has ${pending.length} thread batches awaiting responses; expected at most one.`,
+      );
+    }
+    return pending[0];
   }
 
   /** Reopens the most recent comment threads and reports a follow-up to the agent. */
@@ -193,26 +234,32 @@ export class DiffWalkSession {
   }
 
   /**
-   * The submit_diffwalk_responses tool workflow: record the agent's answers
+   * The diffwalk_respond tool workflow: record the agent's answers
    * on the pending turn, persist them, and reopen the threads for the
    * reviewer.
    */
   async respondToThreads(
     ctx: ReviewUiContext,
-    candidate: ReviewResponseCandidate,
+    responses: ReviewResponseCandidate["responses"],
     signal: AbortSignal | undefined,
   ): Promise<ReviewThreadUiResult> {
     signal?.throwIfAborted();
-    const batch = this.threadBatchesById.get(
-      candidate.batchId as ReviewThreadBatchId,
-    );
+    const batch = this.pendingThreadBatch();
     if (batch === undefined) {
       throw new Error(
-        `No pending DiffWalk thread batch matches ${candidate.batchId}. Use the batchId from the pending reviewer turn.`,
+        "No DiffWalk reviewer turn is awaiting responses. Responses are only accepted after the reviewer submits comments.",
       );
     }
     this.assertThreadBatchCanChange(batch);
-    const answered = attachReviewThreadResponses(batch, candidate);
+    const turn = pendingReviewThreadTurn(batch);
+    if (turn === undefined) {
+      throw new Error(`DiffWalk batch ${batch.id} has no pending turn.`);
+    }
+    const answered = attachReviewThreadResponses(batch, {
+      batchId: batch.id,
+      turnId: turn.id,
+      responses,
+    });
     this.persistThreadBatch(answered);
     signal?.throwIfAborted();
     return this.openThreadBatch(ctx, answered);
@@ -296,12 +343,17 @@ export class DiffWalkSession {
   private async startReview(
     ctx: CommandContext,
     targetRef: string,
+    options: ReviewCommandOptions,
   ): Promise<void> {
     const snapshot = await this.dependencies.captureReviewSnapshot(
       createPiGitRunner(this.pi),
       ctx.cwd,
       targetRef,
     );
+    const exclusions =
+      options.noExclude === true
+        ? new Map<string, ExclusionMark>()
+        : await this.captureExclusions(ctx, snapshot);
     const sourceBranch =
       snapshot.comparison.sourceBranch ??
       `detached:${snapshot.comparison.sourceHeadOid}`;
@@ -335,6 +387,7 @@ export class DiffWalkSession {
         baselineThreads === undefined
           ? []
           : resolvedCommentLines(baselineThreads),
+      exclusions,
     });
     if (
       !delta.lines.some((requirement) => requirement.type === "needs-review")
@@ -358,7 +411,7 @@ export class DiffWalkSession {
       series,
       inProgress: false,
       ...(routeRules === undefined ? {} : { routeRules }),
-      advisoryNudged: false,
+      routeDraft: createReviewRouteDraft(snapshot.id),
     };
     this.pendingReview = pending;
     this.sendKickoffPrompt(pending);
@@ -394,67 +447,138 @@ export class DiffWalkSession {
   async reviewCommand(
     ctx: CommandContext & ReviewUiContext,
     requestedTarget: string | undefined,
+    options: ReviewCommandOptions = {},
   ): Promise<void> {
     const existing = this.pendingReview;
     if (existing?.review.lifecycle === "ready") {
-      await this.resumeReadyReview(ctx, existing, requestedTarget);
+      await this.resumeReadyReview(ctx, existing, requestedTarget, options);
       return;
     }
     if (existing?.review.lifecycle === "preparing-route") {
-      await this.resumeRoutePreparation(ctx, existing, requestedTarget);
+      await this.resumeRoutePreparation(
+        ctx,
+        existing,
+        requestedTarget,
+        options,
+      );
       return;
     }
-    await this.startReview(ctx, requestedTarget ?? DEFAULT_REVIEW_TARGET);
+    await this.startReview(
+      ctx,
+      requestedTarget ?? DEFAULT_REVIEW_TARGET,
+      options,
+    );
   }
 
   /**
-   * The guided_review tool workflow: validate the route against the pending
-   * snapshot, return advisory signals once, confirm the repository still
-   * matches, attach the route, and open the walkthrough.
+   * Mechanical exclusion never blocks a review. A source that cannot be
+   * evaluated is reported and dropped, and a Git failure while matching
+   * paths falls back to routing every changed line. As with project review
+   * rules, a project exclude file is read after the snapshot was frozen, so
+   * drift is checked once it has been used.
    */
-  async attachRouteAndOpen(
-    ctx: ReviewUiContext,
-    routeCandidate: ReviewRouteCandidate,
-    signal: AbortSignal | undefined,
-  ): Promise<GuidedReviewResult> {
-    const pending = this.pendingReview;
-    if (pending === undefined) {
-      throw new Error(
-        "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
-      );
-    }
-    if (routeCandidate.snapshotId !== pending.review.snapshot.id) {
-      throw new Error(
-        `Route snapshot ${routeCandidate.snapshotId} does not match pending snapshot ${pending.review.snapshot.id}. Use the frozen snapshot ID from the /diffwalk prompt.`,
-      );
-    }
-    if (pending.inProgress) {
-      throw new Error(
-        `Guided review for snapshot ${pending.review.snapshot.id} is already open.`,
-      );
-    }
-    if (pending.review.lifecycle !== "preparing-route") {
-      throw new Error(
-        `Review ${pending.review.id} already has a validated route. Run /diffwalk to resume it.`,
-      );
-    }
-
-    const route = validateReviewRoute(
-      pending.review.snapshot,
-      pending.review.delta,
-      routeCandidate,
+  private async captureExclusions(
+    ctx: CommandContext,
+    snapshot: ReviewSnapshot,
+  ): Promise<ReadonlyMap<string, ExclusionMark>> {
+    const decision = await decideExclusionSources(
+      snapshot,
+      ctx.isProjectTrusted(),
+      {
+        locateGlobalExcludeFile: () =>
+          this.dependencies.locateGlobalDiffWalkExcludeFile(),
+        locateProjectExcludeFile: (repositoryRoot) =>
+          this.dependencies.locateProjectDiffWalkExcludeFile(repositoryRoot),
+      },
     );
-    if (!pending.advisoryNudged) {
-      const advisories = assessRouteQuality(
-        pending.review.snapshot,
-        route,
-        detectExactMoves(pending.review.snapshot),
-      );
-      if (advisories.length > 0) {
-        pending.advisoryNudged = true;
-        throw new ReviewRouteAdvisoryNudge(advisories);
+    for (const warning of decision.warnings) {
+      ctx.ui.notify(warning, "warning");
+    }
+    const paths: string[] = [];
+    for (const change of snapshot.changes) {
+      if (change.content.type !== "text") continue;
+      const path = exclusionPath(change);
+      if (path !== undefined) paths.push(path);
+    }
+    const needsGit =
+      paths.length > 0 &&
+      (decision.sources.excludeFile !== undefined ||
+        decision.sources.generatedAttribute);
+    let facts: PathExclusionFacts = EMPTY_PATH_EXCLUSION_FACTS;
+    if (needsGit) {
+      try {
+        facts = await this.dependencies.resolvePathExclusionFacts(
+          createPiGitRunner(this.pi),
+          snapshot.repositoryRoot,
+          paths,
+          decision.sources,
+        );
+      } catch (error: unknown) {
+        ctx.ui.notify(
+          `Cannot evaluate path exclusions: ${errorMessage(error)} Routing every changed line.`,
+          "warning",
+        );
+      }
+      if (decision.excludeScope === "project") {
+        await this.verifySnapshot(snapshot);
       }
     }
+    return computeExclusions(snapshot, facts);
+  }
+
+  /**
+   * The route-finish tool workflow: validate the completed route against the
+   * pending snapshot, confirm the repository still matches, attach the
+   * route, and open the walkthrough.
+   */
+  /**
+   * Accepts one route unit. Validation runs against the whole draft, so a
+   * unit that conflicts with an earlier one is rejected here rather than at
+   * the end, and only the unit being added has to be rewritten.
+   */
+  async addRouteUnit(
+    unit: ReviewUnitCandidate,
+  ): Promise<ReviewRouteDraftProgress> {
+    const pending = this.requireRoutableReview();
+    const progress = appendReviewRouteUnit(
+      pending.review.snapshot,
+      pending.review.delta,
+      pending.routeDraft,
+      unit,
+    );
+    await assertRoutineReferences(
+      progress.acceptedUnit,
+      progress.unitCount,
+      pending.review.snapshot.repositoryRoot,
+      this.dependencies.routineReferenceExists,
+    );
+    pending.routeDraft = progress.draft;
+    return progress;
+  }
+
+  /** Records one skipped region. Checked on arrival, like a unit. */
+  skipRouteRegion(skip: ReviewSkipCandidate): ReviewRouteSkipProgress {
+    const pending = this.requireRoutableReview();
+    const progress = appendReviewRouteSkip(
+      pending.review.snapshot,
+      pending.review.delta,
+      pending.routeDraft,
+      skip,
+    );
+    pending.routeDraft = progress.draft;
+    return progress;
+  }
+
+  async openRoute(
+    ctx: ReviewUiContext,
+    signal: AbortSignal | undefined,
+  ): Promise<GuidedReviewResult> {
+    const pending = this.requireRoutableReview();
+    const route = finishReviewRouteDraft(
+      pending.review.snapshot,
+      pending.review.delta,
+      pending.routeDraft,
+    );
     try {
       await this.verifySnapshot(pending.review.snapshot, signal);
     } catch (error: unknown) {
@@ -472,6 +596,26 @@ export class DiffWalkSession {
       timestamp: new Date().toISOString(),
     });
     return this.runPendingReview(ctx, pending);
+  }
+
+  private requireRoutableReview(): PendingReview {
+    const pending = this.pendingReview;
+    if (pending === undefined) {
+      throw new Error(
+        "No DiffWalk snapshot is pending. Ask the user to run /diffwalk first.",
+      );
+    }
+    if (pending.inProgress) {
+      throw new Error(
+        `Guided review for snapshot ${pending.review.snapshot.id} is already open.`,
+      );
+    }
+    if (pending.review.lifecycle !== "preparing-route") {
+      throw new Error(
+        `Review ${pending.review.id} already has a validated route. Run /diffwalk to resume it.`,
+      );
+    }
+    return pending;
   }
 
   discardPendingReview(ctx: CommandContext): void {
@@ -501,6 +645,7 @@ export class DiffWalkSession {
     ctx: CommandContext & ReviewUiContext,
     existing: PendingReview,
     requestedTarget: string | undefined,
+    options: ReviewCommandOptions,
   ): Promise<void> {
     if (existing.inProgress) {
       throw new Error(`Review ${existing.review.id} is already open.`);
@@ -518,7 +663,7 @@ export class DiffWalkSession {
         `Replacing the untouched review against ${pendingTarget} with a review against ${requestedTarget}.`,
         "info",
       );
-      await this.startReview(ctx, requestedTarget);
+      await this.startReview(ctx, requestedTarget, options);
       return;
     }
     try {
@@ -531,7 +676,7 @@ export class DiffWalkSession {
           `Discarded the stale review and ${describeDrafts(existing.review)}. Starting a new review against ${requestedTarget ?? pendingTarget}.`,
         "warning",
       );
-      await this.startReview(ctx, requestedTarget ?? pendingTarget);
+      await this.startReview(ctx, requestedTarget ?? pendingTarget, options);
       return;
     }
     const result = await this.runPendingReview(ctx, existing);
@@ -555,6 +700,7 @@ export class DiffWalkSession {
     ctx: CommandContext,
     existing: PendingReview,
     requestedTarget: string | undefined,
+    options: ReviewCommandOptions,
   ): Promise<void> {
     const pendingTarget = existing.series.targetRef;
     let drifted = false;
@@ -575,7 +721,7 @@ export class DiffWalkSession {
           : `Replacing the pending review against ${pendingTarget} with a review against ${requestedTarget}.`,
         "info",
       );
-      await this.startReview(ctx, requestedTarget ?? pendingTarget);
+      await this.startReview(ctx, requestedTarget ?? pendingTarget, options);
       return;
     }
     this.sendKickoffPrompt(existing);
@@ -761,6 +907,14 @@ function describeNothingToReview(
       `${carriedForward} changed line${carriedForward === 1 ? "" : "s"} already reviewed in round ${series.rounds.length}.`,
     );
   }
+  const excluded = delta.lines.filter(
+    (requirement) => requirement.type === "excluded",
+  ).length;
+  if (excluded > 0) {
+    parts.push(
+      `${excluded} changed line${excluded === 1 ? "" : "s"} excluded by mechanical rules; run /diffwalk ${NO_EXCLUDE_OPTION} to review them.`,
+    );
+  }
   let unreviewableCount = 0;
   for (const change of snapshot.changes) {
     const content = change.content;
@@ -774,7 +928,7 @@ function describeNothingToReview(
   for (const notice of snapshot.notices) {
     parts.push(notice.message);
   }
-  if (carriedForward === 0 && unreviewableCount === 0) {
+  if (carriedForward === 0 && excluded === 0 && unreviewableCount === 0) {
     parts.push("The worktree matches the comparison.");
   }
   return parts.join(" ");

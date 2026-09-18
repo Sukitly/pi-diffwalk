@@ -3,6 +3,7 @@ import type { KeybindingsManager } from "@earendil-works/pi-tui";
 import type { ReviewCommentTarget } from "../review/comments.ts";
 import type {
   DiffLine,
+  ExclusionReason,
   FileChange,
   ResolvedSpan,
   ReviewUnit,
@@ -61,6 +62,11 @@ export type ChangedLineDisplayOwnership =
     }
   | {
       readonly type: "carried-forward";
+    }
+  | {
+      readonly type: "excluded";
+      readonly reason: ExclusionReason;
+      readonly pattern?: string;
     };
 
 export type DisplayOmissionReason =
@@ -68,12 +74,18 @@ export type DisplayOmissionReason =
   | {
       readonly type: "gap";
       readonly carriedForward: number;
+      readonly excluded: number;
       readonly skipped: number;
       readonly otherUnit: number;
       readonly shownLater: number;
     }
   | { readonly type: "route-jump" }
   | { readonly type: "carried-forward" }
+  | {
+      readonly type: "excluded";
+      readonly reason: ExclusionReason;
+      readonly pattern?: string;
+    }
   | { readonly type: "skipped"; readonly reason: string }
   | { readonly type: "other-unit"; readonly unitTitle: string }
   | { readonly type: "shown-earlier" }

@@ -1,12 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import {
-  type ReviewResponseCandidate,
-  ReviewResponseCandidateSchema,
-} from "../review/threads.ts";
+import { Type } from "typebox";
+import type {
+  ReviewRouteDraftProgress,
+  ReviewRouteSkipProgress,
+} from "../review/route-draft.ts";
+import type { ReviewResponseCandidate } from "../review/threads.ts";
 import {
   type GuidedReviewResult,
-  ReviewRouteCandidateSchema,
+  ReviewOpenToolSchema,
+  ReviewSkipCandidateToolSchema,
+  ReviewUnitCandidateToolSchema,
 } from "../review/types.ts";
 import type { ReviewThreadUiResult } from "../thread-ui/types.ts";
 import {
@@ -15,36 +19,174 @@ import {
   shouldSendReviewToAgent,
 } from "./model-payloads.ts";
 import {
-  GUIDED_REVIEW_TOOL_DESCRIPTION,
-  GUIDED_REVIEW_TOOL_NAME,
-  GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
-  REVIEW_RESPONSES_TOOL_DESCRIPTION,
-  REVIEW_RESPONSES_TOOL_NAME,
-  REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
+  ADD_UNIT_TOOL_DESCRIPTION,
+  ADD_UNIT_TOOL_NAME,
+  ADD_UNIT_TOOL_PROMPT_SNIPPET,
+  OPEN_TOOL_DESCRIPTION,
+  OPEN_TOOL_NAME,
+  OPEN_TOOL_PROMPT_SNIPPET,
+  RESPOND_TOOL_DESCRIPTION,
+  RESPOND_TOOL_NAME,
+  RESPOND_TOOL_PROMPT_SNIPPET,
+  SKIP_TOOL_DESCRIPTION,
+  SKIP_TOOL_NAME,
+  SKIP_TOOL_PROMPT_SNIPPET,
 } from "./prompts.ts";
 import type { DiffWalkSession } from "./session.ts";
 import {
+  renderAddUnitToolResult,
   renderGuidedReviewToolResult,
   renderThreadFollowUpToolResult,
 } from "./tui-messages.ts";
 
-export function registerGuidedReviewTool(
+export function registerAddUnitTool(
   pi: ExtensionAPI,
   session: DiffWalkSession,
 ): void {
-  pi.registerTool<typeof ReviewRouteCandidateSchema, GuidedReviewResult>({
-    name: GUIDED_REVIEW_TOOL_NAME,
-    label: "Guided Review",
-    description: GUIDED_REVIEW_TOOL_DESCRIPTION,
-    promptSnippet: GUIDED_REVIEW_TOOL_PROMPT_SNIPPET,
-    parameters: ReviewRouteCandidateSchema,
+  pi.registerTool<
+    typeof ReviewUnitCandidateToolSchema,
+    ReviewRouteDraftProgress
+  >({
+    name: ADD_UNIT_TOOL_NAME,
+    label: "DiffWalk Add Unit",
+    description: ADD_UNIT_TOOL_DESCRIPTION,
+    promptSnippet: ADD_UNIT_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewUnitCandidateToolSchema,
     executionMode: "sequential",
-    async execute(_toolCallId, routeCandidate, signal, _onUpdate, ctx) {
-      const result = await session.attachRouteAndOpen(
-        ctx,
-        routeCandidate,
-        signal,
+    async execute(_toolCallId, unit) {
+      const progress = await session.addRouteUnit(unit);
+      return {
+        content: [{ type: "text", text: formatRouteUnitProgress(progress) }],
+        details: progress,
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", `DiffWalk unit: ${args.title ?? ""}`),
+        0,
+        0,
       );
+    },
+    renderResult(result, _options, theme, context) {
+      if (context.isError) {
+        const content = result.content.find((item) => item.type === "text");
+        return new Text(
+          theme.fg(
+            "error",
+            content?.type === "text" ? content.text : "Review unit rejected.",
+          ),
+          0,
+          0,
+        );
+      }
+      return result.details === undefined
+        ? new Text("Review unit accepted.", 0, 0)
+        : renderAddUnitToolResult(result.details, theme);
+    },
+  });
+}
+
+/** The remaining work is the only thing the agent needs back from an append. */
+function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
+  return formatRemaining(
+    `Accepted review unit ${progress.unitCount}.`,
+    progress.remaining,
+  );
+}
+
+function formatRouteSkipProgress(progress: ReviewRouteSkipProgress): string {
+  const noun = progress.skippedLineCount === 1 ? "line" : "lines";
+  return formatRemaining(
+    `Skipped ${progress.skippedLineCount} changed ${noun} in ${progress.acceptedSkip.span.path}.`,
+    progress.remaining,
+  );
+}
+
+function formatRemaining(
+  accepted: string,
+  remaining: ReviewRouteDraftProgress["remaining"],
+): string {
+  if (remaining.length === 0) {
+    return `${accepted} Every changed line needing review is now covered. Call ${OPEN_TOOL_NAME} to open the walkthrough.`;
+  }
+  const total = remaining.reduce((sum, file) => sum + file.lineCount, 0);
+  const files = remaining
+    .map((file) => `- ${file.path}: ${file.ranges.join(", ")}`)
+    .join("\n");
+  return `${accepted} ${total} changed line${total === 1 ? "" : "s"} still need routing:\n${files}`;
+}
+
+export function registerSkipTool(
+  pi: ExtensionAPI,
+  session: DiffWalkSession,
+): void {
+  pi.registerTool<
+    typeof ReviewSkipCandidateToolSchema,
+    ReviewRouteSkipProgress
+  >({
+    name: SKIP_TOOL_NAME,
+    label: "DiffWalk Skip",
+    description: SKIP_TOOL_DESCRIPTION,
+    promptSnippet: SKIP_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewSkipCandidateToolSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, skip) {
+      const progress = session.skipRouteRegion(skip);
+      return {
+        content: [{ type: "text", text: formatRouteSkipProgress(progress) }],
+        details: progress,
+      };
+    },
+    renderCall(args, theme) {
+      return new Text(
+        theme.fg("toolTitle", `DiffWalk skip: ${args.span?.path ?? ""}`),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme, context) {
+      if (context.isError) {
+        const content = result.content.find((item) => item.type === "text");
+        return new Text(
+          theme.fg(
+            "error",
+            content?.type === "text" ? content.text : "Skip rejected.",
+          ),
+          0,
+          0,
+        );
+      }
+      const details = result.details;
+      if (details === undefined) return new Text("Skip accepted.", 0, 0);
+      const remaining = details.remaining.reduce(
+        (sum, file) => sum + file.lineCount,
+        0,
+      );
+      return new Text(
+        theme.fg(
+          "muted",
+          `Skipped ${details.skippedLineCount} in ${details.acceptedSkip.span.path} • ${remaining} left to route`,
+        ),
+        0,
+        0,
+      );
+    },
+  });
+}
+
+export function registerOpenTool(
+  pi: ExtensionAPI,
+  session: DiffWalkSession,
+): void {
+  pi.registerTool<typeof ReviewOpenToolSchema, GuidedReviewResult>({
+    name: OPEN_TOOL_NAME,
+    label: "DiffWalk Review",
+    description: OPEN_TOOL_DESCRIPTION,
+    promptSnippet: OPEN_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewOpenToolSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, _args, signal, _onUpdate, ctx) {
+      const result = await session.openRoute(ctx, signal);
       return {
         content: [{ type: "text", text: formatGuidedReviewResult(result) }],
         details: result,
@@ -69,22 +211,26 @@ export function registerGuidedReviewTool(
   });
 }
 
-export function registerReviewResponsesTool(
+export function registerRespondTool(
   pi: ExtensionAPI,
   session: DiffWalkSession,
 ): void {
-  pi.registerTool<typeof ReviewResponseCandidateSchema, ReviewThreadUiResult>({
-    name: REVIEW_RESPONSES_TOOL_NAME,
+  pi.registerTool<typeof ReviewRespondToolSchema, ReviewThreadUiResult>({
+    name: RESPOND_TOOL_NAME,
     label: "DiffWalk Responses",
-    description: REVIEW_RESPONSES_TOOL_DESCRIPTION,
-    promptSnippet: REVIEW_RESPONSES_TOOL_PROMPT_SNIPPET,
-    parameters: ReviewResponseCandidateSchema,
+    description: RESPOND_TOOL_DESCRIPTION,
+    promptSnippet: RESPOND_TOOL_PROMPT_SNIPPET,
+    parameters: ReviewRespondToolSchema,
     executionMode: "sequential",
-    prepareArguments(args): ReviewResponseCandidate {
-      return normalizeResponseArguments(args, session);
+    prepareArguments(args): ReviewRespondArguments {
+      return normalizeResponseArguments(args);
     },
     async execute(_toolCallId, candidate, signal, _onUpdate, ctx) {
-      const reviewed = await session.respondToThreads(ctx, candidate, signal);
+      const reviewed = await session.respondToThreads(
+        ctx,
+        candidate.responses,
+        signal,
+      );
       const followUp = reviewed.status === "follow-up-submitted";
       return {
         content: [
@@ -92,7 +238,7 @@ export function registerReviewResponsesTool(
             type: "text",
             text: followUp
               ? formatReviewThreadFollowUp(reviewed.batch, reviewed.turnId)
-              : `Recorded structured DiffWalk responses for turn ${candidate.turnId}. The reviewer inspected the anchored conversations and submitted no follow-up.`,
+              : "Recorded structured DiffWalk responses. The reviewer inspected the anchored conversations and submitted no follow-up.",
           },
         ],
         details: reviewed,
@@ -103,7 +249,7 @@ export function registerReviewResponsesTool(
       return new Text(
         theme.fg(
           "toolTitle",
-          `DiffWalk ${args.turnId ?? "responses"} (${args.responses?.length ?? 0})`,
+          `DiffWalk responses (${args.responses?.length ?? 0})`,
         ),
         0,
         0,
@@ -154,25 +300,44 @@ export function registerReviewResponsesTool(
 }
 
 /**
- * Models sometimes send the older field names or omit the turn. The batch's
- * pending turn fills a missing turnId and commentId is accepted for threadId;
- * anything else is returned unchanged so schema validation reports it.
+ * The pending turn is the only one that can be answered, so the tool takes
+ * responses alone. Identifiers a model may still send from older prompts are
+ * dropped, and commentId is accepted for threadId; anything else is returned
+ * unchanged so schema validation reports it.
  */
-function normalizeResponseArguments(
-  args: unknown,
-  session: DiffWalkSession,
-): ReviewResponseCandidate {
-  const original = args as ReviewResponseCandidate;
+export const ReviewRespondToolSchema = Type.Object(
+  {
+    responses: Type.Array(
+      Type.Object(
+        {
+          threadId: Type.String({
+            description: "Thread identifier from the pending turn, such as C1",
+          }),
+          body: Type.String({
+            description:
+              "Direct response to the latest reviewer message: answer first, then give evidence or applied changes, and end with any uncertainty",
+          }),
+        },
+        { additionalProperties: false },
+      ),
+      {
+        description: "Exactly one response for every thread in the turn",
+        minItems: 1,
+      },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export type ReviewRespondArguments = Type.Static<
+  typeof ReviewRespondToolSchema
+>;
+
+function normalizeResponseArguments(args: unknown): ReviewRespondArguments {
+  const original = args as ReviewRespondArguments;
   if (args === null || typeof args !== "object") return original;
   const input = args as Record<string, unknown>;
-  if (typeof input.batchId !== "string" || !Array.isArray(input.responses)) {
-    return original;
-  }
-  const turnId =
-    typeof input.turnId === "string"
-      ? input.turnId
-      : session.pendingThreadTurnId(input.batchId);
-  if (turnId === undefined) return original;
+  if (!Array.isArray(input.responses)) return original;
   const responses: ReviewResponseCandidate["responses"] = [];
   for (const response of input.responses) {
     if (response === null || typeof response !== "object") return original;
@@ -184,5 +349,5 @@ function normalizeResponseArguments(
     }
     responses.push({ threadId, body: fields.body });
   }
-  return { batchId: input.batchId, turnId, responses };
+  return { responses };
 }

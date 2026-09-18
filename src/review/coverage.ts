@@ -117,6 +117,16 @@ function buildRecord(
       `No review requirement exists for ${line.side} line ${line.line} of file change ${line.fileChangeId}.`,
     );
   }
+  if (requirement.type === "excluded") {
+    return {
+      side: line.side,
+      line: line.line,
+      text: line.text,
+      disposition: "excluded",
+      excludedInRoundId: roundId,
+      exclusionReason: requirement.reason,
+    };
+  }
   return {
     side: line.side,
     line: line.line,
@@ -175,6 +185,11 @@ function collectSkippedLines(
       if (requirement.type === "carried-forward") {
         throw new ReviewCoverageError(
           `${describeLine(snapshot, line)} was carried forward and cannot be skipped.`,
+        );
+      }
+      if (requirement.type === "excluded") {
+        throw new ReviewCoverageError(
+          `${describeLine(snapshot, line)} is excluded by a mechanical rule and cannot be skipped.`,
         );
       }
       if (!isNeedsReviewReasonSkippable(requirement.reason)) {
