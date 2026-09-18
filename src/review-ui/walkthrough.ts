@@ -57,14 +57,6 @@ export function renderWalkthroughPreview(
     summary[MAXIMUM_SUMMARY_ROWS - 1] =
       `${truncateToWidth(summary[MAXIMUM_SUMMARY_ROWS - 1] ?? "", Math.max(0, width - 1), "")}${theme.fg("dim", "…")}`;
   }
-  const attention =
-    unit.attention === undefined
-      ? []
-      : wrapWithPrefix(
-          theme.fg("warning", "Review: "),
-          theme.fg("text", safeText(unit.attention.reasons.join("; "))),
-          width,
-        ).map((row) => fitLine(row, width));
   const unitChecks = unit.reviewFocus.filter(
     (check) => check.anchor === undefined,
   );
@@ -83,9 +75,8 @@ export function renderWalkthroughPreview(
           ),
         ];
   const candidates = [
-    ["", ...attention, ...summary, ...checks, ""],
-    ["", ...attention, ...summary, ""],
-    ...(attention.length === 0 ? [] : [["", ...attention, ""]]),
+    ["", ...summary, ...checks, ""],
+    ["", ...summary, ""],
     [""],
   ];
   return (
@@ -95,86 +86,16 @@ export function renderWalkthroughPreview(
   );
 }
 
-/**
- * A folded unit that the reviewer has not expanded. The reasons for the
- * fold, the reference if one was named, and the size of what is folded are
- * the whole display: enough to decide whether to trust the fold, nothing
- * that invites skimming code.
- */
-export function renderFoldedUnit(
-  unit: ReviewUnit,
-  changedLineCount: number,
-  theme: ReviewUiTheme,
-  width: number,
-): readonly string[] {
-  const fold = unit.fold;
-  if (fold === undefined) return [];
-  const rows: string[] = [""];
-  rows.push(
-    ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
-    "",
-  );
-  const label = fold.source === "agent" ? "Routine: " : "Skipped because: ";
-  for (const [index, reason] of fold.reasons.entries()) {
-    rows.push(
-      ...wrapWithPrefix(
-        theme.fg("accent", index === 0 ? label : " ".repeat(label.length)),
-        theme.fg("text", safeText(reason)),
-        width,
-      ),
-    );
-  }
-  if (unit.routine !== undefined) {
-    rows.push(
-      ...wrapWithPrefix(
-        theme.fg("accent", "Mirrors: "),
-        theme.fg("text", safeText(unit.routine.reference)),
-        width,
-      ),
-    );
-  }
-  rows.push("");
-  const noun = changedLineCount === 1 ? "line" : "lines";
-  rows.push(
-    ...wrapStyled(
-      theme.fg(
-        "muted",
-        `${changedLineCount} changed ${noun} folded. Press o to expand, n to accept the fold and continue.`,
-      ),
-      width,
-    ),
-  );
-  return rows.map((row) => fitLine(row, width));
-}
-
 export function renderExplanationLines(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
   width: number,
 ): string[] {
   const lines: string[] = [];
-  if (unit.attention !== undefined) {
-    addSectionText(
-      lines,
-      "Why this needs review",
-      unit.attention.reasons.join("; "),
-      theme,
-      width,
-    );
-  }
-  if (unit.fold !== undefined) {
-    addSectionText(
-      lines,
-      unit.fold.source === "agent" ? "Routine claim" : "Why this is folded",
-      unit.fold.reasons.join(" "),
-      theme,
-      width,
-    );
-  }
   if (unit.routine !== undefined) {
     addSectionText(
       lines,
-      "Agent reference",
+      "Agent routine claim",
       `${unit.routine.reason} Mirrors ${unit.routine.reference}.`,
       theme,
       width,
@@ -228,21 +149,6 @@ export function renderTransientFeedback(
       safeText(feedback.message),
     ),
     width,
-  );
-}
-
-const FOLDED_FOOTERS = [
-  "o expand • ←/→ unit • n accept fold • e details • i inventory • s summary • Esc pause • ? help",
-  "o expand • ←/→ unit • n accept fold • e details • s summary • ? help",
-  "o expand • n accept • ? help",
-  "? help",
-  "?",
-] as const;
-
-export function foldedFooterText(width: number): string {
-  const available = Math.max(1, width);
-  return (
-    FOLDED_FOOTERS.find((footer) => visibleWidth(footer) <= available) ?? "?"
   );
 }
 

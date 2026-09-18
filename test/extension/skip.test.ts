@@ -5,9 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   REFERENCE_TEXT_MAX_LINES,
-  readFoldConfiguration,
   readReferenceText,
-} from "../../src/extension/fold.ts";
+  readSkipConfiguration,
+} from "../../src/extension/skip.ts";
 import type { ReviewUnitFeatures } from "../../src/review/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 import { commandContext, createHarness, toolContext } from "./harness.ts";
@@ -16,7 +16,7 @@ async function agentDirWith(
   settings: string | undefined,
   auth?: string,
 ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
-  const dir = await mkdtemp(join(tmpdir(), "pi-diffwalk-fold-"));
+  const dir = await mkdtemp(join(tmpdir(), "pi-diffwalk-skip-"));
   if (settings !== undefined) {
     await writeFile(join(dir, "settings.json"), settings);
   }
@@ -26,38 +26,38 @@ async function agentDirWith(
   return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
 }
 
-test("fold configuration is disabled unless settings.json opts in", async (t) => {
+test("skip configuration is disabled unless settings.json opts in", async (t) => {
   const absent = await agentDirWith(undefined);
   t.after(absent.cleanup);
-  assert.deepEqual(await readFoldConfiguration(absent.dir, {}), {
+  assert.deepEqual(await readSkipConfiguration(absent.dir, {}), {
     status: "disabled",
   });
 
   const unrelated = await agentDirWith('{"diffwalk":{}}');
   t.after(unrelated.cleanup);
-  assert.deepEqual(await readFoldConfiguration(unrelated.dir, {}), {
+  assert.deepEqual(await readSkipConfiguration(unrelated.dir, {}), {
     status: "disabled",
   });
 
   const broken = await agentDirWith("{not json");
   t.after(broken.cleanup);
-  assert.deepEqual(await readFoldConfiguration(broken.dir, {}), {
+  assert.deepEqual(await readSkipConfiguration(broken.dir, {}), {
     status: "disabled",
   });
 });
 
-test("fold configuration reports an unknown value or a missing key", async (t) => {
-  const other = await agentDirWith('{"diffwalk":{"fold":"openai"}}');
+test("skip configuration reports an unknown value or a missing key", async (t) => {
+  const other = await agentDirWith('{"diffwalk":{"skip":"openai"}}');
   t.after(other.cleanup);
-  const unknown = await readFoldConfiguration(other.dir, {});
+  const unknown = await readSkipConfiguration(other.dir, {});
   assert.equal(unknown.status, "misconfigured");
   if (unknown.status === "misconfigured") {
     assert.match(unknown.reason, /only supported value is "typesafe"/);
   }
 
-  const enabled = await agentDirWith('{"diffwalk":{"fold":"typesafe"}}');
+  const enabled = await agentDirWith('{"diffwalk":{"skip":"typesafe"}}');
   t.after(enabled.cleanup);
-  const noKey = await readFoldConfiguration(enabled.dir, {});
+  const noKey = await readSkipConfiguration(enabled.dir, {});
   assert.equal(noKey.status, "misconfigured");
   if (noKey.status === "misconfigured") {
     assert.match(
@@ -67,7 +67,7 @@ test("fold configuration reports an unknown value or a missing key", async (t) =
   }
 
   assert.deepEqual(
-    await readFoldConfiguration(enabled.dir, {
+    await readSkipConfiguration(enabled.dir, {
       TYPESAFE_API_KEY: "sk",
       TYPESAFE_BASE_URL: "https://proxy.test",
     }),
@@ -77,41 +77,41 @@ test("fold configuration reports an unknown value or a missing key", async (t) =
 
 test("the key comes from pi's auth.json first and the environment second", async (t) => {
   const stored = await agentDirWith(
-    '{"diffwalk":{"fold":"typesafe"}}',
+    '{"diffwalk":{"skip":"typesafe"}}',
     '{"typesafe":{"type":"api_key","key":"sk-stored"},"openai":{"type":"api_key","key":"sk-other"}}',
   );
   t.after(stored.cleanup);
-  assert.deepEqual(await readFoldConfiguration(stored.dir, {}), {
+  assert.deepEqual(await readSkipConfiguration(stored.dir, {}), {
     status: "enabled",
     apiKey: "sk-stored",
   });
   assert.deepEqual(
-    await readFoldConfiguration(stored.dir, { TYPESAFE_API_KEY: "sk-env" }),
+    await readSkipConfiguration(stored.dir, { TYPESAFE_API_KEY: "sk-env" }),
     { status: "enabled", apiKey: "sk-stored" },
   );
 
   const wrongType = await agentDirWith(
-    '{"diffwalk":{"fold":"typesafe"}}',
+    '{"diffwalk":{"skip":"typesafe"}}',
     '{"typesafe":{"type":"oauth","access":"a","refresh":"r","expires":1}}',
   );
   t.after(wrongType.cleanup);
   assert.equal(
-    (await readFoldConfiguration(wrongType.dir, { TYPESAFE_API_KEY: "sk-env" }))
+    (await readSkipConfiguration(wrongType.dir, { TYPESAFE_API_KEY: "sk-env" }))
       .status,
     "enabled",
   );
   assert.equal(
-    (await readFoldConfiguration(wrongType.dir, {})).status,
+    (await readSkipConfiguration(wrongType.dir, {})).status,
     "misconfigured",
   );
 
   const blankKey = await agentDirWith(
-    '{"diffwalk":{"fold":"typesafe"}}',
+    '{"diffwalk":{"skip":"typesafe"}}',
     '{"typesafe":{"type":"api_key","key":"  "}}',
   );
   t.after(blankKey.cleanup);
   assert.equal(
-    (await readFoldConfiguration(blankKey.dir, {})).status,
+    (await readSkipConfiguration(blankKey.dir, {})).status,
     "misconfigured",
   );
 });
@@ -179,11 +179,11 @@ function unitFor(
   };
 }
 
-test("with a judge, every unit folds unless its features earn attention", async () => {
+test("with a judge, a unit is walked or removed from the route entirely", async () => {
   const judged: string[] = [];
   const harness = createHarness({
     snapshot: twoFileSnapshot(),
-    foldConfiguration: { status: "enabled", apiKey: "sk" },
+    skipConfiguration: { status: "enabled", apiKey: "sk" },
     unitFeatureJudge: async (input) => {
       judged.push(input.unitText);
       return input.unitText.includes("expect(1)") ? clear : risky;
@@ -191,35 +191,34 @@ test("with a judge, every unit folds unless its features earn attention", async 
   });
   await harness.command("", commandContext());
 
-  const attention = await harness.unitTool.execute(
+  const walked = await harness.unitTool.execute(
     "u1",
     unitFor("src/file.ts"),
     undefined,
     undefined,
     toolContext(),
   );
-  assert.equal(attention.details?.acceptedUnit.fold, undefined);
-  assert.deepEqual(attention.details?.acceptedUnit.attention?.reasons, [
-    "touches authorization (90%)",
-    "behavior code changes runtime behavior (90%)",
-    "behavior code adds control flow (80%)",
-  ]);
+  assert.equal(walked.details?.skip, undefined);
   assert.match(
-    (attention.content[0] as { text: string }).text,
-    /^Accepted review unit 1 \(review this: touches authorization \(90%\); behavior code changes runtime behavior \(90%\); behavior code adds control flow \(80%\)\)\./,
+    (walked.content[0] as { text: string }).text,
+    /^Accepted review unit 1\./,
   );
 
-  const folded = await harness.unitTool.execute(
+  const skipped = await harness.unitTool.execute(
     "u2",
     unitFor("test/file.test.ts"),
     undefined,
     undefined,
     toolContext(),
   );
-  assert.equal(folded.details?.acceptedUnit.fold?.source, "typesafe");
-  assert.deepEqual(folded.details?.acceptedUnit.fold?.reasons, [
+  assert.equal(skipped.details?.skip?.source, "typesafe");
+  assert.deepEqual(skipped.details?.skip?.reasons, [
     "Test change, no boundary.",
   ]);
+  assert.match(
+    (skipped.content[0] as { text: string }).text,
+    /^Accepted review unit 2 \(skipped, the reviewer will not see it: Test change, no boundary\.\)/,
+  );
   assert.equal(judged.length, 2);
   assert.match(
     judged[0] ?? "",
@@ -230,25 +229,29 @@ test("with a judge, every unit folds unless its features earn attention", async 
   await harness.tool.execute("open", {}, undefined, undefined, toolContext());
   const route = harness.openedRoutes.at(-1);
   assert.deepEqual(
-    route?.units.map((unit) => unit.fold?.source),
-    [undefined, "typesafe"],
-    "The fold decisions reach the walkthrough.",
+    route?.units.map((unit) => unit.title),
+    ["src/file.ts"],
+    "The skipped unit never reaches the walkthrough.",
   );
-  assert.equal(route?.units[0]?.attention?.source, "typesafe");
+  assert.deepEqual(
+    route?.skippedUnits.map((unit) => unit.title),
+    ["test/file.test.ts"],
+  );
+  assert.equal(route?.skippedUnits[0]?.changedLineCount, 1);
   assert.match(
-    (folded.content[0] as { text: string }).text,
-    /^Accepted review unit 2 \(skip this: Test change, no boundary\.\)/,
+    route?.skippedSpans.at(-1)?.reason ?? "",
+    /^test\/file\.test\.ts: Test change, no boundary\.$/,
   );
 });
 
-test("a unit carrying an unresolved comment earns attention without asking the judge", async () => {
+test("a unit carrying an unresolved comment is walked without asking the judge", async () => {
   let calls = 0;
   const harness = createHarness({
     snapshot: twoFileSnapshot(),
-    foldConfiguration: { status: "enabled", apiKey: "sk" },
+    skipConfiguration: { status: "enabled", apiKey: "sk" },
     unitFeatureJudge: async () => {
       calls += 1;
-      return clear;
+      return risky;
     },
   });
   harness.behavior.commentOnSubmit = true;
@@ -288,18 +291,14 @@ test("a unit carrying an unresolved comment earns attention without asking the j
     toolContext(),
   );
   assert.equal(calls, 0);
-  assert.deepEqual(commented.details?.acceptedUnit.attention, {
-    outcome: "attention",
-    source: "typesafe",
-    reasons: ["a line carries your unresolved comment"],
-  });
+  assert.equal(commented.details?.skip, undefined);
 });
 
-test("an agent routine claim adds a reference to the judge's state and to the card", async () => {
+test("an agent routine claim adds a reference to the judge's state", async () => {
   const inputs: { unitText: string; referenceText?: string }[] = [];
   const harness = createHarness({
     snapshot: twoFileSnapshot(),
-    foldConfiguration: { status: "enabled", apiKey: "sk" },
+    skipConfiguration: { status: "enabled", apiKey: "sk" },
     referenceText: "expect(0)",
     unitFeatureJudge: async (input) => {
       inputs.push(input);
@@ -323,13 +322,13 @@ test("an agent routine claim adds a reference to the judge's state and to the ca
     unitText: "--- test/file.test.ts\n@@\n head\n+expect(1)\n tail",
     referenceText: "expect(0)",
   });
-  assert.deepEqual(result.details?.acceptedUnit.fold?.reasons, [
+  assert.deepEqual(result.details?.skip?.reasons, [
     "Test change, no boundary.",
     "Mirrors the named reference (30%).",
   ]);
 });
 
-test("without a judge the routine claim folds; a judge failure degrades once", async () => {
+test("without a judge the routine claim skips; a judge failure degrades once", async () => {
   const plain = createHarness({ snapshot: twoFileSnapshot() });
   await plain.command("", commandContext());
   const claimed = await plain.unitTool.execute(
@@ -339,15 +338,19 @@ test("without a judge the routine claim folds; a judge failure degrades once", a
     undefined,
     toolContext(),
   );
-  assert.deepEqual(claimed.details?.acceptedUnit.fold, {
+  assert.deepEqual(claimed.details?.skip, {
     source: "agent",
     reasons: ["Same."],
   });
+  assert.match(
+    (claimed.content[0] as { text: string }).text,
+    /skipped, the reviewer will not see it: your routine claim/,
+  );
 
   let calls = 0;
   const failing = createHarness({
     snapshot: twoFileSnapshot(),
-    foldConfiguration: { status: "enabled", apiKey: "sk" },
+    skipConfiguration: { status: "enabled", apiKey: "sk" },
     unitFeatureJudge: async () => {
       calls += 1;
       throw new Error("TypeSafe responded with HTTP 503.");
@@ -369,35 +372,37 @@ test("without a judge the routine claim folds; a judge failure degrades once", a
     undefined,
     toolContext(notifications),
   );
-  assert.equal(first.details?.acceptedUnit.fold, undefined);
+  assert.equal(first.details?.skip, undefined);
   assert.equal(
-    second.details?.acceptedUnit.fold,
+    second.details?.skip,
     undefined,
-    "After degrading, the agent claim does not fold either.",
+    "After degrading, the agent claim does not skip either.",
   );
   assert.equal(calls, 1);
   assert.deepEqual(
-    notifications.filter((line) => line.includes("Folding is unavailable")),
+    notifications.filter((line) =>
+      line.includes("Automatic skipping is unavailable"),
+    ),
     [
-      "Folding is unavailable for this review: TypeSafe responded with HTTP 503. Every remaining unit will be walked.",
+      "Automatic skipping is unavailable for this review: TypeSafe responded with HTTP 503. Every remaining unit will be walked.",
     ],
   );
 });
 
-test("a misconfigured fold setting warns and walks everything", async () => {
+test("a misconfigured skip setting warns and walks everything", async () => {
   const harness = createHarness({
     snapshot: twoFileSnapshot(),
-    foldConfiguration: {
+    skipConfiguration: {
       status: "misconfigured",
       reason:
-        "settings.json enables diffwalk.fold but TYPESAFE_API_KEY is not set.",
+        "settings.json enables diffwalk.skip but TYPESAFE_API_KEY is not set.",
     },
   });
   const notifications: string[] = [];
   await harness.command("", commandContext("tui", notifications));
   assert.match(
     notifications.join("\n"),
-    /TYPESAFE_API_KEY is not set\. Folding is off for this review\./,
+    /TYPESAFE_API_KEY is not set\. Automatic skipping is off for this review\./,
   );
   const result = await harness.unitTool.execute(
     "u1",
@@ -406,8 +411,21 @@ test("a misconfigured fold setting warns and walks everything", async () => {
     undefined,
     toolContext(),
   );
-  assert.deepEqual(result.details?.acceptedUnit.fold, {
+  assert.deepEqual(result.details?.skip, {
     source: "agent",
     reasons: ["Same."],
   });
+});
+
+test("--no-skip walks every unit, including routine claims", async () => {
+  const harness = createHarness({ snapshot: twoFileSnapshot() });
+  await harness.command("--no-skip", commandContext());
+  const claimed = await harness.unitTool.execute(
+    "u1",
+    unitFor("test/file.test.ts", { reference: "src/x.ts", reason: "Same." }),
+    undefined,
+    undefined,
+    toolContext(),
+  );
+  assert.equal(claimed.details?.skip, undefined);
 });

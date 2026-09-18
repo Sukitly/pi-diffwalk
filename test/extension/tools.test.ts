@@ -528,7 +528,9 @@ test("submits through the domain pipeline against the captured repository state"
 
 test("rejects a routine reference that is not a repository file, then accepts a corrected one", async () => {
   const harness = createHarness({ existingReferencePaths: ["src/pattern.ts"] });
-  await harness.command("", commandContext());
+  // --no-skip keeps the routine unit in the walkthrough, so the reference
+  // check is what decides the outcome here.
+  await harness.command("--no-skip", commandContext());
   const routineRoute = (reference: string) => {
     const base = validRoute();
     const unit = base.units[0];

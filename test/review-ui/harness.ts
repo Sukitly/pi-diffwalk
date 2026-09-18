@@ -17,6 +17,12 @@ import {
   attachReviewRoute,
   createInProgressReview,
 } from "../../src/review/in-progress.ts";
+import {
+  appendReviewRouteUnit,
+  createReviewRouteDraft,
+  finishReviewRouteDraft,
+  recordLastUnitVerdict,
+} from "../../src/review/route-draft.ts";
 import { validateReviewRoute } from "../../src/review/route-validation.ts";
 import { createReviewSeries } from "../../src/review/series.ts";
 import { changedLineKey } from "../../src/review/span.ts";
@@ -33,6 +39,7 @@ import type {
   ReviewSnapshot,
   ReviewSubmissionMode,
   ReviewUnitId,
+  ReviewUnitSkip,
   SubmittedGuidedReviewResult,
 } from "../../src/review/types.ts";
 import { GuidedReviewComponent } from "../../src/review-ui/component.ts";
@@ -41,7 +48,6 @@ import {
   fileChangeId,
   makeSnapshot,
   span,
-  withAgentFolds,
 } from "../support/domain-fixtures.ts";
 
 export interface UiFixture {
@@ -932,17 +938,20 @@ export function makeExcludedFixture(): UiFixture {
   return { snapshot, delta, routeCandidate, route };
 }
 
-/** Two units: a walked one first, then a routine one that mirrors existing code. */
-export function makeRoutineFixture(): UiFixture {
+/**
+ * One walked unit and one unit a judge removed before the walkthrough, so
+ * the reviewer sees exactly one unit and the skipped one only in the summary.
+ */
+export function makeSkippedUnitFixture(skip?: ReviewUnitSkip): UiFixture {
   const walkedPath = "src/handler.ts";
-  const routinePath = "src/routes/user.ts";
+  const skippedPath = "src/routes/user.ts";
   const snapshot = makeSnapshot("snapshot-routine", [
     {
       path: walkedPath,
       lines: [" before", "+const claims = validate(token)", " after"],
     },
     {
-      path: routinePath,
+      path: skippedPath,
       lines: [
         " export const routes = [",
         '+  route("/user", userHandler),',
@@ -952,94 +961,61 @@ export function makeRoutineFixture(): UiFixture {
     },
   ]);
   const delta = computeReviewDelta(snapshot);
+  const walkedUnit = {
+    title: "Token validation",
+    whyHere: "Behavior starts here.",
+    context: "handler -> validate",
+    changeSummary: "Validates the token before use.",
+    reviewFocus: [{ question: "Is the missing-token path handled?" }],
+    spans: [span(walkedPath, { new: [2, 2] as [number, number] })],
+  };
+  const skippedUnit = {
+    title: "User route registration",
+    whyHere: "The handler is wired here.",
+    context: "routes -> handler",
+    changeSummary: "Registers two user routes.",
+    reviewFocus: [{ question: "Do the paths collide with existing ones?" }],
+    spans: [span(skippedPath, { new: [2, 3] as [number, number] })],
+    routine: {
+      reference: "src/routes/order.ts:4-5",
+      reason: "Same route() calls as the order routes, only the names differ.",
+    },
+  };
   const routeCandidate: ReviewRouteCandidate = {
     snapshotId: snapshot.id,
-    units: [
-      {
-        title: "Token validation",
-        whyHere: "Behavior starts here.",
-        context: "handler -> validate",
-        changeSummary: "Validates the token before use.",
-        reviewFocus: [{ question: "Is the missing-token path handled?" }],
-        spans: [span(walkedPath, { new: [2, 2] })],
-      },
-      {
-        title: "User route registration",
-        whyHere: "The handler is wired here.",
-        context: "routes -> handler",
-        changeSummary: "Registers two user routes.",
-        reviewFocus: [{ question: "Do the paths collide with existing ones?" }],
-        spans: [span(routinePath, { new: [2, 3] })],
-        routine: {
-          reference: "src/routes/order.ts:4-5",
-          reason:
-            "Same route() calls as the order routes, only the names differ.",
-        },
-      },
-    ],
+    units: [walkedUnit, skippedUnit],
     skippedSpans: [],
   };
-  const route = withAgentFolds(
-    validateReviewRoute(snapshot, delta, routeCandidate),
-  );
+  const verdictSkip: ReviewUnitSkip = skip ?? {
+    source: "agent",
+    reasons: [skippedUnit.routine.reason],
+  };
+  let draft = createReviewRouteDraft(snapshot.id);
+  for (const unit of routeCandidate.units) {
+    const progress = appendReviewRouteUnit(snapshot, delta, draft, unit);
+    const judged =
+      unit === skippedUnit
+        ? recordLastUnitVerdict(snapshot, delta, progress, {
+            outcome: "skip",
+            ...verdictSkip,
+          })
+        : progress;
+    draft = judged.draft;
+  }
+  const route = finishReviewRouteDraft(snapshot, delta, draft);
   return { snapshot, delta, routeCandidate, route };
 }
 
-/** One walked unit, then one folded by a decision model without any agent claim. */
-export function makeModelFoldFixture(): UiFixture {
-  const base = makeRoutineFixture();
-  const [walked, folded] = base.route.units;
-  assert.ok(walked && folded);
-  const { routine: _routine, ...withoutClaim } = folded;
-  const route: ReviewRoute = {
-    ...base.route,
-    units: [
-      walked,
-      {
-        ...withoutClaim,
-        fold: {
-          source: "typesafe",
-          reasons: ["Config change, no boundary."],
-          features: {
-            changesBehavior: 0.06,
-            newControlFlow: 0.03,
-            touchesBoundary: { choice: "none", confidence: 0.9 },
-            kind: { choice: "config", confidence: 0.8 },
-          },
-        },
-      },
-    ],
-  };
-  return { ...base, route };
-}
-
-/** The walked unit of the routine fixture marked by a decision model as needing review. */
-export function makeAttentionFixture(): UiFixture {
-  const base = makeModelFoldFixture();
-  const [walked, folded] = base.route.units;
-  assert.ok(walked && folded);
-  const route: ReviewRoute = {
-    ...base.route,
-    units: [
-      {
-        ...walked,
-        attention: {
-          outcome: "attention",
-          source: "typesafe",
-          reasons: [
-            "touches authorization (88%)",
-            "behavior code changes runtime behavior (91%)",
-          ],
-          features: {
-            changesBehavior: 0.91,
-            newControlFlow: 0.4,
-            touchesBoundary: { choice: "authorization", confidence: 0.88 },
-            kind: { choice: "behavior", confidence: 0.9 },
-          },
-        },
-      },
-      folded,
-    ],
-  };
-  return { ...base, route };
+/** The same fixture with a decision model, rather than the agent, deciding. */
+export function makeModelSkipFixture(): UiFixture {
+  return makeSkippedUnitFixture({
+    source: "typesafe",
+    reasons: ["Config change, no boundary."],
+    features: {
+      changesBehavior: 0.06,
+      newControlFlow: 0.03,
+      touchesBoundary: { choice: "none", confidence: 0.9 },
+      kind: { choice: "config", confidence: 0.8 },
+    },
+  });
 }

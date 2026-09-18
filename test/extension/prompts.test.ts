@@ -295,7 +295,7 @@ test("rejects a malformed review delta before creating model-facing input", () =
   );
 });
 
-test("a judged review asks the agent to keep foldable material in its own units", () => {
+test("a judged review asks the agent to keep skippable material in its own units", () => {
   const snapshot = makeSnapshot("snapshot-judged", [
     { path: "src/a.ts", lines: [" head", "+one", " tail"] },
   ]);

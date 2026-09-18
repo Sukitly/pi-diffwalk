@@ -179,6 +179,40 @@ export function renderSummaryLines(
     lines.push(...renderSkippedRegionGroups(route.skippedSpans, theme, width));
   }
 
+  lines.push(
+    "",
+    theme.fg("muted", theme.bold("Units skipped before the walkthrough")),
+  );
+  if (route.skippedUnits.length === 0) {
+    lines.push(theme.fg("dim", "None."));
+  } else {
+    lines.push(
+      theme.fg(
+        "dim",
+        "A judge decided these need no reading. Run /diffwalk --no-skip to walk them.",
+      ),
+    );
+    for (const [index, unit] of route.skippedUnits.entries()) {
+      const noun = unit.changedLineCount === 1 ? "line" : "lines";
+      lines.push(
+        ...wrapStyled(
+          theme.fg(
+            "accent",
+            `${index + 1}. ${safeText(unit.title)} (${unit.changedLineCount} changed ${noun}, ${unit.skip.source === "agent" ? "agent claim" : "decision model"})`,
+          ),
+          width,
+        ),
+      );
+      lines.push(
+        ...wrapWithPrefix(
+          "   ",
+          theme.fg("text", safeText(unit.skip.reasons.join(" "))),
+          width,
+        ),
+      );
+    }
+  }
+
   const nonTextChanges = inventory.filter((entry) => entry.type !== "file");
   lines.push("", theme.fg("muted", theme.bold("Non-text changes and notices")));
   if (nonTextChanges.length === 0) {

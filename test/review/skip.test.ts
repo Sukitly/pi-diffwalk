@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { computeReviewDelta } from "../../src/review/delta.ts";
-import {
-  ATTENTION_THRESHOLDS,
-  decideAttention,
-  foldFromRoutineClaim,
-  gateReasons,
-  renderUnitText,
-  unitChangedLineCount,
-} from "../../src/review/fold.ts";
 import { validateReviewRoute } from "../../src/review/route-validation.ts";
+import {
+  decideSkip,
+  gateReasons,
+  REVIEW_THRESHOLDS,
+  renderUnitText,
+  skipFromRoutineClaim,
+  unitChangedLineCount,
+} from "../../src/review/skip.ts";
 import type { ReviewUnit, ReviewUnitFeatures } from "../../src/review/types.ts";
 import { makeSnapshot, span } from "../support/domain-fixtures.ts";
 
@@ -22,33 +22,29 @@ const quiet: ReviewUnitFeatures = {
 
 const gates = { hasUnresolvedComment: false };
 
-test("folds by default and says why in one or two sentences", () => {
-  const decision = decideAttention(quiet, gates);
-  assert.equal(decision.attention, false);
-  if (decision.attention) return;
-  assert.equal(decision.fold.source, "typesafe");
-  assert.deepEqual(decision.fold.reasons, ["Refactor change, no boundary."]);
-  assert.equal(
-    (decision.fold as { features: ReviewUnitFeatures }).features,
-    quiet,
-  );
+test("skips by default and says why in one or two sentences", () => {
+  const decision = decideSkip(quiet, gates);
+  assert.equal(decision.review, false);
+  if (decision.review) return;
+  assert.deepEqual(decision.reasons, ["Refactor change, no boundary."]);
+  assert.equal(decision.features, quiet);
 });
 
-test("a quiet behavior unit folds and reports the probabilities it was judged on", () => {
-  const decision = decideAttention(
+test("a quiet behavior unit is skipped with the probabilities it was judged on", () => {
+  const decision = decideSkip(
     { ...quiet, kind: { choice: "behavior", confidence: 0.9 } },
     gates,
   );
-  assert.equal(decision.attention, false);
-  if (decision.attention) return;
-  assert.deepEqual(decision.fold.reasons, [
+  assert.equal(decision.review, false);
+  if (decision.review) return;
+  assert.deepEqual(decision.reasons, [
     "Behavior change, no boundary.",
     "No behavior change (90%), no new control flow (95%).",
   ]);
 });
 
-test("a boundary always earns attention, whatever the kind", () => {
-  const decision = decideAttention(
+test("a boundary always earns a walk, whatever the kind", () => {
+  const decision = decideSkip(
     {
       ...quiet,
       kind: { choice: "test", confidence: 0.9 },
@@ -56,31 +52,31 @@ test("a boundary always earns attention, whatever the kind", () => {
     },
     gates,
   );
-  assert.equal(decision.attention, true);
-  if (!decision.attention) return;
+  assert.equal(decision.review, true);
+  if (!decision.review) return;
   assert.deepEqual(decision.reasons, ["touches authorization (82%)"]);
   assert.equal(decision.features?.kind.choice, "test");
 });
 
-test("behavior or interface code earns attention when behavior or control flow changes", () => {
-  const behavior = decideAttention(
+test("behavior or interface code is walked when behavior or control flow changes", () => {
+  const behavior = decideSkip(
     {
       ...quiet,
       kind: { choice: "behavior", confidence: 0.9 },
-      changesBehavior: ATTENTION_THRESHOLDS.changesBehavior,
+      changesBehavior: REVIEW_THRESHOLDS.changesBehavior,
       newControlFlow: 0.9,
     },
     gates,
   );
-  assert.equal(behavior.attention, true);
-  if (behavior.attention) {
+  assert.equal(behavior.review, true);
+  if (behavior.review) {
     assert.deepEqual(behavior.reasons, [
       "behavior code changes runtime behavior (75%)",
       "behavior code adds control flow (90%)",
     ]);
   }
 
-  const iface = decideAttention(
+  const iface = decideSkip(
     {
       ...quiet,
       kind: { choice: "interface", confidence: 0.7 },
@@ -88,15 +84,15 @@ test("behavior or interface code earns attention when behavior or control flow c
     },
     gates,
   );
-  assert.equal(iface.attention, true);
-  if (iface.attention) {
+  assert.equal(iface.review, true);
+  if (iface.review) {
     assert.deepEqual(iface.reasons, [
       "interface code changes runtime behavior (80%)",
     ]);
   }
 });
 
-test("the same changes in test, config, docs, refactor, or generated code fold", () => {
+test("the same changes in test, config, docs, refactor, or generated code are skipped", () => {
   for (const kind of [
     "test",
     "config",
@@ -104,7 +100,7 @@ test("the same changes in test, config, docs, refactor, or generated code fold",
     "refactor",
     "generated",
   ] as const) {
-    const decision = decideAttention(
+    const decision = decideSkip(
       {
         ...quiet,
         kind: { choice: kind, confidence: 0.9 },
@@ -113,24 +109,24 @@ test("the same changes in test, config, docs, refactor, or generated code fold",
       },
       gates,
     );
-    assert.equal(decision.attention, false, kind);
+    assert.equal(decision.review, false, kind);
   }
 });
 
-test("an uncertain boundary or kind is no reason for attention", () => {
-  const weakBoundary = decideAttention(
+test("an uncertain boundary or kind is no reason to walk a unit", () => {
+  const weakBoundary = decideSkip(
     {
       ...quiet,
       touchesBoundary: {
         choice: "public-api",
-        confidence: ATTENTION_THRESHOLDS.choiceConfidence - 0.01,
+        confidence: REVIEW_THRESHOLDS.choiceConfidence - 0.01,
       },
     },
     gates,
   );
-  assert.equal(weakBoundary.attention, false);
+  assert.equal(weakBoundary.review, false);
 
-  const weakKind = decideAttention(
+  const weakKind = decideSkip(
     {
       ...quiet,
       kind: { choice: "behavior", confidence: 0.25 },
@@ -139,51 +135,45 @@ test("an uncertain boundary or kind is no reason for attention", () => {
     },
     gates,
   );
-  assert.equal(weakKind.attention, false);
+  assert.equal(weakKind.review, false);
 
-  const confidentBoundary = decideAttention(
+  const confidentBoundary = decideSkip(
     {
       ...quiet,
       touchesBoundary: {
         choice: "public-api",
-        confidence: ATTENTION_THRESHOLDS.choiceConfidence,
+        confidence: REVIEW_THRESHOLDS.choiceConfidence,
       },
     },
     gates,
   );
-  assert.equal(confidentBoundary.attention, true);
+  assert.equal(confidentBoundary.review, true);
 });
 
-test("an unresolved comment earns attention before any feature is read", () => {
+test("an unresolved comment forces a walk before any feature is read", () => {
   assert.deepEqual(gateReasons({ hasUnresolvedComment: true }), [
     "a line carries your unresolved comment",
   ]);
-  const decision = decideAttention(quiet, { hasUnresolvedComment: true });
-  assert.equal(decision.attention, true);
-  if (decision.attention) {
+  const decision = decideSkip(quiet, { hasUnresolvedComment: true });
+  assert.equal(decision.review, true);
+  if (decision.review) {
     assert.deepEqual(decision.reasons, [
       "a line carries your unresolved comment",
     ]);
   }
 });
 
-test("a mirrored reference is reported on the fold and never forces attention", () => {
-  const mirrored = decideAttention({ ...quiet, mirrorsReference: 0.92 }, gates);
-  assert.equal(mirrored.attention, false);
-  if (!mirrored.attention) {
-    assert.equal(
-      mirrored.fold.reasons.at(-1),
-      "Mirrors the named reference (92%).",
-    );
+test("a mirrored reference is reported on the skip and never forces a walk", () => {
+  const mirrored = decideSkip({ ...quiet, mirrorsReference: 0.92 }, gates);
+  assert.equal(mirrored.review, false);
+  if (!mirrored.review) {
+    assert.equal(mirrored.reasons.at(-1), "Mirrors the named reference (92%).");
   }
-  const unmirrored = decideAttention(
-    { ...quiet, mirrorsReference: 0.1 },
-    gates,
-  );
-  assert.equal(unmirrored.attention, false);
+  const unmirrored = decideSkip({ ...quiet, mirrorsReference: 0.1 }, gates);
+  assert.equal(unmirrored.review, false);
 });
 
-test("without a judge the agent's routine claim is the fold", () => {
+test("without a judge the agent's routine claim is the skip", () => {
   const base: ReviewUnit = {
     id: "review-unit:1" as ReviewUnit["id"],
     title: "T",
@@ -193,9 +183,9 @@ test("without a judge the agent's routine claim is the fold", () => {
     reviewFocus: [],
     spans: [],
   };
-  assert.equal(foldFromRoutineClaim(base), undefined);
+  assert.equal(skipFromRoutineClaim(base), undefined);
   assert.deepEqual(
-    foldFromRoutineClaim({
+    skipFromRoutineClaim({
       ...base,
       routine: { reference: "src/a.ts", reason: "Same shape." },
     }),

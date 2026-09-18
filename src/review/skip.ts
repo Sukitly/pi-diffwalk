@@ -8,71 +8,77 @@ import type {
   ReviewUnit,
   ReviewUnitBoundary,
   ReviewUnitFeatures,
-  ReviewUnitFold,
   ReviewUnitKind,
+  ReviewUnitSkip,
 } from "./types.ts";
 
 /**
- * The attention policy. A decision model reports surface features of a
- * unit; this module decides whether the unit needs the reviewer at all.
+ * The skip policy. A decision model reports surface features of a unit;
+ * this module decides whether the unit reaches the walkthrough at all.
  *
- * The default is to fold. A unit earns attention only by showing a reason:
- * it touches a boundary, it is behavior or interface code whose runtime
- * behavior or control flow changes, or it carries a comment the reviewer
- * left open. Everything else folds, whatever its size. Every threshold
- * lives here.
+ * A skipped unit is not shown in a smaller form. It never enters the
+ * walkthrough, exactly like a region the agent skipped, and appears only in
+ * the round summary with the reason it was dropped. The default is to skip.
+ * A unit earns the reviewer's time only by showing a reason: it touches a
+ * boundary, it is behavior or interface code whose runtime behavior or
+ * control flow changes, or it carries a comment the reviewer left open.
+ * Everything else is skipped, whatever its size. Every threshold lives here.
  */
 
 /**
  * Initial thresholds. Each question has its own; a threshold tuned on one
  * question does not transfer to another, so none is shared.
  */
-export const ATTENTION_THRESHOLDS = {
+export const REVIEW_THRESHOLDS = {
   /** At or above this, a behavior or interface unit changes runtime behavior. */
   changesBehavior: 0.75,
   /** At or above this, a behavior or interface unit adds control flow. */
   newControlFlow: 0.75,
   /**
-   * A choice below this confidence is no reason for attention. Folding is
-   * the default, so a boundary or kind the model barely leans toward must
-   * not pull the reviewer in.
+   * A choice below this confidence is no reason to review. Skipping is the
+   * default, so a boundary or kind the model barely leans toward must not
+   * pull the reviewer in.
    */
   choiceConfidence: 0.6,
 } as const;
 
 /** Kinds where a behavior or control-flow change is worth the reviewer's time. */
-export const ATTENTION_KINDS: ReadonlySet<ReviewUnitKind> = new Set([
+export const REVIEW_KINDS: ReadonlySet<ReviewUnitKind> = new Set([
   "behavior",
   "interface",
 ]);
 
-export interface AttentionGates {
+export interface SkipGates {
   readonly hasUnresolvedComment: boolean;
 }
 
-export type AttentionDecision =
-  | { readonly attention: false; readonly fold: ReviewUnitFold }
+export type SkipDecision =
   | {
-      readonly attention: true;
+      readonly review: true;
       readonly reasons: readonly string[];
-      /** Absent when an open comment demanded attention before any model was asked. */
+      /** Absent when an open comment demanded review before any model was asked. */
       readonly features?: ReviewUnitFeatures;
+    }
+  | {
+      readonly review: false;
+      readonly reasons: readonly string[];
+      readonly features: ReviewUnitFeatures;
     };
 
 /**
  * The one gate code owns without a model: a line the reviewer commented on
  * and has not resolved always comes back to the reviewer.
  */
-export function gateReasons(gates: AttentionGates): readonly string[] {
+export function gateReasons(gates: SkipGates): readonly string[] {
   return gates.hasUnresolvedComment
     ? ["a line carries your unresolved comment"]
     : [];
 }
 
-export function decideAttention(
+export function decideSkip(
   features: ReviewUnitFeatures,
-  gates: AttentionGates,
-): AttentionDecision {
+  gates: SkipGates,
+): SkipDecision {
   const reasons: string[] = [...gateReasons(gates)];
   const boundary = confidentChoice(features.touchesBoundary, "none");
   if (boundary !== "none") {
@@ -81,22 +87,22 @@ export function decideAttention(
     );
   }
   const kind = features.kind.choice;
-  if (ATTENTION_KINDS.has(kind) && isConfident(features.kind)) {
-    if (features.changesBehavior >= ATTENTION_THRESHOLDS.changesBehavior) {
+  if (REVIEW_KINDS.has(kind) && isConfident(features.kind)) {
+    if (features.changesBehavior >= REVIEW_THRESHOLDS.changesBehavior) {
       reasons.push(
         `${kind} code changes runtime behavior (${formatProbability(features.changesBehavior)})`,
       );
     }
-    if (features.newControlFlow >= ATTENTION_THRESHOLDS.newControlFlow) {
+    if (features.newControlFlow >= REVIEW_THRESHOLDS.newControlFlow) {
       reasons.push(
         `${kind} code adds control flow (${formatProbability(features.newControlFlow)})`,
       );
     }
   }
-  if (reasons.length > 0) return { attention: true, reasons, features };
+  if (reasons.length > 0) return { review: true, reasons, features };
 
   const summary: string[] = [`${capitalize(kind)} change, no boundary.`];
-  if (ATTENTION_KINDS.has(kind)) {
+  if (REVIEW_KINDS.has(kind)) {
     summary.push(
       `No behavior change (${formatProbability(1 - features.changesBehavior)}), no new control flow (${formatProbability(1 - features.newControlFlow)}).`,
     );
@@ -106,23 +112,20 @@ export function decideAttention(
       `Mirrors the named reference (${formatProbability(features.mirrorsReference)}).`,
     );
   }
-  return {
-    attention: false,
-    fold: { source: "typesafe", reasons: summary, features },
-  };
+  return { review: false, reasons: summary, features };
 }
 
-/** The agent's claim folds a unit when no decision model is configured. */
-export function foldFromRoutineClaim(
+/** The agent's claim skips a unit when no decision model is configured. */
+export function skipFromRoutineClaim(
   unit: ReviewUnit,
-): ReviewUnitFold | undefined {
+): ReviewUnitSkip | undefined {
   return unit.routine === undefined
     ? undefined
     : { source: "agent", reasons: [unit.routine.reason] };
 }
 
 function isConfident(answer: { readonly confidence: number }): boolean {
-  return answer.confidence >= ATTENTION_THRESHOLDS.choiceConfidence;
+  return answer.confidence >= REVIEW_THRESHOLDS.choiceConfidence;
 }
 
 /** Below the confidence threshold a choice reads as `fallback`. */
@@ -166,8 +169,8 @@ export const UNIT_TEXT_CONTEXT_LINES = 3;
 /**
  * The unit's spans as unified diff text with a little context, one block
  * per span, headed by the path. This is the only repository content that
- * leaves the machine when folding is enabled, so it is built here and
- * nowhere else.
+ * leaves the machine when a decision model is configured, so it is built
+ * here and nowhere else.
  */
 export function renderUnitText(
   snapshot: ReviewSnapshot,
@@ -231,7 +234,7 @@ export function renderUnitText(
 
 export function unitChangedLineCount(
   snapshot: ReviewSnapshot,
-  unit: ReviewUnit,
+  unit: Pick<ReviewUnit, "spans">,
 ): number {
   return unit.spans.reduce(
     (sum, span) => sum + resolvedSpanChangedLines(snapshot, span).length,

@@ -10,7 +10,6 @@ import type {
   GitObjectId,
   ReviewRound,
   ReviewRoundId,
-  ReviewRoute,
   ReviewSeriesId,
   ReviewSnapshot,
   ReviewSpan,
@@ -271,21 +270,6 @@ export function makeRound(input: RoundFixtureInput): ReviewRound {
     },
     coverage: { snapshotId: input.snapshot.id, files },
     units: [],
-  };
-}
-
-/** Attaches the agent's routine claim as a fold, as the session does without a judge. */
-export function withAgentFolds(route: ReviewRoute): ReviewRoute {
-  return {
-    ...route,
-    units: route.units.map((unit) =>
-      unit.routine === undefined
-        ? unit
-        : {
-            ...unit,
-            fold: { source: "agent", reasons: [unit.routine.reason] },
-          },
-    ),
   };
 }
 

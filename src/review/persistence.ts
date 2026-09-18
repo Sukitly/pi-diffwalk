@@ -307,7 +307,7 @@ const ReviewUnitFeaturesSchema = Type.Object(
   { additionalProperties: false },
 );
 
-const ReviewUnitFoldSchema = Type.Union([
+const ReviewUnitSkipSchema = Type.Union([
   Type.Object(
     {
       source: Type.Literal("agent"),
@@ -330,24 +330,8 @@ const ReviewRoundUnitSchema = Type.Object(
     id: Type.String(),
     title: Type.String(),
     routine: Type.Boolean(),
-    fold: Type.Optional(ReviewUnitFoldSchema),
-    attention: Type.Optional(
-      Type.Object(
-        {
-          outcome: Type.Literal("attention"),
-          source: Type.Literal("typesafe"),
-          reasons: Type.Array(Type.String()),
-          features: Type.Optional(ReviewUnitFeaturesSchema),
-        },
-        { additionalProperties: false },
-      ),
-    ),
-    outcome: Type.Union([
-      Type.Literal("reviewed"),
-      Type.Literal("glanced"),
-      Type.Literal("expanded"),
-    ]),
-    routineCandidate: Type.Boolean(),
+    outcome: Type.Union([Type.Literal("reviewed"), Type.Literal("skipped")]),
+    skip: Type.Optional(ReviewUnitSkipSchema),
     commented: Type.Boolean(),
   },
   { additionalProperties: false },

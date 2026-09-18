@@ -18,10 +18,6 @@ export interface ScreenHeaderState {
   readonly unitCount: number;
   readonly unitIndex: number;
   readonly reviewedCount: number;
-  /** Units completed without expanding a routine fold; included in reviewedCount. */
-  readonly glancedCount?: number;
-  /** Units a decision model marked as needing the reviewer. */
-  readonly attentionCount?: number;
   readonly commentCount: number;
   readonly skippedCount: number;
   readonly unsupportedCount: number;
@@ -46,12 +42,6 @@ export function renderScreenHeader(
   const progress = `${reviewed}/${unitCount} reviewed`;
   const comments = countNoun(state.commentCount, "comment");
   const statusParts = [comments, `${state.skippedCount} skipped`];
-  if (state.attentionCount !== undefined) {
-    statusParts.unshift(`${state.attentionCount} need review`);
-  }
-  if ((state.glancedCount ?? 0) > 0) {
-    statusParts.push(`${state.glancedCount} glanced`);
-  }
   if (state.unsupportedCount > 0) {
     statusParts.push(`${state.unsupportedCount} unsupported`);
   }

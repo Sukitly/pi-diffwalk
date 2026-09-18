@@ -171,15 +171,13 @@ export function renderAddUnitToolResult(
     remainingLines === 0
       ? "route complete"
       : `${countNoun(remainingLines, "line")} left in ${countNoun(progress.remaining.length, "file")}`;
-  const unit = progress.acceptedUnit;
+  const skip = progress.skip;
   const verdict =
-    unit.attention !== undefined
-      ? ` • review this: ${unit.attention.reasons.join("; ")}`
-      : unit.fold !== undefined
-        ? unit.fold.source === "agent"
-          ? " • skip this (agent claim)"
-          : ` • skip this: ${unit.fold.reasons.join(" ")}`
-        : "";
+    skip === undefined
+      ? ""
+      : skip.source === "agent"
+        ? " • skipped (agent claim)"
+        : ` • skipped: ${skip.reasons.join(" ")}`;
   return new Text(
     theme.fg(
       remainingLines === 0 ? "success" : "muted",

@@ -8,10 +8,6 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { DiffWalkExcludeFileResult } from "../../src/extension/exclusions.ts";
-import type {
-  FoldConfiguration,
-  UnitFeatureJudge,
-} from "../../src/extension/fold.ts";
 import {
   ADD_UNIT_TOOL_NAME,
   RESPOND_TOOL_NAME,
@@ -19,6 +15,10 @@ import {
 } from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
+import type {
+  SkipConfiguration,
+  UnitFeatureJudge,
+} from "../../src/extension/skip.ts";
 import type { ReviewRespondToolSchema } from "../../src/extension/tools.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
 import type { PathExclusionSources } from "../../src/git/exclusion.ts";
@@ -91,9 +91,9 @@ export interface HarnessBehavior {
   pathExclusionError?: Error;
   /** Paths that exist for routine references; undefined accepts every path. */
   existingReferencePaths?: readonly string[];
-  foldConfiguration: FoldConfiguration;
-  foldConfigurationError?: Error;
-  /** The judge handed out when folding is enabled. */
+  skipConfiguration: SkipConfiguration;
+  skipConfigurationError?: Error;
+  /** The judge handed out when automatic skipping is enabled. */
   unitFeatureJudge?: UnitFeatureJudge;
   /** Text returned for any routine reference; undefined means unreadable. */
   referenceText?: string;
@@ -175,7 +175,7 @@ export function createHarness(
     globalExcludeFile: { status: "absent" },
     projectExcludeFile: { status: "absent" },
     pathExclusionFacts: { excludedPaths: new Map(), generatedPaths: new Set() },
-    foldConfiguration: { status: "disabled" },
+    skipConfiguration: { status: "disabled" },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -299,15 +299,18 @@ export function createHarness(
     async locateProjectDiffWalkExcludeFile() {
       return behavior.projectExcludeFile;
     },
-    async readFoldConfiguration() {
-      if (behavior.foldConfigurationError !== undefined) {
-        throw behavior.foldConfigurationError;
+    async readSkipConfiguration() {
+      if (behavior.skipConfigurationError !== undefined) {
+        throw behavior.skipConfigurationError;
       }
-      return behavior.foldConfiguration;
+      return behavior.skipConfiguration;
     },
     createUnitFeatureJudge() {
       const judge = behavior.unitFeatureJudge;
-      assert.ok(judge, "Folding was enabled without a judge in the harness.");
+      assert.ok(
+        judge,
+        "Automatic skipping was enabled without a judge in the harness.",
+      );
       return judge;
     },
     async readReferenceText() {

@@ -89,24 +89,21 @@ export function registerAddUnitTool(
 /** The remaining work is the only thing the agent needs back from an append. */
 function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
   return formatRemaining(
-    `Accepted review unit ${progress.unitCount}${describeVerdict(progress.acceptedUnit)}.`,
+    `Accepted review unit ${progress.unitCount}${describeVerdict(progress)}.`,
     progress.remaining,
   );
 }
 
-/** One clause so the agent and the transcript show what the judge did. */
-function describeVerdict(
-  unit: ReviewRouteDraftProgress["acceptedUnit"],
-): string {
-  if (unit.attention !== undefined) {
-    return ` (review this: ${unit.attention.reasons.join("; ")})`;
-  }
-  if (unit.fold !== undefined) {
-    return unit.fold.source === "agent"
-      ? " (skip this: the agent's routine claim)"
-      : ` (skip this: ${unit.fold.reasons.join(" ")})`;
-  }
-  return "";
+/**
+ * A skipped unit never reaches the reviewer, so the append says so plainly.
+ * The unit still covers its lines, so the remaining work is unchanged.
+ */
+function describeVerdict(progress: ReviewRouteDraftProgress): string {
+  const skip = progress.skip;
+  if (skip === undefined) return "";
+  return skip.source === "agent"
+    ? " (skipped, the reviewer will not see it: your routine claim)"
+    : ` (skipped, the reviewer will not see it: ${skip.reasons.join(" ")})`;
 }
 
 function formatRouteSkipProgress(progress: ReviewRouteSkipProgress): string {

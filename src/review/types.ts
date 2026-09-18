@@ -171,25 +171,22 @@ export interface ReviewRound {
   readonly snapshot: ReviewSnapshot;
   readonly delta: ReviewDelta;
   readonly coverage: ReviewCoverage;
-  /** How the reviewer handled each unit, kept for tuning routine proposals. */
+  /** How each unit ended the round, kept for tuning the skip policy. */
   readonly units: readonly ReviewRoundUnit[];
 }
 
 /**
- * `glanced`: a folded unit accepted without expanding it. `expanded`: a
- * folded unit the reviewer opened before completing. `reviewed`: a walked
- * unit. `routineCandidate` is the reviewer saying a walked unit could have
- * been folded. `routine` records the agent's claim; `fold` records what the
- * walkthrough did with the unit and why.
+ * `reviewed`: the reviewer walked the unit. `skipped`: a judge kept the unit
+ * out of the walkthrough, so the reviewer never saw it; `skip` records who
+ * decided and why. `routine` records the agent's claim, which is a reason a
+ * unit may have been skipped, not an outcome by itself.
  */
 export interface ReviewRoundUnit {
   readonly id: ReviewUnitId;
   readonly title: string;
   readonly routine: boolean;
-  readonly fold?: ReviewUnitFold;
-  readonly attention?: ReviewUnitAttention;
-  readonly outcome: "reviewed" | "glanced" | "expanded";
-  readonly routineCandidate: boolean;
+  readonly outcome: "reviewed" | "skipped";
+  readonly skip?: ReviewUnitSkip;
   readonly commented: boolean;
 }
 
@@ -216,11 +213,7 @@ export interface InProgressReview {
 
 export interface ReviewUnitProgress {
   readonly reviewUnitId: ReviewUnitId;
-  readonly disposition: "pending" | "reviewed" | "glanced";
-  /** The reviewer expanded this routine unit at least once. */
-  readonly expanded?: true;
-  /** The reviewer marked this walked unit as one that could have been routine. */
-  readonly routineCandidate?: true;
+  readonly disposition: "pending" | "reviewed";
 }
 
 export interface ReviewDelta {
@@ -403,7 +396,7 @@ const ReviewUnitRoutineCandidateSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "Present only when the unit repeats an existing pattern and needs no judgment. The walkthrough folds it; the reviewer can expand it or override the claim.",
+      "Present only when the unit repeats an existing pattern and needs no judgment. A judge may drop such a unit from the walkthrough, so the reviewer sees only the reason in the round summary.",
   },
 );
 
@@ -514,6 +507,8 @@ export interface ReviewRoute {
   readonly snapshotId: SnapshotId;
   readonly units: readonly ReviewUnit[];
   readonly skippedSpans: readonly ReviewRouteSkip[];
+  /** Units a judge kept out of the walkthrough, in the order they arrived. */
+  readonly skippedUnits: readonly ReviewSkippedUnit[];
 }
 
 export interface ReviewUnitRoutine {
@@ -522,12 +517,13 @@ export interface ReviewUnitRoutine {
 }
 
 /**
- * Why a unit is folded in the walkthrough. `agent`: the agent's routine
- * claim was taken at its word. `typesafe`: a decision model judged the
- * unit's surface features and the fold policy accepted them; `features`
- * keeps what it saw so folds can be tuned against reviewer outcomes.
+ * Why a unit never reached the walkthrough. `agent`: the agent's routine
+ * claim was taken at its word because no decision model was configured.
+ * `typesafe`: a decision model judged the unit's surface features and the
+ * skip policy accepted them; `features` keeps what it saw so the thresholds
+ * can be tuned against later rounds.
  */
-export type ReviewUnitFold =
+export type ReviewUnitSkip =
   | {
       readonly source: "agent";
       readonly reasons: readonly string[];
@@ -539,24 +535,21 @@ export type ReviewUnitFold =
     };
 
 /**
- * The judge's verdict on a unit. Folding is the default; `attention`
- * records why a unit earned the reviewer's time, so the route shows which
- * units matter and that the judge ran even when every unit folds.
+ * The judge's verdict on an accepted unit. `review` puts the unit in the
+ * walkthrough; `skip` keeps it out entirely, so the reviewer never walks it.
  */
 export type ReviewUnitVerdict =
-  | { readonly outcome: "folded"; readonly fold: ReviewUnitFold }
-  | {
-      readonly outcome: "attention";
-      readonly source: "typesafe";
-      readonly reasons: readonly string[];
-      /** Absent when an open comment demanded attention before the model was asked. */
-      readonly features?: ReviewUnitFeatures;
-    };
+  | { readonly outcome: "review" }
+  | ({ readonly outcome: "skip" } & ReviewUnitSkip);
 
-export type ReviewUnitAttention = Extract<
-  ReviewUnitVerdict,
-  { outcome: "attention" }
->;
+/** A unit that a judge kept out of the walkthrough, with its covered spans. */
+export interface ReviewSkippedUnit {
+  readonly title: string;
+  readonly skip: ReviewUnitSkip;
+  readonly spans: readonly ResolvedSpan[];
+  /** Changed lines the unit covered, so the summary can report its size. */
+  readonly changedLineCount: number;
+}
 
 /** Surface features of one unit as a decision model reports them. */
 export interface ReviewUnitFeatures {
@@ -600,9 +593,6 @@ export interface ReviewUnit {
   readonly reviewFocus: readonly ReviewCheck[];
   readonly spans: readonly ResolvedSpan[];
   readonly routine?: ReviewUnitRoutine;
-  readonly fold?: ReviewUnitFold;
-  /** Present when a decision model judged the unit as needing the reviewer. */
-  readonly attention?: ReviewUnitAttention;
 }
 
 export interface ReviewRouteSkip {

@@ -18,7 +18,6 @@ import {
   exclusionPath,
   type PathExclusionFacts,
 } from "../review/exclusion.ts";
-import { foldFromRoutineClaim } from "../review/fold.ts";
 import {
   attachReviewRoute,
   createInProgressReview,
@@ -33,15 +32,15 @@ import {
 import {
   appendReviewRouteSkip,
   appendReviewRouteUnit,
-  applyVerdict,
   createReviewRouteDraft,
   finishReviewRouteDraft,
   type ReviewRouteDraft,
   type ReviewRouteDraftProgress,
   type ReviewRouteSkipProgress,
-  withLastUnitVerdict,
+  recordLastUnitVerdict,
 } from "../review/route-draft.ts";
 import { createReviewSeries } from "../review/series.ts";
+import { skipFromRoutineClaim } from "../review/skip.ts";
 import {
   DIFFWALK_THREAD_BATCH_ENTRY_TYPE,
   parseReviewThreadBatchEntry,
@@ -79,15 +78,6 @@ import {
   locateGlobalDiffWalkExcludeFile,
   locateProjectDiffWalkExcludeFile,
 } from "./exclusions.ts";
-import {
-  createUnitFeatureJudge,
-  type FoldConfiguration,
-  judgeUnit,
-  readFoldConfiguration,
-  readReferenceText,
-  type UnitFeatureJudge,
-  verdictOf,
-} from "./fold.ts";
 import { createPiGitRunner } from "./git-runner.ts";
 import {
   formatGuidedReviewResult,
@@ -105,6 +95,15 @@ import {
   loadProjectDiffWalkRules,
 } from "./rules.ts";
 import {
+  createUnitFeatureJudge,
+  judgeUnit,
+  readReferenceText,
+  readSkipConfiguration,
+  type SkipConfiguration,
+  type UnitFeatureJudge,
+  verdictOf,
+} from "./skip.ts";
+import {
   buildKickoffMessageDetails,
   buildSubmittedReviewMessageDetails,
   DIFFWALK_KICKOFF_MESSAGE_TYPE,
@@ -117,10 +116,13 @@ export const DEFAULT_REVIEW_TARGET = "HEAD";
 export const DISCARD_OPTION = "--discard";
 export const THREADS_OPTION = "--threads";
 export const NO_EXCLUDE_OPTION = "--no-exclude";
+export const NO_SKIP_OPTION = "--no-skip";
 
 export interface ReviewCommandOptions {
   /** Skip every mechanical exclusion rule and route all changed lines. */
   readonly noExclude?: boolean;
+  /** Walk every unit, including the ones a judge would have skipped. */
+  readonly noSkip?: boolean;
 }
 
 export interface DiffWalkDependencies {
@@ -133,7 +135,7 @@ export interface DiffWalkDependencies {
   readonly locateProjectDiffWalkExcludeFile: typeof locateProjectDiffWalkExcludeFile;
   readonly resolvePathExclusionFacts: typeof resolvePathExclusionFacts;
   readonly routineReferenceExists: typeof routineReferenceExists;
-  readonly readFoldConfiguration: typeof readFoldConfiguration;
+  readonly readSkipConfiguration: typeof readSkipConfiguration;
   readonly createUnitFeatureJudge: typeof createUnitFeatureJudge;
   readonly readReferenceText: typeof readReferenceText;
   readonly openGuidedReview: typeof openGuidedReview;
@@ -150,7 +152,7 @@ export const DEFAULT_DEPENDENCIES: DiffWalkDependencies = {
   locateProjectDiffWalkExcludeFile,
   resolvePathExclusionFacts,
   routineReferenceExists,
-  readFoldConfiguration,
+  readSkipConfiguration,
   createUnitFeatureJudge,
   readReferenceText,
   openGuidedReview,
@@ -172,10 +174,12 @@ interface PendingReview {
   routeRules?: LoadedDiffWalkRules;
   /** Units accepted so far while the agent assembles the route one at a time. */
   routeDraft: ReviewRouteDraft;
-  /** The fold judge for this review, or undefined when folding is off or has failed. */
-  foldJudge?: UnitFeatureJudge;
-  /** Folding degraded during this review; reported once. */
-  foldDegraded: boolean;
+  /** The judge for this review, or undefined when skipping is off or has failed. */
+  skipJudge?: UnitFeatureJudge;
+  /** Judging degraded during this review; reported once. */
+  judgeDegraded: boolean;
+  /** The reviewer asked to walk every unit, so nothing may be skipped. */
+  noSkip: boolean;
 }
 
 /**
@@ -348,7 +352,7 @@ export class DiffWalkSession {
           ...(pending.routeRules === undefined
             ? {}
             : { rules: pending.routeRules }),
-          judged: pending.foldJudge !== undefined,
+          judged: pending.skipJudge !== undefined,
         }),
         display: true,
         details: buildKickoffMessageDetails(snapshot, delta),
@@ -429,7 +433,8 @@ export class DiffWalkSession {
       return;
     }
     const routeRules = await this.captureRouteRules(ctx, snapshot);
-    const foldJudge = await this.captureFoldJudge(ctx);
+    const skipJudge =
+      options.noSkip === true ? undefined : await this.captureSkipJudge(ctx);
     const review = createInProgressReview({
       series,
       snapshot,
@@ -442,8 +447,9 @@ export class DiffWalkSession {
       inProgress: false,
       ...(routeRules === undefined ? {} : { routeRules }),
       routeDraft: createReviewRouteDraft(snapshot.id),
-      ...(foldJudge === undefined ? {} : { foldJudge }),
-      foldDegraded: false,
+      ...(skipJudge === undefined ? {} : { skipJudge }),
+      judgeDegraded: false,
+      noSkip: options.noSkip === true,
     };
     this.pendingReview = pending;
     this.sendKickoffPrompt(pending);
@@ -590,31 +596,34 @@ export class DiffWalkSession {
       pending,
       progress.acceptedUnit,
     );
-    pending.routeDraft = withLastUnitVerdict(progress.draft, verdict);
-    return {
-      ...progress,
-      acceptedUnit: applyVerdict(progress.acceptedUnit, verdict),
-      draft: pending.routeDraft,
-    };
+    const judged = recordLastUnitVerdict(
+      pending.review.snapshot,
+      pending.review.delta,
+      progress,
+      verdict,
+    );
+    pending.routeDraft = judged.draft;
+    return judged;
   }
 
   /**
-   * With a judge, every unit is folded or walked on its surface features
+   * With a judge, every unit is skipped or walked on its surface features
    * and the agent's routine claim only adds a reference to check. Without
-   * one, the claim folds the unit by itself. A judge that fails degrades
-   * to walking every remaining unit, reported once; the agent's claim does
-   * not take over mid-review, because the reviewer was told folding is off.
+   * one, the claim skips the unit by itself. A judge that fails degrades to
+   * walking every remaining unit, reported once; the agent's claim does not
+   * take over mid-review, because the units judged before the failure were
+   * held to a stricter standard than the claim.
    */
   private async judgeAcceptedUnit(
     ctx: Pick<CommandContext, "ui">,
     pending: PendingReview,
     unit: ReviewUnit,
   ): Promise<ReviewUnitVerdict | undefined> {
-    if (pending.foldDegraded) return undefined;
-    const judge = pending.foldJudge;
+    if (pending.noSkip || pending.judgeDegraded) return undefined;
+    const judge = pending.skipJudge;
     if (judge === undefined) {
-      const fold = foldFromRoutineClaim(unit);
-      return fold === undefined ? undefined : { outcome: "folded", fold };
+      const skip = skipFromRoutineClaim(unit);
+      return skip === undefined ? undefined : { outcome: "skip", ...skip };
     }
     try {
       const decision = await judgeUnit({
@@ -626,25 +635,29 @@ export class DiffWalkSession {
       });
       return verdictOf(decision);
     } catch (error: unknown) {
-      pending.foldJudge = undefined;
-      pending.foldDegraded = true;
+      pending.skipJudge = undefined;
+      pending.judgeDegraded = true;
       ctx.ui.notify(
-        `Folding is unavailable for this review: ${errorMessage(error)} Every remaining unit will be walked.`,
+        `Automatic skipping is unavailable for this review: ${errorMessage(error)} Every remaining unit will be walked.`,
         "warning",
       );
       return undefined;
     }
   }
 
-  private async captureFoldJudge(
+  /**
+   * With `--no-skip` there is no judge, so the agent's routine claim must not
+   * remove a unit either: the reviewer asked to walk everything.
+   */
+  private async captureSkipJudge(
     ctx: CommandContext,
   ): Promise<UnitFeatureJudge | undefined> {
-    let configuration: FoldConfiguration;
+    let configuration: SkipConfiguration;
     try {
-      configuration = await this.dependencies.readFoldConfiguration();
+      configuration = await this.dependencies.readSkipConfiguration();
     } catch (error: unknown) {
       ctx.ui.notify(
-        `Cannot read the DiffWalk fold setting: ${errorMessage(error)} Folding is off for this review.`,
+        `Cannot read the DiffWalk skip setting: ${errorMessage(error)} Automatic skipping is off for this review.`,
         "warning",
       );
       return undefined;
@@ -652,7 +665,7 @@ export class DiffWalkSession {
     if (configuration.status === "disabled") return undefined;
     if (configuration.status === "misconfigured") {
       ctx.ui.notify(
-        `${configuration.reason} Folding is off for this review.`,
+        `${configuration.reason} Automatic skipping is off for this review.`,
         "warning",
       );
       return undefined;
@@ -699,7 +712,36 @@ export class DiffWalkSession {
       expectedVersion: pending.review.version,
       timestamp: new Date().toISOString(),
     });
+    if (route.units.length === 0) {
+      return this.closeFullySkippedReview(ctx, pending, signal);
+    }
     return this.runPendingReview(ctx, pending);
+  }
+
+  /**
+   * A judge skipped every unit, so there is nothing for the reviewer to
+   * walk. Opening an empty walkthrough would waste the reviewer's time for
+   * the same reason skipping exists, so the round is closed immediately and
+   * the skipped units are reported instead.
+   */
+  private async closeFullySkippedReview(
+    ctx: ReviewUiContext,
+    pending: PendingReview,
+    signal: AbortSignal | undefined,
+  ): Promise<GuidedReviewResult> {
+    const route = pending.review.route;
+    const count = route?.skippedUnits.length ?? 0;
+    ctx.ui.notify(
+      `Every unit of this review was skipped (${count}); nothing needs your reading. Run /diffwalk --no-skip to walk them anyway.`,
+      "info",
+    );
+    const result = await this.submitPendingReview(
+      pending,
+      pending.review,
+      signal ?? new AbortController().signal,
+    );
+    this.pendingReview = undefined;
+    return result;
   }
 
   private requireRoutableReview(): PendingReview {

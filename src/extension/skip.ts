@@ -5,11 +5,11 @@ import {
   readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
 import {
-  type AttentionDecision,
-  decideAttention,
+  decideSkip,
   gateReasons,
   renderUnitText,
-} from "../review/fold.ts";
+  type SkipDecision,
+} from "../review/skip.ts";
 import { changedLineKey, resolvedSpanChangedLines } from "../review/span.ts";
 import type {
   ReviewDelta,
@@ -26,19 +26,19 @@ import {
 } from "./typesafe.ts";
 
 /**
- * Folding with a decision model is opt-in, because it sends the changed
- * lines of every unit to a second vendor. The switch lives in pi's
- * settings.json under `diffwalk.fold`. The key lives where pi keeps every
+ * Skipping units with a decision model is opt-in, because it sends the
+ * changed lines of every unit to a second vendor. The switch lives in pi's
+ * settings.json under `diffwalk.skip`. The key lives where pi keeps every
  * other API key, auth.json under the provider id `typesafe`, with the
  * environment variable as a fallback. Consent and credential stay separate:
- * a stored key does not enable folding by itself.
+ * a stored key does not enable skipping by itself.
  */
 
-export const FOLD_SETTING_KEY = "fold";
-export const FOLD_SETTING_VALUE = "typesafe";
+export const SKIP_SETTING_KEY = "skip";
+export const SKIP_SETTING_VALUE = "typesafe";
 export const TYPESAFE_AUTH_PROVIDER_ID = "typesafe";
 
-export type FoldConfiguration =
+export type SkipConfiguration =
   | { readonly status: "disabled" }
   | {
       readonly status: "enabled";
@@ -47,11 +47,11 @@ export type FoldConfiguration =
     }
   | { readonly status: "misconfigured"; readonly reason: string };
 
-export async function readFoldConfiguration(
+export async function readSkipConfiguration(
   agentDir = getAgentDir(),
   env: NodeJS.ProcessEnv = process.env,
-): Promise<FoldConfiguration> {
-  return readFoldConfigurationFrom(agentDir, env, () =>
+): Promise<SkipConfiguration> {
+  return readSkipConfigurationFrom(agentDir, env, () =>
     readStoredApiKey(agentDir),
   );
 }
@@ -67,11 +67,11 @@ function readStoredApiKey(agentDir: string): string | undefined {
   return key === undefined || key.trim().length === 0 ? undefined : key;
 }
 
-export async function readFoldConfigurationFrom(
+export async function readSkipConfigurationFrom(
   agentDir: string,
   env: NodeJS.ProcessEnv,
   storedApiKey: () => string | undefined,
-): Promise<FoldConfiguration> {
+): Promise<SkipConfiguration> {
   let raw: string;
   try {
     raw = await readFile(join(agentDir, "settings.json"), "utf8");
@@ -88,15 +88,15 @@ export async function readFoldConfigurationFrom(
     settings !== null && typeof settings === "object"
       ? (settings as Record<string, unknown>).diffwalk
       : undefined;
-  const fold =
+  const setting =
     diffwalk !== null && typeof diffwalk === "object"
-      ? (diffwalk as Record<string, unknown>)[FOLD_SETTING_KEY]
+      ? (diffwalk as Record<string, unknown>)[SKIP_SETTING_KEY]
       : undefined;
-  if (fold === undefined) return { status: "disabled" };
-  if (fold !== FOLD_SETTING_VALUE) {
+  if (setting === undefined) return { status: "disabled" };
+  if (setting !== SKIP_SETTING_VALUE) {
     return {
       status: "misconfigured",
-      reason: `settings.json diffwalk.${FOLD_SETTING_KEY} is ${JSON.stringify(fold)}; the only supported value is ${JSON.stringify(FOLD_SETTING_VALUE)}.`,
+      reason: `settings.json diffwalk.${SKIP_SETTING_KEY} is ${JSON.stringify(setting)}; the only supported value is ${JSON.stringify(SKIP_SETTING_VALUE)}.`,
     };
   }
   const envKey = env[TYPESAFE_API_KEY_ENV];
@@ -106,7 +106,7 @@ export async function readFoldConfigurationFrom(
   if (apiKey === undefined) {
     return {
       status: "misconfigured",
-      reason: `settings.json enables diffwalk.${FOLD_SETTING_KEY} but auth.json has no ${JSON.stringify(TYPESAFE_AUTH_PROVIDER_ID)} api_key credential and ${TYPESAFE_API_KEY_ENV} is not set.`,
+      reason: `settings.json enables diffwalk.${SKIP_SETTING_KEY} but auth.json has no ${JSON.stringify(TYPESAFE_AUTH_PROVIDER_ID)} api_key credential and ${TYPESAFE_API_KEY_ENV} is not set.`,
     };
   }
   const baseURL = env.TYPESAFE_BASE_URL;
@@ -124,7 +124,7 @@ export type UnitFeatureJudge = (
 ) => Promise<ReviewUnitFeatures>;
 
 export function createUnitFeatureJudge(
-  configuration: Extract<FoldConfiguration, { status: "enabled" }>,
+  configuration: Extract<SkipConfiguration, { status: "enabled" }>,
 ): UnitFeatureJudge {
   const client = new TypeSafeClient({
     apiKey: configuration.apiKey,
@@ -166,7 +166,7 @@ export const readReferenceText: ReferenceTextReader = async (
   return lines.slice(start - 1, end).join("\n");
 };
 
-export interface FoldUnitInput {
+export interface JudgeUnitInput {
   readonly snapshot: ReviewSnapshot;
   readonly delta: ReviewDelta;
   readonly unit: ReviewUnit;
@@ -176,12 +176,10 @@ export interface FoldUnitInput {
 }
 
 /**
- * Judges one accepted unit and applies the attention policy. Throws only
- * for transport and protocol failures; the caller decides how to degrade.
+ * Judges one accepted unit and applies the skip policy. Throws only for
+ * transport and protocol failures; the caller decides how to degrade.
  */
-export async function judgeUnit(
-  input: FoldUnitInput,
-): Promise<AttentionDecision> {
+export async function judgeUnit(input: JudgeUnitInput): Promise<SkipDecision> {
   const { snapshot, delta, unit } = input;
   const unresolved = new Set(
     delta.lines
@@ -199,7 +197,7 @@ export async function judgeUnit(
   );
   const gates = { hasUnresolvedComment };
   const gated = gateReasons(gates);
-  if (gated.length > 0) return { attention: true, reasons: gated };
+  if (gated.length > 0) return { review: true, reasons: gated };
   const referenceText =
     unit.routine === undefined
       ? undefined
@@ -214,18 +212,16 @@ export async function judgeUnit(
     },
     input.signal,
   );
-  return decideAttention(features, gates);
+  return decideSkip(features, gates);
 }
 
-export function verdictOf(decision: AttentionDecision): ReviewUnitVerdict {
-  return decision.attention
-    ? {
-        outcome: "attention",
+export function verdictOf(decision: SkipDecision): ReviewUnitVerdict {
+  return decision.review
+    ? { outcome: "review" }
+    : {
+        outcome: "skip",
         source: "typesafe",
         reasons: decision.reasons,
-        ...(decision.features === undefined
-          ? {}
-          : { features: decision.features }),
-      }
-    : { outcome: "folded", fold: decision.fold };
+        features: decision.features,
+      };
 }
