@@ -158,34 +158,27 @@ export function renderGuidedReviewToolResult(
   return new Text([theme.fg(titleColor, title), ...body].join("\n"), 0, 0);
 }
 
-/** One line per accepted unit: what was taken, and how much is left. */
+/**
+ * One line under each unit the agent appends, reporting what happened to
+ * that unit: either it is one the reviewer will read, and which one in
+ * order, or a judge kept it out of the walkthrough and why.
+ */
 export function renderAddUnitToolResult(
   progress: ReviewRouteDraftProgress,
   theme: Theme,
 ): Text {
-  const remainingLines = progress.remaining.reduce(
-    (sum, file) => sum + file.lineCount,
-    0,
-  );
-  const summary =
-    remainingLines === 0
-      ? "route complete"
-      : `${countNoun(remainingLines, "line")} left in ${countNoun(progress.remaining.length, "file")}`;
   const skip = progress.skip;
-  const verdict =
-    skip === undefined
-      ? ""
-      : skip.source === "agent"
-        ? " • skipped (agent claim)"
-        : ` • skipped: ${skip.reasons.join(" ")}`;
-  return new Text(
-    theme.fg(
-      remainingLines === 0 ? "success" : "muted",
-      `Unit ${progress.unitCount} accepted, ${summary}${verdict}`,
-    ),
-    0,
-    0,
-  );
+  if (skip !== undefined) {
+    return new Text(
+      theme.fg("dim", `Not shown to you: ${skip.reasons.join(" ")}`),
+      0,
+      0,
+    );
+  }
+  const position = progress.draft.units.filter(
+    (_unit, index) => progress.draft.verdicts[index]?.outcome !== "skip",
+  ).length;
+  return new Text(theme.fg("muted", `Unit ${position} to read`), 0, 0);
 }
 
 export function reviewOutcomeNotification(result: GuidedReviewResult): string {

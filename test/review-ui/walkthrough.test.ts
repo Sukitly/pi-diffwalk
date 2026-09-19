@@ -218,7 +218,7 @@ test("shows complete responsive header information when height permits", () => {
   assert.match(wideHeader, /Request entry point\\nsecondary heading/);
   assert.match(
     wideHeader,
-    /0\/2 reviewed\s+0 comments · 1 skipped · 2 unsupported\s+\[ {10}\]/,
+    /0\/2 reviewed\s+0 comments · 2 unsupported\s+\[ {10}\]/,
   );
   assert.doesNotMatch(wideHeader, /snapshot/);
 
@@ -226,22 +226,22 @@ test("shows complete responsive header information when height permits", () => {
   harness.terminal.rows = 24;
   lines = harness.component.render(80).map((line) => line.trimEnd());
   assert.match(lines[0] ?? "", /^DiffWalk \/ Review · Unit 1\/2$/);
-  assert.match(lines[2] ?? "", /0\/2 reviewed · 0 comments · 1 skipped/);
+  assert.match(lines[2] ?? "", /0\/2 reviewed · 0 comments · 2 unsupported/);
   assert.match(lines.join("\n"), /Does validation preserve compatibility/);
 
   harness.terminal.columns = 40;
   lines = harness.component.render(40).map((line) => line.trimEnd());
   assert.equal(lines[0], "DiffWalk / Review · 1/2");
   assert.equal(lines[2], "Reviewed 0/2");
-  assert.match(lines[3] ?? "", /0 comments · 1 skipped/);
+  assert.match(lines[3] ?? "", /0 comments · 2 unsupported/);
 
   harness.terminal.columns = 18;
   lines = harness.component.render(18).map((line) => line.trimEnd());
   assert.equal(lines[0], "DiffWalk · 1/2");
   assert.match(lines.slice(2, 7).join("\n"), /Reviewed 0\/2/);
   assert.match(lines.slice(2, 7).join("\n"), /0 comments/);
-  assert.match(lines.slice(2, 7).join("\n"), /1 skipped/);
   assert.match(lines.slice(2, 7).join("\n"), /2 unsupported/);
+  assert.doesNotMatch(lines.join("\n"), /skipped/);
 });
 
 test("renders bounded progress with distinct boundary and fill roles", () => {

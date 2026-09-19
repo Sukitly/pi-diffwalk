@@ -19,7 +19,6 @@ export interface ScreenHeaderState {
   readonly unitIndex: number;
   readonly reviewedCount: number;
   readonly commentCount: number;
-  readonly skippedCount: number;
   readonly unsupportedCount: number;
   readonly submissionStatus: SubmissionStatus;
 }
@@ -41,7 +40,7 @@ export function renderScreenHeader(
   const position = `Unit ${currentUnit}/${unitCount}`;
   const progress = `${reviewed}/${unitCount} reviewed`;
   const comments = countNoun(state.commentCount, "comment");
-  const statusParts = [comments, `${state.skippedCount} skipped`];
+  const statusParts = [comments];
   if (state.unsupportedCount > 0) {
     statusParts.push(`${state.unsupportedCount} unsupported`);
   }

@@ -8,11 +8,13 @@ import {
   DIFFWALK_REVIEW_RESULT_MESSAGE_TYPE,
   DIFFWALK_THREAD_FOLLOW_UP_MESSAGE_TYPE,
   type KickoffMessageDetails,
+  renderAddUnitToolResult,
   renderKickoffMessage,
   renderSubmittedReviewMessage,
   type SubmittedReviewMessageDetails,
 } from "../../src/extension/tui-messages.ts";
 import { computeReviewDelta } from "../../src/review/delta.ts";
+import type { ReviewRouteDraftProgress } from "../../src/review/route-draft.ts";
 import type {
   GuidedReviewResult,
   ReviewThreadBatch,
@@ -338,5 +340,49 @@ test("formats structured pause, discard, and submission instructions", () => {
   assert.match(
     formatted.instruction,
     /Do not answer in ordinary assistant text/,
+  );
+});
+
+test("each appended unit reports its own outcome, not the route total", () => {
+  const draft = {
+    snapshotId: "snapshot-index",
+    units: [{}, {}, {}],
+    verdicts: [
+      undefined,
+      {
+        outcome: "skip",
+        source: "agent",
+        reasons: ["Same shape as src/a.ts."],
+      },
+      undefined,
+    ],
+    skippedSpans: [],
+  } as unknown as ReviewRouteDraftProgress["draft"];
+  const base = {
+    draft,
+    unitCount: 3,
+    acceptedUnit: {} as ReviewRouteDraftProgress["acceptedUnit"],
+    coveredLineCount: 8,
+    remaining: [],
+  };
+
+  assert.equal(
+    renderedText(renderAddUnitToolResult(base, plainTheme), 80),
+    "Unit 2 to read",
+    "A walked unit says which unit of the walkthrough it is.",
+  );
+
+  assert.equal(
+    renderedText(
+      renderAddUnitToolResult(
+        {
+          ...base,
+          skip: { source: "agent", reasons: ["Same shape as src/a.ts."] },
+        },
+        plainTheme,
+      ),
+      80,
+    ),
+    "Not shown to you: Same shape as src/a.ts.",
   );
 });

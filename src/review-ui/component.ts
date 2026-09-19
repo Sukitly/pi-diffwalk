@@ -116,7 +116,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     string,
     ChangedLineDisplayOwnership
   >;
-  private readonly skippedCount: number;
   private readonly unsupportedCount: number;
   private readonly onSubmit: (
     review: InProgressReview,
@@ -181,7 +180,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.inventory = viewModel.inventory;
     this.changesById = viewModel.changesById;
     this.displayOwnership = viewModel.displayOwnership;
-    this.skippedCount = options.route.skippedSpans.length;
     this.unsupportedCount = viewModel.unsupportedCount;
     this.selectedTargetByUnit = this.units.map(() => 0);
 
@@ -664,7 +662,6 @@ export class GuidedReviewComponent implements Component, Focusable {
         unitIndex: this.unitIndex,
         reviewedCount: this.reviewedUnitCount(),
         commentCount: this.review.comments.length,
-        skippedCount: this.skippedCount,
         unsupportedCount: this.unsupportedCount,
         submissionStatus: this.submissionStatus,
       },
