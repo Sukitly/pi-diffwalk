@@ -86,50 +86,6 @@ export function renderWalkthroughPreview(
   );
 }
 
-/**
- * A routine unit that the reviewer has not expanded. The claim, its
- * reference, and the size of what is folded are the whole display: enough to
- * decide whether to trust the fold, nothing that invites skimming code.
- */
-export function renderFoldedRoutineUnit(
-  unit: ReviewUnit,
-  changedLineCount: number,
-  theme: ReviewUiTheme,
-  width: number,
-): readonly string[] {
-  const routine = unit.routine;
-  if (routine === undefined) return [];
-  const rows: string[] = [""];
-  rows.push(
-    ...wrapStyled(theme.fg("text", safeText(unit.changeSummary)), width),
-    "",
-  );
-  rows.push(
-    ...wrapWithPrefix(
-      theme.fg("accent", "Routine: "),
-      theme.fg("text", safeText(routine.reason)),
-      width,
-    ),
-    ...wrapWithPrefix(
-      theme.fg("accent", "Mirrors: "),
-      theme.fg("text", safeText(routine.reference)),
-      width,
-    ),
-    "",
-  );
-  const noun = changedLineCount === 1 ? "line" : "lines";
-  rows.push(
-    ...wrapStyled(
-      theme.fg(
-        "muted",
-        `${changedLineCount} changed ${noun} folded. Press o to expand, n to accept the fold and continue.`,
-      ),
-      width,
-    ),
-  );
-  return rows.map((row) => fitLine(row, width));
-}
-
 export function renderExplanationLines(
   unit: ReviewUnit,
   theme: ReviewUiTheme,
@@ -139,7 +95,7 @@ export function renderExplanationLines(
   if (unit.routine !== undefined) {
     addSectionText(
       lines,
-      "Routine claim",
+      "Agent routine claim",
       `${unit.routine.reason} Mirrors ${unit.routine.reference}.`,
       theme,
       width,
@@ -193,21 +149,6 @@ export function renderTransientFeedback(
       safeText(feedback.message),
     ),
     width,
-  );
-}
-
-const FOLDED_FOOTERS = [
-  "o expand • ←/→ unit • n accept fold • e details • i inventory • s summary • Esc pause • ? help",
-  "o expand • ←/→ unit • n accept fold • e details • s summary • ? help",
-  "o expand • n accept • ? help",
-  "? help",
-  "?",
-] as const;
-
-export function foldedFooterText(width: number): string {
-  const available = Math.max(1, width);
-  return (
-    FOLDED_FOOTERS.find((footer) => visibleWidth(footer) <= available) ?? "?"
   );
 }
 

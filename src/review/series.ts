@@ -114,19 +114,15 @@ function validateRoundUnits(units: readonly ReviewRoundUnit[]): void {
     if (unit.title.trim().length === 0) {
       throw new ReviewSeriesError(`Round unit ${unit.id} requires a title.`);
     }
-    if (!unit.routine && unit.outcome !== "reviewed") {
+    const skipped = unit.skip !== undefined;
+    if (skipped && unit.outcome !== "skipped") {
       throw new ReviewSeriesError(
-        `Round unit ${unit.id} is not routine but has outcome ${unit.outcome}.`,
+        `Round unit ${unit.id} records a skip but has outcome ${unit.outcome}.`,
       );
     }
-    if (unit.routine && unit.outcome === "reviewed") {
+    if (!skipped && unit.outcome === "skipped") {
       throw new ReviewSeriesError(
-        `Round unit ${unit.id} is routine and must be glanced or expanded.`,
-      );
-    }
-    if (unit.routine && unit.routineCandidate) {
-      throw new ReviewSeriesError(
-        `Round unit ${unit.id} is routine and cannot also be a routine candidate.`,
+        `Round unit ${unit.id} was skipped without recording who decided and why.`,
       );
     }
   }

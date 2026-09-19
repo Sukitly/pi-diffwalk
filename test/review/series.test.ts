@@ -461,7 +461,7 @@ test("requires excluded requirements and excluded records to agree", () => {
   );
 });
 
-test("validates round unit outcomes against their routine flag", () => {
+test("validates round unit outcomes against their skip", () => {
   const base = series();
   const snapshot = snapshotOf("snapshot-1");
   const delta = computeReviewDelta(snapshot);
@@ -475,7 +475,6 @@ test("validates round unit outcomes against their routine flag", () => {
     title: "Unit",
     routine: false,
     outcome: "reviewed",
-    routineCandidate: false,
     commented: false,
     ...overrides,
   });
@@ -485,21 +484,37 @@ test("validates round unit outcomes against their routine flag", () => {
     unit({
       id: "review-unit:2" as ReviewRoundUnit["id"],
       routine: true,
-      outcome: "glanced",
+      skip: { source: "agent", reasons: ["Same shape."] },
+      outcome: "skipped",
+    }),
+    unit({
+      id: "review-unit:3" as ReviewRoundUnit["id"],
+      skip: {
+        source: "typesafe",
+        reasons: ["No behavior change."],
+        features: {
+          changesBehavior: 0.1,
+          newControlFlow: 0.05,
+          touchesBoundary: { choice: "none", confidence: 0.9 },
+          kind: { choice: "refactor", confidence: 0.8 },
+        },
+      },
+      outcome: "skipped",
     }),
   ]);
-  assert.equal(round.units.length, 2);
-  assert.equal(appendReviewRound(base, round).rounds[0]?.units.length, 2);
+  assert.equal(round.units.length, 3);
+  assert.equal(appendReviewRound(base, round).rounds[0]?.units.length, 3);
 
+  const agentSkip = { source: "agent" as const, reasons: ["Same shape."] };
   const cases: readonly [Partial<ReviewRoundUnit>[], RegExp][] = [
     [[{}, {}], /more than once/],
     [[{ title: " " }], /requires a title/],
-    [[{ outcome: "glanced" }], /not routine but has outcome/],
-    [[{ routine: true }], /must be glanced or expanded/],
+    [[{ outcome: "skipped" }], /skipped without recording who decided/],
     [
-      [{ routine: true, outcome: "expanded", routineCandidate: true }],
-      /cannot also be a routine candidate/,
+      [{ routine: true, outcome: "skipped" }],
+      /skipped without recording who decided/,
     ],
+    [[{ skip: agentSkip }], /records a skip but has outcome reviewed/],
   ];
   for (const [units, pattern] of cases) {
     assert.throws(

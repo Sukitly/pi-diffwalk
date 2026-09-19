@@ -8,13 +8,17 @@ import {
   discardInProgressReview,
   getReviewSubmissionBlockers,
   InProgressReviewError,
-  markReviewUnitExpanded,
   markReviewUnitReviewed,
   setInProgressReviewSubmissionMode,
   submitInProgressReview,
-  toggleReviewUnitRoutineCandidate,
   upsertInProgressReviewComment,
 } from "../../src/review/in-progress.ts";
+import {
+  appendReviewRouteUnit,
+  createReviewRouteDraft,
+  finishReviewRouteDraft,
+  recordLastUnitVerdict,
+} from "../../src/review/route-draft.ts";
 import { validateReviewRoute } from "../../src/review/route-validation.ts";
 import { createReviewSeries } from "../../src/review/series.ts";
 import type {
@@ -371,33 +375,36 @@ function hasCode(error: unknown, code: string): boolean {
   return true;
 }
 
-function routineReviewFixture(): ReviewFixture {
+function skippedUnitReviewFixture(): ReviewFixture {
   const base = makeReviewFixture();
   const snapshot = base.review.snapshot;
   const delta = base.review.delta;
-  const route = validateReviewRoute(snapshot, delta, {
-    snapshotId: snapshot.id,
-    units: [
-      {
-        title: "Entry",
-        whyHere: "The behavior starts here.",
-        context: "entry -> contract",
-        changeSummary: "Changes the entry behavior.",
-        reviewFocus: [{ question: "Is the entry behavior correct?" }],
-        spans: [span("src/entry.ts", { new: [2, 2] })],
-      },
-      {
-        title: "Contract",
-        whyHere: "The entry depends on this contract.",
-        context: "entry -> contract",
-        changeSummary: "Changes the contract.",
-        reviewFocus: [{ question: "Is the contract compatible?" }],
-        spans: [span("src/contract.ts", { new: [2, 2] })],
-        routine: { reference: "src/other.ts", reason: "Mirrors other." },
-      },
-    ],
-    skippedSpans: [],
-  });
+  const walkedUnit = {
+    title: "Entry",
+    whyHere: "The behavior starts here.",
+    context: "entry -> contract",
+    changeSummary: "Changes the entry behavior.",
+    reviewFocus: [{ question: "Is the entry behavior correct?" }],
+    spans: [span("src/entry.ts", { new: [2, 2] as [number, number] })],
+  };
+  const skippedUnit = {
+    title: "Contract",
+    whyHere: "The entry depends on this contract.",
+    context: "entry -> contract",
+    changeSummary: "Changes the contract.",
+    reviewFocus: [{ question: "Is the contract compatible?" }],
+    spans: [span("src/contract.ts", { new: [2, 2] as [number, number] })],
+    routine: { reference: "src/other.ts", reason: "Mirrors other." },
+  };
+  let draft = createReviewRouteDraft(snapshot.id);
+  draft = appendReviewRouteUnit(snapshot, delta, draft, walkedUnit).draft;
+  draft = recordLastUnitVerdict(
+    snapshot,
+    delta,
+    appendReviewRouteUnit(snapshot, delta, draft, skippedUnit),
+    { outcome: "skip", source: "agent", reasons: ["Mirrors other."] },
+  ).draft;
+  const route = finishReviewRouteDraft(snapshot, delta, draft);
   return {
     ...base,
     route,
@@ -409,100 +416,26 @@ function routineReviewFixture(): ReviewFixture {
   };
 }
 
-test("a routine unit completed without expanding is glanced; expanded first is reviewed", () => {
-  const fixture = routineReviewFixture();
-  const [walked, routine] = fixture.route.units;
-  assert.ok(walked && routine);
-
-  const glanced = markReviewUnitReviewed(
-    fixture.review,
-    routine.id,
-    mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
-  );
-  assert.equal(
-    glanced.unitProgress.find((p) => p.reviewUnitId === routine.id)
-      ?.disposition,
-    "glanced",
-  );
-  assert.equal(
-    markReviewUnitReviewed(
-      glanced,
-      routine.id,
-      mutate(glanced, "2026-01-01T00:03:00.000Z"),
-    ),
-    glanced,
-    "Completing again never rewrites the outcome.",
-  );
-
-  const expanded = markReviewUnitExpanded(
-    fixture.review,
-    routine.id,
-    mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
-  );
-  assert.equal(
-    markReviewUnitExpanded(
-      expanded,
-      routine.id,
-      mutate(expanded, "2026-01-01T00:02:30.000Z"),
-    ),
-    expanded,
-  );
-  const reviewed = markReviewUnitReviewed(
-    expanded,
-    routine.id,
-    mutate(expanded, "2026-01-01T00:03:00.000Z"),
-  );
+test("a skipped unit is absent from the walkthrough and recorded in the round", () => {
+  const fixture = skippedUnitReviewFixture();
+  assert.equal(fixture.route.units.length, 1);
+  const walked = fixture.route.units[0];
+  assert.ok(walked);
   assert.deepEqual(
-    reviewed.unitProgress.find((p) => p.reviewUnitId === routine.id),
-    { reviewUnitId: routine.id, disposition: "reviewed", expanded: true },
+    fixture.review.unitProgress.map((entry) => entry.reviewUnitId),
+    [walked.id],
+    "Only walked units get progress entries.",
   );
-});
 
-test("routine candidate toggles on walked units and lands in the round", () => {
-  const fixture = routineReviewFixture();
-  const [walked, routine] = fixture.route.units;
-  assert.ok(walked && routine);
-
-  const marked = toggleReviewUnitRoutineCandidate(
+  let review = upsertInProgressReviewComment(
     fixture.review,
-    walked.id,
-    mutate(fixture.review, "2026-01-01T00:02:00.000Z"),
-  );
-  assert.equal(
-    marked.unitProgress.find((p) => p.reviewUnitId === walked.id)
-      ?.routineCandidate,
-    true,
-  );
-  const cleared = toggleReviewUnitRoutineCandidate(
-    marked,
-    walked.id,
-    mutate(marked, "2026-01-01T00:02:30.000Z"),
-  );
-  assert.equal(
-    "routineCandidate" in
-      (cleared.unitProgress.find((p) => p.reviewUnitId === walked.id) ?? {}),
-    false,
-  );
-
-  let review = toggleReviewUnitRoutineCandidate(
-    cleared,
-    walked.id,
-    mutate(cleared, "2026-01-01T00:03:00.000Z"),
-  );
-  review = upsertInProgressReviewComment(
-    review,
     { reviewUnitId: walked.id, ...anchor("src/entry.ts", 2), body: "Why?" },
-    mutate(review, "2026-01-01T00:03:30.000Z"),
+    mutate(fixture.review, "2026-01-01T00:03:30.000Z"),
   );
   review = markReviewUnitReviewed(
     review,
     walked.id,
     mutate(review, "2026-01-01T00:04:00.000Z"),
-  );
-  review = markReviewUnitReviewed(
-    review,
-    routine.id,
-    mutate(review, "2026-01-01T00:05:00.000Z"),
   );
   const submitted = submitInProgressReview(
     review,
@@ -516,15 +449,14 @@ test("routine candidate toggles on walked units and lands in the round", () => {
       title: "Entry",
       routine: false,
       outcome: "reviewed",
-      routineCandidate: true,
       commented: true,
     },
     {
-      id: routine.id,
+      id: submitted.round.units[1]?.id,
       title: "Contract",
       routine: true,
-      outcome: "glanced",
-      routineCandidate: false,
+      outcome: "skipped",
+      skip: { source: "agent", reasons: ["Mirrors other."] },
       commented: false,
     },
   ]);
@@ -532,7 +464,7 @@ test("routine candidate toggles on walked units and lands in the round", () => {
     submitted.round.coverage.files.flatMap((file) =>
       file.lines.map((record) => record.disposition),
     ),
-    ["commented", "reviewed-without-comment"],
-    "A glanced unit's lines are recorded as reviewed and carry forward.",
+    ["commented", "skipped"],
+    "A skipped unit's lines are recorded as skipped, so they return next round.",
   );
 });

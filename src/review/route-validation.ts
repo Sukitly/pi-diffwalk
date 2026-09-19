@@ -86,6 +86,12 @@ export interface ReviewRouteValidationOptions {
    * that is wrong is rejected as soon as it arrives, not at the end.
    */
   readonly stage?: "draft" | "final";
+  /**
+   * A judge may keep every unit out of the walkthrough. The route is then
+   * unitless by decision, not by omission, so the rule requiring one unit
+   * does not apply. Only the caller that applied the verdicts may set this.
+   */
+  readonly allowUnitlessRoute?: boolean;
 }
 
 export function validateReviewRoute(
@@ -316,7 +322,11 @@ export function validateReviewRoute(
     const needsReviewExists = delta.lines.some(
       (requirement) => requirement.type === "needs-review",
     );
-    if (needsReviewExists && !unitSpans.some((spans) => spans.length > 0)) {
+    if (
+      needsReviewExists &&
+      options.allowUnitlessRoute !== true &&
+      !unitSpans.some((spans) => spans.length > 0)
+    ) {
       issues.push({
         code: "missing-review-unit",
         message:
@@ -336,6 +346,7 @@ export function validateReviewRoute(
       }),
     ),
     skippedSpans,
+    skippedUnits: [],
   } as unknown as ReviewRoute;
 }
 
@@ -411,7 +422,12 @@ function throwIfIssues(issues: readonly ReviewRouteValidationIssue[]): void {
   if (issues.length > 0) throw new ReviewRouteValidationError(issues);
 }
 
-function createReviewUnitId(
+/**
+ * Identifies a unit by its position and spans. Skipped units are numbered in
+ * their own sequence; their spans differ from every walked unit's, so the two
+ * sequences cannot collide.
+ */
+export function createReviewUnitId(
   snapshotId: string,
   unitIndex: number,
   spans: readonly ResolvedSpan[],

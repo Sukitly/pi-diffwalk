@@ -4,6 +4,7 @@ import {
   DISCARD_OPTION,
   type DiffWalkSession,
   NO_EXCLUDE_OPTION,
+  NO_SKIP_OPTION,
   THREADS_OPTION,
 } from "./session.ts";
 
@@ -13,8 +14,9 @@ export function parseReviewTarget(args: string): string {
 }
 
 /**
- * `/diffwalk` takes a base revision, a standalone option, or `--no-exclude`
- * optionally followed by a base revision.
+ * `/diffwalk` takes a base revision, a standalone option, or the review
+ * options `--no-exclude` and `--no-skip` in any order, optionally followed
+ * by a base revision.
  *
  * A Git revision cannot start with `-`, so an option can never shadow a base
  * the user meant to review.
@@ -24,6 +26,7 @@ export type DiffWalkCommand =
       readonly type: "review";
       readonly targetRef?: string;
       readonly noExclude?: boolean;
+      readonly noSkip?: boolean;
     }
   | { readonly type: "discard" }
   | { readonly type: "threads" };
@@ -33,24 +36,27 @@ export function parseDiffWalkCommand(args: string): DiffWalkCommand {
   if (trimmed.length === 0) return { type: "review" };
   if (trimmed === DISCARD_OPTION) return { type: "discard" };
   if (trimmed === THREADS_OPTION) return { type: "threads" };
-  if (trimmed === NO_EXCLUDE_OPTION) return { type: "review", noExclude: true };
-  const noExcludePrefix = `${NO_EXCLUDE_OPTION} `;
-  if (trimmed.startsWith(noExcludePrefix)) {
-    const rest = trimmed.slice(noExcludePrefix.length).trim();
-    if (rest.startsWith("-")) throw unknownOption(rest);
-    return {
-      type: "review",
-      targetRef: parseReviewTarget(rest),
-      noExclude: true,
-    };
+  let rest = trimmed;
+  let noExclude = false;
+  let noSkip = false;
+  while (rest.startsWith("-")) {
+    const [option = "", ...remainder] = rest.split(/\s+/);
+    if (option === NO_EXCLUDE_OPTION) noExclude = true;
+    else if (option === NO_SKIP_OPTION) noSkip = true;
+    else throw unknownOption(option);
+    rest = remainder.join(" ").trim();
   }
-  if (trimmed.startsWith("-")) throw unknownOption(trimmed);
-  return { type: "review", targetRef: parseReviewTarget(trimmed) };
+  return {
+    type: "review",
+    ...(rest.length === 0 ? {} : { targetRef: parseReviewTarget(rest) }),
+    ...(noExclude ? { noExclude: true } : {}),
+    ...(noSkip ? { noSkip: true } : {}),
+  };
 }
 
 function unknownOption(option: string): Error {
   return new Error(
-    `Unknown /diffwalk option ${option}. Use /diffwalk [base] to review a revision, /diffwalk ${NO_EXCLUDE_OPTION} [base] to route every changed line, /diffwalk ${THREADS_OPTION} to reopen comment threads, or /diffwalk ${DISCARD_OPTION} to drop a pending review.`,
+    `Unknown /diffwalk option ${option}. Use /diffwalk [base] to review a revision, /diffwalk ${NO_EXCLUDE_OPTION} [base] to route every changed line, /diffwalk ${NO_SKIP_OPTION} [base] to walk every unit a judge would skip, /diffwalk ${THREADS_OPTION} to reopen comment threads, or /diffwalk ${DISCARD_OPTION} to drop a pending review.`,
   );
 }
 
@@ -77,6 +83,7 @@ export function registerDiffWalkCommand(
         case "review":
           await session.reviewCommand(ctx, command.targetRef, {
             noExclude: command.noExclude === true,
+            noSkip: command.noSkip === true,
           });
           return;
       }

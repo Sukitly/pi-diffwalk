@@ -6,6 +6,7 @@ import {
 import { computeReviewCoverage } from "./coverage.ts";
 import { assertReviewDeltaMatchesSnapshot } from "./delta.ts";
 import { hashAs } from "./ids.ts";
+import { createReviewUnitId } from "./route-validation.ts";
 import {
   appendReviewRound,
   createReviewRound,
@@ -126,9 +127,9 @@ export function attachReviewRoute(
 }
 
 /**
- * Completes a unit. A routine unit completed without ever being expanded is
- * `glanced`; everything else is `reviewed`. Completing again is a no-op, so
- * pressing through an already complete unit never rewrites its outcome.
+ * Completes a unit. Every unit in the walkthrough is one the reviewer was
+ * asked to read, so completing it is always `reviewed`. Completing again is
+ * a no-op, so pressing through an already complete unit changes nothing.
  */
 export function markReviewUnitReviewed(
   review: InProgressReview,
@@ -141,52 +142,12 @@ export function markReviewUnitReviewed(
   if (progress === undefined || progress.disposition !== "pending") {
     return review;
   }
-  const unit = requireRoute(review).units.find(
-    (candidate) => candidate.id === reviewUnitId,
-  );
-  const disposition =
-    unit?.routine !== undefined && progress.expanded === undefined
-      ? "glanced"
-      : "reviewed";
   return nextVersion(review, mutation.timestamp, {
     unitProgress: review.unitProgress.map((entry, index) =>
-      index === progressIndex ? { ...entry, disposition } : entry,
+      index === progressIndex
+        ? { ...entry, disposition: "reviewed" as const }
+        : entry,
     ),
-  });
-}
-
-/** Records that the reviewer opened a routine unit's diff. Idempotent. */
-export function markReviewUnitExpanded(
-  review: InProgressReview,
-  reviewUnitId: ReviewUnitId,
-  mutation: ReviewMutation,
-): InProgressReview {
-  assertReadyMutation(review, mutation);
-  const progressIndex = requireProgressIndex(review, reviewUnitId);
-  if (review.unitProgress[progressIndex]?.expanded === true) return review;
-  return nextVersion(review, mutation.timestamp, {
-    unitProgress: review.unitProgress.map((entry, index) =>
-      index === progressIndex ? { ...entry, expanded: true } : entry,
-    ),
-  });
-}
-
-/** Toggles the reviewer's claim that a walked unit could have been routine. */
-export function toggleReviewUnitRoutineCandidate(
-  review: InProgressReview,
-  reviewUnitId: ReviewUnitId,
-  mutation: ReviewMutation,
-): InProgressReview {
-  assertReadyMutation(review, mutation);
-  const progressIndex = requireProgressIndex(review, reviewUnitId);
-  return nextVersion(review, mutation.timestamp, {
-    unitProgress: review.unitProgress.map((entry, index) => {
-      if (index !== progressIndex) return entry;
-      const { routineCandidate, ...rest } = entry;
-      return routineCandidate === true
-        ? rest
-        : { ...rest, routineCandidate: true };
-    }),
   });
 }
 
@@ -214,25 +175,26 @@ export function buildReviewRoundUnits(
   const commentedUnits = new Set(
     review.comments.map((comment) => comment.reviewUnitId),
   );
-  return route.units.map((unit) => {
-    const progress = review.unitProgress.find(
-      (entry) => entry.reviewUnitId === unit.id,
-    );
-    const routine = unit.routine !== undefined;
-    return {
+  const walked = route.units.map(
+    (unit): ReviewRoundUnit => ({
       id: unit.id,
       title: unit.title,
-      routine,
-      outcome:
-        progress?.disposition === "glanced"
-          ? "glanced"
-          : routine
-            ? "expanded"
-            : "reviewed",
-      routineCandidate: progress?.routineCandidate === true,
+      routine: unit.routine !== undefined,
+      outcome: "reviewed",
       commented: commentedUnits.has(unit.id),
-    };
-  });
+    }),
+  );
+  const skipped = route.skippedUnits.map(
+    (unit, index): ReviewRoundUnit => ({
+      id: createReviewUnitId(route.snapshotId, index, unit.spans),
+      title: unit.title,
+      routine: unit.skip.source === "agent",
+      outcome: "skipped",
+      skip: unit.skip,
+      commented: false,
+    }),
+  );
+  return [...walked, ...skipped];
 }
 
 export function upsertInProgressReviewComment(

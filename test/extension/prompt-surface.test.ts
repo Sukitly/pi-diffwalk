@@ -133,10 +133,22 @@ function kickoffWithoutMoves(): string {
     snapshot,
     computeReviewDelta(snapshot, baseline),
     {
-      scope: "project",
-      content: "- Keep behavioral tests with the code they prove.",
+      rules: {
+        scope: "project",
+        content: "- Keep behavioral tests with the code they prove.",
+      },
     },
   );
+}
+
+/** A fresh review with a decision model configured. */
+function kickoffJudged(): string {
+  const snapshot = makeSnapshot("snapshot-surface-judged", [
+    { path: "src/a.ts", lines: [" head", "+alpha", " tail"] },
+  ]);
+  return buildReviewKickoffPrompt(snapshot, computeReviewDelta(snapshot), {
+    judged: true,
+  });
 }
 
 function toolSurface(): string {
@@ -248,6 +260,7 @@ function renderSurface(): string {
       "kickoff prompt: incremental review with selected project rules without moves",
       kickoffWithoutMoves(),
     ],
+    ["kickoff prompt: judged review", kickoffJudged()],
     ["route tools", toolSurface()],
     ["respond tool", responseToolSurface()],
     ["tool results", resultSurface()],

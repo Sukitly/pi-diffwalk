@@ -222,11 +222,23 @@ function formatMoveLines(range: MoveSideRange): string {
     : `${range.start}-${range.end}`;
 }
 
+export interface ReviewKickoffOptions {
+  readonly rules?: LoadedDiffWalkRules;
+  /**
+   * A decision model will judge each unit on its own text and keep the ones
+   * that need no reading out of the walkthrough. Mixed units are judged by
+   * their riskiest part, so the agent is asked to keep such material apart
+   * from behavior code.
+   */
+  readonly judged?: boolean;
+}
+
 export function buildReviewKickoffPrompt(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
-  rules?: LoadedDiffWalkRules,
+  options: ReviewKickoffOptions = {},
 ): string {
+  const { rules, judged = false } = options;
   const inventory = buildReviewPromptInventory(snapshot, delta);
   const comparison = snapshot.comparison;
 
@@ -246,7 +258,13 @@ export function buildReviewKickoffPrompt(
     "Construct the route according to these rules:",
     "- Order review units by behavior, contracts, data flow, and failure paths instead of alphabetical file order.",
     "- A review unit is a semantic region. Draw its spans around what a reviewer must understand together, not around Git hunk boundaries.",
-    "- One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.",
+    ...(judged
+      ? [
+          "- One unit may span several files. Keep tests, fixtures, documentation, configuration, and generated content in units of their own, placed right after the implementation they belong to. Each unit is judged on its own text, and a unit that needs no reading is dropped from the walkthrough entirely; a unit that mixes such material with behavior code is judged as behavior code and reaches the reviewer whole.",
+        ]
+      : [
+          "- One unit may span several files. Put an implementation and the test that proves it in the same unit when that is the honest reading order.",
+        ]),
     "- Each file lists `regions`: the smallest parts of the change a unit can take. A region is contiguous and has one status, so build a unit by taking whole regions instead of computing line numbers.",
     "- Address regions with 1-based inclusive line numbers: use `newStart`/`newEnd` for added lines and `oldStart`/`oldEnd` for removed lines. Set both sides when a region contains each. Split a region only when its lines truly belong to different units.",
     "- A span may include unchanged lines for context. Unchanged lines may appear in several units; every changed line must belong to exactly one unit.",
@@ -268,7 +286,10 @@ export function buildReviewKickoffPrompt(
     `- \`reviewFocus\`: distinct failure questions, at most ${REVIEW_FOCUS_LIMIT}; do not restate the summary. Ask as many as the unit genuinely raises and leave the list empty when it raises none; an invented question costs the reviewer more than the silence it fills. Set \`anchor\` (path, side, line inside this unit's spans) to the changed line each question is about; the walkthrough shows the question beneath that line. Omit \`anchor\` only for a question about the whole unit.`,
     "- Files marked `reviewable: false` have no addressable lines. Account for them while understanding the change, but do not reference them in spans.",
     "- `routine`: set it only when the unit repeats a pattern that already exists in the repository and a reviewer would learn nothing from reading it. `reference` names the existing code it mirrors as a path, optionally with :start-end line numbers; it must be a real file. `reason` states what makes the unit a repetition. A routine unit may cover at most " +
-      `${ROUTINE_MAX_CHANGED_LINES} changed lines and may not contain a line with an unresolved comment. Do not mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine. The walkthrough folds routine units; the reviewer can expand any of them.`,
+      `${ROUTINE_MAX_CHANGED_LINES} changed lines and may not contain a line with an unresolved comment. Do not mark new behavior, new control flow, or anything touching authorization, persistence formats, money, or external processes as routine.` +
+      (judged
+        ? " A decision model checks the claim against the reference; the claim alone does not remove the unit from the walkthrough."
+        : " A routine unit is dropped from the walkthrough: the reviewer never sees it and reads your reason in the round summary instead. Claim it only when you would defend that outcome."),
     ...(rules === undefined
       ? []
       : [

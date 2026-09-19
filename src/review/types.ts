@@ -171,22 +171,22 @@ export interface ReviewRound {
   readonly snapshot: ReviewSnapshot;
   readonly delta: ReviewDelta;
   readonly coverage: ReviewCoverage;
-  /** How the reviewer handled each unit, kept for tuning routine proposals. */
+  /** How each unit ended the round, kept for tuning the skip policy. */
   readonly units: readonly ReviewRoundUnit[];
 }
 
 /**
- * `glanced`: a routine unit accepted without expanding it. `expanded`: a
- * routine unit the reviewer opened before completing. `reviewed`: a walked
- * unit. `routineCandidate` is the reviewer saying a walked unit could have
- * been routine.
+ * `reviewed`: the reviewer walked the unit. `skipped`: a judge kept the unit
+ * out of the walkthrough, so the reviewer never saw it; `skip` records who
+ * decided and why. `routine` records the agent's claim, which is a reason a
+ * unit may have been skipped, not an outcome by itself.
  */
 export interface ReviewRoundUnit {
   readonly id: ReviewUnitId;
   readonly title: string;
   readonly routine: boolean;
-  readonly outcome: "reviewed" | "glanced" | "expanded";
-  readonly routineCandidate: boolean;
+  readonly outcome: "reviewed" | "skipped";
+  readonly skip?: ReviewUnitSkip;
   readonly commented: boolean;
 }
 
@@ -213,11 +213,7 @@ export interface InProgressReview {
 
 export interface ReviewUnitProgress {
   readonly reviewUnitId: ReviewUnitId;
-  readonly disposition: "pending" | "reviewed" | "glanced";
-  /** The reviewer expanded this routine unit at least once. */
-  readonly expanded?: true;
-  /** The reviewer marked this walked unit as one that could have been routine. */
-  readonly routineCandidate?: true;
+  readonly disposition: "pending" | "reviewed";
 }
 
 export interface ReviewDelta {
@@ -400,7 +396,7 @@ const ReviewUnitRoutineCandidateSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "Present only when the unit repeats an existing pattern and needs no judgment. The walkthrough folds it; the reviewer can expand it or override the claim.",
+      "Present only when the unit repeats an existing pattern and needs no judgment. A judge may drop such a unit from the walkthrough, so the reviewer sees only the reason in the round summary.",
   },
 );
 
@@ -511,12 +507,82 @@ export interface ReviewRoute {
   readonly snapshotId: SnapshotId;
   readonly units: readonly ReviewUnit[];
   readonly skippedSpans: readonly ReviewRouteSkip[];
+  /** Units a judge kept out of the walkthrough, in the order they arrived. */
+  readonly skippedUnits: readonly ReviewSkippedUnit[];
 }
 
 export interface ReviewUnitRoutine {
   readonly reference: string;
   readonly reason: string;
 }
+
+/**
+ * Why a unit never reached the walkthrough. `agent`: the agent's routine
+ * claim was taken at its word because no decision model was configured.
+ * `typesafe`: a decision model judged the unit's surface features and the
+ * skip policy accepted them; `features` keeps what it saw so the thresholds
+ * can be tuned against later rounds.
+ */
+export type ReviewUnitSkip =
+  | {
+      readonly source: "agent";
+      readonly reasons: readonly string[];
+    }
+  | {
+      readonly source: "typesafe";
+      readonly reasons: readonly string[];
+      readonly features: ReviewUnitFeatures;
+    };
+
+/**
+ * The judge's verdict on an accepted unit. `review` puts the unit in the
+ * walkthrough; `skip` keeps it out entirely, so the reviewer never walks it.
+ */
+export type ReviewUnitVerdict =
+  | { readonly outcome: "review" }
+  | ({ readonly outcome: "skip" } & ReviewUnitSkip);
+
+/** A unit that a judge kept out of the walkthrough, with its covered spans. */
+export interface ReviewSkippedUnit {
+  readonly title: string;
+  readonly skip: ReviewUnitSkip;
+  readonly spans: readonly ResolvedSpan[];
+  /** Changed lines the unit covered, so the summary can report its size. */
+  readonly changedLineCount: number;
+}
+
+/** Surface features of one unit as a decision model reports them. */
+export interface ReviewUnitFeatures {
+  readonly changesBehavior: number;
+  readonly newControlFlow: number;
+  readonly touchesBoundary: {
+    readonly choice: ReviewUnitBoundary;
+    readonly confidence: number;
+  };
+  readonly kind: {
+    readonly choice: ReviewUnitKind;
+    readonly confidence: number;
+  };
+  /** Present only when the agent named a reference. */
+  readonly mirrorsReference?: number;
+}
+
+export type ReviewUnitBoundary =
+  | "none"
+  | "public-api"
+  | "persisted-format"
+  | "authorization"
+  | "money"
+  | "external-process";
+
+export type ReviewUnitKind =
+  | "behavior"
+  | "interface"
+  | "test"
+  | "config"
+  | "docs"
+  | "refactor"
+  | "generated";
 
 export interface ReviewUnit {
   readonly id: ReviewUnitId;

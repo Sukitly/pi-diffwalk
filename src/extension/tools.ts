@@ -53,8 +53,8 @@ export function registerAddUnitTool(
     promptSnippet: ADD_UNIT_TOOL_PROMPT_SNIPPET,
     parameters: ReviewUnitCandidateToolSchema,
     executionMode: "sequential",
-    async execute(_toolCallId, unit) {
-      const progress = await session.addRouteUnit(unit);
+    async execute(_toolCallId, unit, _signal, _onUpdate, ctx) {
+      const progress = await session.addRouteUnit(ctx, unit);
       return {
         content: [{ type: "text", text: formatRouteUnitProgress(progress) }],
         details: progress,
@@ -89,9 +89,21 @@ export function registerAddUnitTool(
 /** The remaining work is the only thing the agent needs back from an append. */
 function formatRouteUnitProgress(progress: ReviewRouteDraftProgress): string {
   return formatRemaining(
-    `Accepted review unit ${progress.unitCount}.`,
+    `Accepted review unit ${progress.unitCount}${describeVerdict(progress)}.`,
     progress.remaining,
   );
+}
+
+/**
+ * A skipped unit never reaches the reviewer, so the append says so plainly.
+ * The unit still covers its lines, so the remaining work is unchanged.
+ */
+function describeVerdict(progress: ReviewRouteDraftProgress): string {
+  const skip = progress.skip;
+  if (skip === undefined) return "";
+  return skip.source === "agent"
+    ? " (skipped, the reviewer will not see it: your routine claim)"
+    : ` (skipped, the reviewer will not see it: ${skip.reasons.join(" ")})`;
 }
 
 function formatRouteSkipProgress(progress: ReviewRouteSkipProgress): string {

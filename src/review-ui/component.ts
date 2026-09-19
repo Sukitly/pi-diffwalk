@@ -17,10 +17,8 @@ import {
   deleteInProgressReviewComment,
   discardInProgressReview,
   InProgressReviewError,
-  markReviewUnitExpanded,
   markReviewUnitReviewed,
   setInProgressReviewSubmissionMode,
-  toggleReviewUnitRoutineCandidate,
   upsertInProgressReviewComment,
 } from "../review/in-progress.ts";
 import type {
@@ -82,9 +80,7 @@ import {
   sliceViewport,
 } from "./viewport.ts";
 import {
-  foldedFooterText,
   renderExplanationLines,
-  renderFoldedRoutineUnit,
   renderTransientFeedback,
   renderWalkthroughPreview,
   walkthroughFooterText,
@@ -120,7 +116,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     string,
     ChangedLineDisplayOwnership
   >;
-  private readonly skippedCount: number;
   private readonly unsupportedCount: number;
   private readonly onSubmit: (
     review: InProgressReview,
@@ -135,7 +130,6 @@ export class GuidedReviewComponent implements Component, Focusable {
   private helpReturnScreen: ReviewScreen = "walkthrough";
   private unitIndex = 0;
   /** Routine units the reviewer has opened in this component instance. */
-  private readonly expandedUnitIds = new Set<ReviewUnit["id"]>();
   private readonly selectedTargetByUnit: number[];
   private diffOffset = 0;
   private explanationOffset = 0;
@@ -186,7 +180,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.inventory = viewModel.inventory;
     this.changesById = viewModel.changesById;
     this.displayOwnership = viewModel.displayOwnership;
-    this.skippedCount = options.route.skippedSpans.length;
     this.unsupportedCount = viewModel.unsupportedCount;
     this.selectedTargetByUnit = this.units.map(() => 0);
 
@@ -337,32 +330,10 @@ export class GuidedReviewComponent implements Component, Focusable {
   private renderWalkthrough(width: number, rows: number): readonly string[] {
     const baseHeader = this.renderHeader(width, rows);
     const unitView = this.currentUnit();
-    const folded = this.isCurrentUnitFolded();
-    const footer = this.renderFooter(
-      width,
-      folded ? foldedFooterText(width) : walkthroughFooterText(width),
-    );
+    const footer = this.renderFooter(width, walkthroughFooterText(width));
     const header = baseHeader;
     const bodyHeight = Math.max(0, rows - header.length - footer.length);
     if (bodyHeight === 0) return [...header, ...footer];
-
-    if (unitView !== undefined && folded) {
-      const feedback = renderTransientFeedback(
-        this.transientFeedback,
-        this.theme,
-        width,
-      );
-      const body = [
-        ...renderFoldedRoutineUnit(
-          unitView.unit,
-          unitView.targets.length,
-          this.theme,
-          width,
-        ),
-        ...feedback,
-      ].slice(0, bodyHeight);
-      return [...header, ...body, ...footer];
-    }
 
     if (unitView === undefined) {
       const empty = wrapStyled(
@@ -690,9 +661,7 @@ export class GuidedReviewComponent implements Component, Focusable {
         unitCount: this.units.length,
         unitIndex: this.unitIndex,
         reviewedCount: this.reviewedUnitCount(),
-        glancedCount: this.glancedUnitCount(),
         commentCount: this.review.comments.length,
-        skippedCount: this.skippedCount,
         unsupportedCount: this.unsupportedCount,
         submissionStatus: this.submissionStatus,
       },
@@ -713,10 +682,7 @@ export class GuidedReviewComponent implements Component, Focusable {
       case "explanation": {
         const unit = this.currentUnit()?.unit;
         if (unit === undefined) return "Review inventory";
-        if (unit.routine !== undefined) return `Routine: ${unit.title}`;
-        return this.isCurrentUnitRoutineCandidate()
-          ? `${unit.title} (routine candidate)`
-          : unit.title;
+        return unit.title;
       }
       case "comment-editor":
         return "Review comment";
@@ -733,7 +699,6 @@ export class GuidedReviewComponent implements Component, Focusable {
   }
 
   private handleWalkthroughInput(data: string, count: number): void {
-    if (this.isCurrentUnitFolded() && this.isFoldedNoOp(data)) return;
     if (this.isUp(data)) {
       this.moveTarget(-count);
       return;
@@ -778,27 +743,11 @@ export class GuidedReviewComponent implements Component, Focusable {
       this.completeCurrentUnitAndContinue();
       return;
     }
-    if (matchesKey(data, "o")) {
-      this.toggleCurrentUnitFold();
-      return;
-    }
-    if (matchesKey(data, "r")) {
-      this.toggleCurrentUnitRoutineCandidate();
-      return;
-    }
     if (matchesKey(data, "c")) {
-      if (this.isCurrentUnitFolded()) {
-        this.setTransientFeedback(
-          "warning",
-          "Expand the routine unit with o before commenting.",
-        );
-        return;
-      }
       this.openCommentEditor();
       return;
     }
     if (matchesKey(data, "d")) {
-      if (this.isCurrentUnitFolded()) return;
       this.deleteSelectedComment();
       return;
     }
@@ -1195,84 +1144,6 @@ export class GuidedReviewComponent implements Component, Focusable {
     this.explanationOffset = 0;
     this.transientFeedback = undefined;
     this.refresh();
-  }
-
-  private isCurrentUnitFolded(): boolean {
-    const unit = this.currentUnit()?.unit;
-    return (
-      unit !== undefined &&
-      unit.routine !== undefined &&
-      !this.expandedUnitIds.has(unit.id)
-    );
-  }
-
-  /** Line movement and paging have no target while a unit is folded. */
-  private isFoldedNoOp(data: string): boolean {
-    return (
-      this.isUp(data) ||
-      this.isDown(data) ||
-      this.isPageUp(data) ||
-      this.isPageDown(data) ||
-      matchesKey(data, "shift+g") ||
-      matchesKey(data, "ctrl+u") ||
-      matchesKey(data, "ctrl+d")
-    );
-  }
-
-  private toggleCurrentUnitFold(): void {
-    const unit = this.currentUnit()?.unit;
-    if (unit === undefined) return;
-    if (unit.routine === undefined) {
-      this.setTransientFeedback(
-        "warning",
-        "This unit is not routine; there is nothing folded to expand.",
-      );
-      return;
-    }
-    if (this.expandedUnitIds.has(unit.id)) {
-      this.expandedUnitIds.delete(unit.id);
-      this.transientFeedback = undefined;
-      this.refresh();
-      return;
-    }
-    this.expandedUnitIds.add(unit.id);
-    this.diffOffset = 0;
-    this.diffFreeScroll = false;
-    this.transientFeedback = undefined;
-    this.updateReview(
-      markReviewUnitExpanded(this.review, unit.id, this.mutation()),
-    );
-    this.refresh();
-  }
-
-  private toggleCurrentUnitRoutineCandidate(): void {
-    const unit = this.currentUnit()?.unit;
-    if (unit === undefined) return;
-    if (unit.routine !== undefined) {
-      this.setTransientFeedback(
-        "warning",
-        "This unit is already routine. Expand it with o to disagree by commenting.",
-      );
-      return;
-    }
-    this.updateReview(
-      toggleReviewUnitRoutineCandidate(this.review, unit.id, this.mutation()),
-    );
-    this.setTransientFeedback(
-      "info",
-      this.isCurrentUnitRoutineCandidate()
-        ? "Marked as a routine candidate: this unit could have been folded."
-        : "Cleared the routine candidate mark.",
-    );
-  }
-
-  private isCurrentUnitRoutineCandidate(): boolean {
-    const unit = this.currentUnit()?.unit;
-    if (unit === undefined) return false;
-    return this.review.unitProgress.some(
-      (progress) =>
-        progress.reviewUnitId === unit.id && progress.routineCandidate === true,
-    );
   }
 
   private completeCurrentUnitAndContinue(): void {
@@ -1718,12 +1589,6 @@ export class GuidedReviewComponent implements Component, Focusable {
   private reviewedUnitCount(): number {
     return this.review.unitProgress.filter(
       (progress) => progress.disposition !== "pending",
-    ).length;
-  }
-
-  private glancedUnitCount(): number {
-    return this.review.unitProgress.filter(
-      (progress) => progress.disposition === "glanced",
     ).length;
   }
 

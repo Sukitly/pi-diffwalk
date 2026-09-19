@@ -9,9 +9,12 @@ import type {
   ReviewRouteCandidate,
   ReviewRouteSkip,
   ReviewSkipCandidate,
+  ReviewSkippedUnit,
   ReviewSnapshot,
   ReviewUnit,
   ReviewUnitCandidate,
+  ReviewUnitSkip,
+  ReviewUnitVerdict,
 } from "./types.ts";
 
 /**
@@ -24,15 +27,23 @@ import type {
 export interface ReviewRouteDraft {
   readonly snapshotId: string;
   readonly units: readonly ReviewUnitCandidate[];
+  /**
+   * Judge verdict for each accepted unit by position. A `skip` verdict keeps
+   * the unit out of the walkthrough entirely: its spans become skipped spans,
+   * like a region the agent skipped. `undefined` means no judge ran.
+   */
+  readonly verdicts: readonly (ReviewUnitVerdict | undefined)[];
   readonly skippedSpans: readonly ReviewSkipCandidate[];
 }
 
 export interface ReviewRouteDraftProgress {
   readonly draft: ReviewRouteDraft;
-  /** Unit count after the append, which is the unit's position in the route. */
+  /** Accepted unit count after the append, whether walked or skipped. */
   readonly unitCount: number;
   /** The appended unit after validation, with its resolved spans and id. */
   readonly acceptedUnit: ReviewUnit;
+  /** Present when a judge kept the unit out of the walkthrough. */
+  readonly skip?: ReviewUnitSkip;
   readonly coveredLineCount: number;
   readonly remaining: readonly ReviewRouteRemainingFile[];
 }
@@ -54,7 +65,7 @@ export interface ReviewRouteRemainingFile {
 }
 
 export function createReviewRouteDraft(snapshotId: string): ReviewRouteDraft {
-  return { snapshotId, units: [], skippedSpans: [] };
+  return { snapshotId, units: [], verdicts: [], skippedSpans: [] };
 }
 
 export function appendReviewRouteUnit(
@@ -63,7 +74,11 @@ export function appendReviewRouteUnit(
   draft: ReviewRouteDraft,
   unit: ReviewUnitCandidate,
 ): ReviewRouteDraftProgress {
-  const next: ReviewRouteDraft = { ...draft, units: [...draft.units, unit] };
+  const next: ReviewRouteDraft = {
+    ...draft,
+    units: [...draft.units, unit],
+    verdicts: [...draft.verdicts, undefined],
+  };
   const route = validateDraft(snapshot, delta, next, { stage: "draft" });
   const acceptedUnit = route.units.at(-1);
   if (acceptedUnit === undefined) {
@@ -73,6 +88,43 @@ export function appendReviewRouteUnit(
     draft: next,
     unitCount: next.units.length,
     acceptedUnit,
+    coveredLineCount: coveredKeys(snapshot, route).size,
+    remaining: remainingFiles(snapshot, delta, route),
+  };
+}
+
+/**
+ * Records the judge's verdict for the most recently appended unit. A skip
+ * moves the unit's spans to the skipped set, so the reviewer never walks it.
+ * A skip that the route rules reject, such as one covering an unresolved
+ * comment, is refused and the unit stays in the walkthrough.
+ */
+export function recordLastUnitVerdict(
+  snapshot: ReviewSnapshot,
+  delta: ReviewDelta,
+  progress: ReviewRouteDraftProgress,
+  verdict: ReviewUnitVerdict | undefined,
+): ReviewRouteDraftProgress {
+  const draft = progress.draft;
+  if (draft.units.length === 0) {
+    throw new Error("Cannot record a verdict before a unit has been appended.");
+  }
+  if (verdict === undefined || verdict.outcome === "review") return progress;
+  const verdicts = [...draft.verdicts];
+  verdicts[draft.units.length - 1] = verdict;
+  const next: ReviewRouteDraft = { ...draft, verdicts };
+  let route: ReviewRoute;
+  try {
+    route = validateDraft(snapshot, delta, next, { stage: "draft" });
+  } catch {
+    return progress;
+  }
+  const { outcome: _outcome, ...skip } = verdict;
+  return {
+    draft: next,
+    unitCount: next.units.length,
+    acceptedUnit: progress.acceptedUnit,
+    skip,
     coveredLineCount: coveredKeys(snapshot, route).size,
     remaining: remainingFiles(snapshot, delta, route),
   };
@@ -116,18 +168,70 @@ export function finishReviewRouteDraft(
   return validateDraft(snapshot, delta, draft, {});
 }
 
+/** Units held back by a judge, paired with their candidate spans. */
+function skippedUnitsOf(
+  draft: ReviewRouteDraft,
+): readonly { unit: ReviewUnitCandidate; skip: ReviewUnitSkip }[] {
+  const skipped: { unit: ReviewUnitCandidate; skip: ReviewUnitSkip }[] = [];
+  for (const [index, unit] of draft.units.entries()) {
+    const verdict = draft.verdicts[index];
+    if (verdict === undefined || verdict.outcome !== "skip") continue;
+    const { outcome: _outcome, ...skip } = verdict;
+    skipped.push({ unit, skip });
+  }
+  return skipped;
+}
+
+/**
+ * Validates the draft as the reviewer will receive it: a unit a judge
+ * skipped is not a unit at all, so it is validated as skipped spans and
+ * reported in `skippedUnits`, never in `units`.
+ */
 function validateDraft(
   snapshot: ReviewSnapshot,
   delta: ReviewDelta,
   draft: ReviewRouteDraft,
   options: ReviewRouteValidationOptions,
 ): ReviewRoute {
+  const skipped = skippedUnitsOf(draft);
+  const walked = draft.units.filter(
+    (_unit, index) => draft.verdicts[index]?.outcome !== "skip",
+  );
+  const judgedSkips = skipped.flatMap(({ unit, skip }) =>
+    unit.spans.map((span) => ({
+      span,
+      reason: `${unit.title}: ${skip.reasons.join(" ")}`,
+    })),
+  );
   const candidate = {
     snapshotId: draft.snapshotId,
-    units: [...draft.units],
-    skippedSpans: [...draft.skippedSpans],
+    units: walked,
+    skippedSpans: [...draft.skippedSpans, ...judgedSkips],
   } as ReviewRouteCandidate;
-  return validateReviewRoute(snapshot, delta, candidate, options);
+  const route = validateReviewRoute(snapshot, delta, candidate, {
+    ...options,
+    ...(skipped.length === 0 ? {} : { allowUnitlessRoute: true }),
+  });
+  const agentSkipCount = draft.skippedSpans.length;
+  const resolved = route.skippedSpans.slice(agentSkipCount);
+  const skippedUnits: ReviewSkippedUnit[] = [];
+  let offset = 0;
+  for (const { unit, skip } of skipped) {
+    const spans = resolved
+      .slice(offset, offset + unit.spans.length)
+      .map((entry) => entry.span);
+    offset += unit.spans.length;
+    skippedUnits.push({
+      title: unit.title,
+      skip,
+      spans,
+      changedLineCount: spans.reduce(
+        (sum, span) => sum + resolvedSpanChangedLines(snapshot, span).length,
+        0,
+      ),
+    });
+  }
+  return { ...route, skippedUnits } as ReviewRoute;
 }
 
 function coveredKeys(

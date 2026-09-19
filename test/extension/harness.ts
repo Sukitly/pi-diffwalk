@@ -15,6 +15,10 @@ import {
 } from "../../src/extension/prompts.ts";
 import type { DiffWalkRulesLoadResult } from "../../src/extension/rules.ts";
 import type { DiffWalkDependencies } from "../../src/extension/session.ts";
+import type {
+  SkipConfiguration,
+  UnitFeatureJudge,
+} from "../../src/extension/skip.ts";
 import type { ReviewRespondToolSchema } from "../../src/extension/tools.ts";
 import { ReviewSnapshotDriftError } from "../../src/git/errors.ts";
 import type { PathExclusionSources } from "../../src/git/exclusion.ts";
@@ -38,6 +42,7 @@ import type {
   GuidedReviewResult,
   ReviewComment,
   ReviewOpenToolSchema,
+  ReviewRoute,
   ReviewRouteCandidate,
   ReviewSkipCandidateToolSchema,
   ReviewSnapshot,
@@ -86,6 +91,12 @@ export interface HarnessBehavior {
   pathExclusionError?: Error;
   /** Paths that exist for routine references; undefined accepts every path. */
   existingReferencePaths?: readonly string[];
+  skipConfiguration: SkipConfiguration;
+  skipConfigurationError?: Error;
+  /** The judge handed out when automatic skipping is enabled. */
+  unitFeatureJudge?: UnitFeatureJudge;
+  /** Text returned for any routine reference; undefined means unreadable. */
+  referenceText?: string;
   snapshot: ReviewSnapshot;
 }
 
@@ -136,6 +147,8 @@ export interface Harness {
   readonly sentMessageMeta: readonly SentMessageMeta[];
   readonly registeredRenderers: readonly string[];
   readonly openedSnapshots: readonly string[];
+  /** The route each opened walkthrough received, in open order. */
+  readonly openedRoutes: readonly ReviewRoute[];
   readonly openedThreadBatches: readonly string[];
   readonly appendedEntries: readonly AppendedEntry[];
   readonly ruleLoadCalls: readonly RuleLoadCall[];
@@ -162,6 +175,7 @@ export function createHarness(
     globalExcludeFile: { status: "absent" },
     projectExcludeFile: { status: "absent" },
     pathExclusionFacts: { excludedPaths: new Map(), generatedPaths: new Set() },
+    skipConfiguration: { status: "disabled" },
     snapshot: makeSnapshot("snapshot-index", [
       { path: "src/file.ts", lines: [" head", "+changed", " tail"] },
     ]),
@@ -178,6 +192,7 @@ export function createHarness(
   const sentMessageMeta: SentMessageMeta[] = [];
   const registeredRenderers: string[] = [];
   const openedSnapshots: string[] = [];
+  const openedRoutes: ReviewRoute[] = [];
   const openedThreadBatches: string[] = [];
   const appendedEntries: AppendedEntry[] = [];
   const ruleLoadCalls: RuleLoadCall[] = [];
@@ -284,6 +299,23 @@ export function createHarness(
     async locateProjectDiffWalkExcludeFile() {
       return behavior.projectExcludeFile;
     },
+    async readSkipConfiguration() {
+      if (behavior.skipConfigurationError !== undefined) {
+        throw behavior.skipConfigurationError;
+      }
+      return behavior.skipConfiguration;
+    },
+    createUnitFeatureJudge() {
+      const judge = behavior.unitFeatureJudge;
+      assert.ok(
+        judge,
+        "Automatic skipping was enabled without a judge in the harness.",
+      );
+      return judge;
+    },
+    async readReferenceText() {
+      return behavior.referenceText;
+    },
     async routineReferenceExists(_repositoryRoot, path) {
       return (
         behavior.existingReferencePaths === undefined ||
@@ -333,6 +365,8 @@ export function createHarness(
     },
     async openGuidedReview(_ctx, input) {
       openedSnapshots.push(input.review.snapshot.id);
+      if (input.review.route !== undefined)
+        openedRoutes.push(input.review.route);
       let review = input.review;
       if (behavior.markProgressOnOpen) {
         const first = review.unitProgress[0];
@@ -444,6 +478,7 @@ export function createHarness(
     sentMessageMeta,
     registeredRenderers,
     openedSnapshots,
+    openedRoutes,
     openedThreadBatches,
     appendedEntries,
     ruleLoadCalls,
@@ -488,8 +523,15 @@ export function commandContext(
   } as unknown as ExtensionCommandContext;
 }
 
-export function toolContext(): ExtensionContext {
-  return { mode: "tui" } as ExtensionContext;
+export function toolContext(notifications: string[] = []): ExtensionContext {
+  return {
+    mode: "tui",
+    ui: {
+      notify: (message: string) => {
+        notifications.push(message);
+      },
+    },
+  } as unknown as ExtensionContext;
 }
 
 export function binaryChange(): FileChange {
